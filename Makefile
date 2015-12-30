@@ -1,6 +1,12 @@
-TARGET=pakker
-CC=cc
-CFLAGS=-g -Wall -c99
+APP_NAME = "\"Pakka\""
+MAJOR = 1
+MINOR = 0
+BUILD_DATE = "\"$(shell date +'%b %d, %Y')\""
+VERSION = "\"$(MAJOR).$(MINOR)\""
+TARGET=pakka
+CPPFLAGS = -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+CC=cc $(CPPFLAGS)
+CFLAGS=-g -Wall 
 SRC_DIR=src
 
 all: clean ${TARGET}

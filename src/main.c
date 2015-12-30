@@ -31,7 +31,8 @@ int main(int argc, char* argv[]) {
 
 int parseopts(int argc, char* argv[]) {
     if (argc < 2) {
-        fprintf(stderr, "Usage: %s <pak file>\n", argv[0]);
+        fprintf(stderr, "%s %s (%s). Usage:\n", APP_NAME, VERSION, BUILD_DATE);
+        fprintf(stderr, "Usage: %s [options] [pakfile]\n", argv[0]);
         exit(1);
     }
 
