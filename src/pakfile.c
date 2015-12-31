@@ -4,6 +4,8 @@ static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *pak);
 static void load_directory(Pak_t *pak);
 
+FILE *fp;
+
 Pak_t *open_pakfile(const char *pakpath) {
     Pak_t *pak = malloc(sizeof(Pak_t));
 

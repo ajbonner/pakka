@@ -27,8 +27,6 @@ typedef struct {
 } Pak_t;
 
 void error_exit(const char *, ...);
-Pak_t* open_pakfile(const char *);
+Pak_t *open_pakfile(const char *);
 int close_pakfile(Pak_t *);
 void extract_files(Pak_t *, char *);
-
-FILE *fp;
