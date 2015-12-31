@@ -6,9 +6,12 @@ int file_exists(const char *filename) {
 }
 
 /*
- * The contents of this function are a minor modification of a bash 4.1
+ * The contents of this function are a minor modification of bash 4.1's
  * recursive mkdir implementation see ftp://ftp.cwru.edu/pub/bash/bash-4.1.tar.gz
  * (examples/loadables/mkdir.c)
+ *
+ * - removed bash error handling in favour of printing straight to stderr
+ * - removed refs to 'original_umask'
  */
 int mkdir_r(char *path, int nmode, int parent_mode) {
 	int oumask;
