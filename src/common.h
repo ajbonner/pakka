@@ -8,26 +8,27 @@
 
 #define OS_PATH_MAX PATH_MAX
 #define OS_NAME_MAX NAME_MAX
+#define PAKFILE_PATH_MAX 56
+#define PAKFILE_DIR_ENTRY_SIZE 64
 
 typedef struct Pakfileentry_s {
-    char filename[56];
+    char filename[PAKFILE_PATH_MAX];
     unsigned int offset;
     unsigned int length;
+    struct Pakfileentry_s *next;
 } Pakfileentry_t;
 
 typedef struct {
-    unsigned char signature[5];
+    char signature[4];
     unsigned int diroffset;
     unsigned int dirlength;
     unsigned int num_entries;
-    Pakfileentry_t *files;
+    Pakfileentry_t *head;
 } Pak_t;
 
 void error_exit(const char *, ...);
 Pak_t* open_pakfile(const char *);
 int close_pakfile(Pak_t *);
-void extract_files(char *);
+void extract_files(Pak_t *, char *);
 
 FILE *fp;
-Pak_t pak;
-Pakfileentry_t *pak_contents;

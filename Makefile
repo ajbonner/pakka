@@ -6,12 +6,12 @@ VERSION = "\"$(MAJOR).$(MINOR)\""
 TARGET=pakka
 CPPFLAGS = -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 CC=cc $(CPPFLAGS)
-CFLAGS=-g -Wall 
+CFLAGS=-g -Wall
 SRC_DIR=src
 
 all: clean ${TARGET}
 
-clean: 
+clean:
 	rm -rf src/*.o ${TARGET}
 
 ${TARGET}:
