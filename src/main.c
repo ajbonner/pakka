@@ -15,6 +15,7 @@ typedef struct opts_s {
 
 static void extract(Pak_t *, char *, char **, int);
 static void usage(char **);
+static void usage_banner(char **);
 static void help(char **);
 static int parseopts(int, char **, opts_t *);
 static void setmodetype(opts_t *, short, char **);
@@ -130,25 +131,24 @@ void setmodetype(opts_t *opt, short mode, char* argv[]) {
     }
 }
 
-void usage(char *argv[]) {
-    fprintf(stderr, "%s %s (%s). Usage:\n", APP_NAME, VERSION, BUILD_DATE);
+void usage_banner(char *argv[]) {
+    fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
     fprintf(stderr, "Usage: %s -h [-xcar] -f [pak file] [path(s)] -d [destination]\n", argv[0]);
+}
+
+void usage(char *argv[]) {
+    usage_banner(argv);
     exit(1);
 }
 
 void help(char *argv[]) {
-    fprintf(stderr, "%s %s (%s). Usage:\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-xcar] -f [pak file] [path(s)] -d [destination]\n", argv[0]);
+    usage_banner(argv);
 
-    fprintf(stderr, "Examples\n");
-    fprintf(stderr, "Extract contents of pak1.pak to current working path\n");
-    fprintf(stderr, "%s -x -f pak1.pak\n\n", argv[0]);
-
-    fprintf(stderr, "Extract contents of pak1.pak to specified path\n");
-    fprintf(stderr, "%s -x -f pak1.pak -d /some/path\n\n", argv[0]);
-
-    fprintf(stderr, "Extract file models/weapons/g_blast/base.pcx from pak1.pak to current working path\n");
-    fprintf(stderr, "%s -x -f pak1.pak models/weapons/g_blast/base.pcx\n\n", argv[0]);
+    fprintf(stderr, "\nExamples:\n");
+    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", argv[0]);
+    fprintf(stderr, "  %s -xf pak1.pak -d /some/path # Extract pak1.pak to /some/path\n", argv[0]);
+    fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
+    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", argv[0]);
     
     exit(1);
 }
