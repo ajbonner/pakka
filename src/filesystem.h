@@ -6,4 +6,4 @@
 #include <sys/stat.h>
 
 int file_exists(const char *dirname);
-int mkdir_r(char *path, int rmove, int parent_mode);
+int mkdir_r(char *path);
