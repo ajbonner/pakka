@@ -9,16 +9,13 @@ Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
     $ make
 
 ## Usage
-Pakka has 4 major modes
-    * Extract ./pakka -x <pakfile> 
+Pakka has 5 major modes:
 
-    * Create ./pakka -c <pakfile> <list of paths/files>
-    
-    * Add to pak ./pakka -a <pakfile> <list of files>
-
-    * Delete from pak ./pakka -d <pakfile> <paths to remove>
-
-    * List contents ./pakka -t <pakfile>
+* Extract ./pakka -x <pakfile> 
+* Create ./pakka -c <pakfile> <list of paths/files>
+* Add to pak ./pakka -a <pakfile> <list of files>
+* Delete from pak ./pakka -d <pakfile> <paths to remove>
+* List contents ./pakka -t <pakfile>
 
 ## Contributing
 1. Fork it!
@@ -31,7 +28,12 @@ Pakka has 4 major modes
 Created as an excuse to re-learn some C circa December '15-January '16
 
 ## Credits
-Thanks for this random documentation on the [Quake PAK File Format](http://debian.fmi.uni-sofia.bg/~sergei/cgsr/docs/pak.txt)
+John Carmack for not only creating quake, but then open sourcing and its
+successor games. He is the reason I am a programmer today.
+
+I am unsure who the correct author is but I followed this documentation on 
+the [Quake PAK File Format](http://debian.fmi.uni-sofia.bg/~sergei/cgsr/docs/pak.txt)
+in building this utility.
 
 ## License
 MIT
