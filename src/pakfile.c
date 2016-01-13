@@ -50,9 +50,10 @@ void load_pakfile(Pak_t *pak) {
 void load_directory(Pak_t *pak) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
+    int i;
 
     fseek(fp, pak->diroffset, SEEK_SET);
-    for (int i = 0; i < pak->num_entries; i++) {
+    for (i = 0; i < pak->num_entries; i++) {
         current = malloc(sizeof(Pakfileentry_t));
         fread(current->filename, 56, 1, fp);
         fread(&current->offset, 4, 1, fp);
@@ -72,8 +73,6 @@ void extract_files(Pak_t *pak, char *dest) {
     char *destfile, *destdir;
     unsigned char *buffer;
     FILE *tfd;
-	int i;
-	mode_t default_mode = S_IRWXU | S_IRGRP | S_IXGRP | S_IROTH | S_IXOTH;
 
     Pakfileentry_t *current = pak->head;
 
@@ -85,7 +84,7 @@ void extract_files(Pak_t *pak, char *dest) {
 
         destdir = dirname(destfile);
 		
-        if (! (file_exists(destdir)) && (mkdir_r(destdir, default_mode, default_mode) != 0)) {
+        if (! (file_exists(destdir)) && (mkdir_r(destdir) != 0)) {
             error_exit("Cannot create directory %s", destdir);
         }
 
