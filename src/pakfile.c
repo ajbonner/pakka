@@ -69,6 +69,14 @@ void load_directory(Pak_t *pak) {
     pak->head = last;
 }
 
+void list_files(Pak_t *pak) {
+    Pakfileentry_t *current = pak->head;
+
+    do {
+        printf("%s\n", current->filename);
+    } while ((current = current->next) != NULL);
+}
+
 void extract_files(Pak_t *pak, char *dest) {
     char *destfile, *destdir;
     unsigned char *buffer;

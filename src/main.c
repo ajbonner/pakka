@@ -4,6 +4,7 @@
 #define PAK_CREATE  2
 #define PAK_ADD     4
 #define PAK_REMOVE  8
+#define PAK_LIST    16
 
 typedef struct opts_s {
     short mode;
@@ -13,6 +14,7 @@ typedef struct opts_s {
     int path_count;
 } opts_t;
 
+static void listpakfiles(Pak_t *);
 static void extract(Pak_t *, char *, char **, int);
 static void usage(char **);
 static void usage_banner(char **);
@@ -25,13 +27,11 @@ int main(int argc, char *argv[]) {
     parseopts(argc, argv, &opts);
 
     Pak_t *pak = open_pakfile(opts.pakfile);
-    Pakfileentry_t *e = pak->head;
     
-    do {
-        printf("%s\n", e->filename);
-    } while ((e = e->next) != NULL);
-
     switch (opts.mode) {
+        case PAK_LIST:
+            listpakfiles(pak);
+            break;
         case PAK_EXTRACT:
             extract(pak, opts.destination, opts.paths, opts.path_count);
             break;
@@ -50,6 +50,10 @@ int main(int argc, char *argv[]) {
     free(opts.paths);
 
     return 0;
+}
+
+void listpakfiles(Pak_t *pak) {
+    list_files(pak);
 }
 
 void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
@@ -76,8 +80,11 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
         usage(argv);
     }
 
-    while ((c = getopt(argc, argv, "xcarhf:d:")) != -1) {
+    while ((c = getopt(argc, argv, "lxcarhf:d:")) != -1) {
         switch (c) {
+            case 'l':
+                setmodetype(opts, PAK_LIST, argv);
+                break;
             case 'x':
                 setmodetype(opts, PAK_EXTRACT, argv);
                 break;
@@ -133,7 +140,7 @@ void setmodetype(opts_t *opt, short mode, char* argv[]) {
 
 void usage_banner(char *argv[]) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-xcar] -f [pak file] [path(s)] -d [destination]\n", argv[0]);
+    fprintf(stderr, "Usage: %s -h [-lxcar] -f [pak file] [path(s)] -d [destination]\n", argv[0]);
 }
 
 void usage(char *argv[]) {
