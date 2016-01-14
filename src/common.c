@@ -7,6 +7,12 @@ void error_exit(const char *format, ...) {
     va_start(args, format);
     vsnprintf(msg, 1000, format, args);
     va_end(args);
-    fprintf(stderr, "%s: %s\n", msg, strerror(errno));
+
+    if (errno) {
+        fprintf(stderr, "%s: %s\n", msg, strerror(errno));
+    } else {
+        fprintf(stderr, "%s\n", msg);
+    }
+
     exit(1);
 }

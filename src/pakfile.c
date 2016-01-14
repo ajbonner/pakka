@@ -19,16 +19,38 @@ Pak_t *open_pakfile(const char *pakpath) {
     return pak;
 }
 
-int close_pakfile(Pak_t *pak) {
-    Pakfileentry_t *e = pak->head->next;
-    
-    if (e != NULL) {
-        do {
-            free(e);
-        } while ((e = e->next) != NULL);
+Pak_t *create_pakfile(const char *pakpath) {
+    Pak_t *pak = calloc(sizeof(Pak_t), 1);
+
+    struct stat sb;
+
+    if (stat(pakpath, &sb) == 0) {
+        error_exit("File already exists at destination %s", pakpath);
     }
 
-    free(pak->head);
+    if (! (fp = fopen(pakpath, "w"))) {
+        error_exit("Cannot open pak file %s", pakpath); 
+    }
+
+    /* write a zero length pak to disk and return a pointer to it */
+    return pak;
+}
+
+int close_pakfile(Pak_t *pak) {
+    Pakfileentry_t *e;
+
+    if (pak->head != NULL) {
+        e = pak->head->next;
+        
+        if (e != NULL) {
+            do {
+                free(e);
+            } while ((e = e->next) != NULL);
+        }
+
+        free(pak->head);
+    }
+
     free(pak);
 
     return fclose(fp);

@@ -14,19 +14,26 @@ typedef struct opts_s {
     int path_count;
 } opts_t;
 
+char *name;
 static void listpakfiles(Pak_t *);
 static void extract(Pak_t *, char *, char **, int);
-static void usage(char **);
-static void usage_banner(char **);
-static void help(char **);
+static void usage();
+static void usage_banner();
+static void help();
 static int parseopts(int, char **, opts_t *);
-static void setmodetype(opts_t *, short, char **);
+static void setmodetype(opts_t *, short);
 
 int main(int argc, char *argv[]) {
+    name = argv[0];
     opts_t opts;
     parseopts(argc, argv, &opts);
-
-    Pak_t *pak = open_pakfile(opts.pakfile);
+    Pak_t *pak;
+    
+    if (opts.mode == PAK_CREATE) {
+        pak = create_pakfile(opts.pakfile);
+    } else {
+        pak = open_pakfile(opts.pakfile);
+    }
     
     switch (opts.mode) {
         case PAK_LIST:
@@ -36,10 +43,11 @@ int main(int argc, char *argv[]) {
             extract(pak, opts.destination, opts.paths, opts.path_count);
             break;
         case PAK_ADD:
+        case PAK_CREATE:
+            printf("Not implemented\n");
             break;
         case PAK_REMOVE:
-            break;
-        case PAK_CREATE:
+            printf("Not implemented\n");
             break;
         default:
             fprintf(stderr, "Unknown operation mode selected\n");
@@ -77,25 +85,25 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
     int c;
     
     if (argc < 2) {
-        usage(argv);
+        usage();
     }
 
     while ((c = getopt(argc, argv, "lxcarhf:d:")) != -1) {
         switch (c) {
             case 'l':
-                setmodetype(opts, PAK_LIST, argv);
+                setmodetype(opts, PAK_LIST);
                 break;
             case 'x':
-                setmodetype(opts, PAK_EXTRACT, argv);
+                setmodetype(opts, PAK_EXTRACT);
                 break;
             case 'c':
-                setmodetype(opts, PAK_CREATE, argv);
+                setmodetype(opts, PAK_CREATE);
                 break;
             case 'a':
-                setmodetype(opts, PAK_ADD, argv);
+                setmodetype(opts, PAK_ADD);
                 break;
             case 'r':
-                setmodetype(opts, PAK_REMOVE, argv);
+                setmodetype(opts, PAK_REMOVE);
                 break;
             case 'f':
                 opts->pakfile = optarg;
@@ -104,7 +112,7 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
                 opts->destination = optarg;
                 break;
             case 'h':
-                help(argv);
+                help();
                 break;
         }
     }
@@ -117,45 +125,55 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
     }
 
     if (! opts->mode) {
-        fprintf(stderr, "You must specify one -xcar option\n");
-        usage(argv);
+        fprintf(stderr, "You must specify one -lxcar option\n");
+        usage();
     }
 
     if (! opts->pakfile) {
         fprintf(stderr, "You must specify a pakfile name with -f\n");
-        usage(argv);
+        usage();
     }
 
     return 0;
 }
 
-void setmodetype(opts_t *opt, short mode, char* argv[]) {
+void setmodetype(opts_t *opt, short mode) {
     if (! opt->mode) {
         opt->mode = mode;
     } else {
-        fprintf(stderr, "You may not specify more than one -xcar option\n");
-        usage(argv);
+        fprintf(stderr, "You may not specify more than one -lxcar option\n");
+        usage();
     }
 }
 
-void usage_banner(char *argv[]) {
+void usage_banner() {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-lxcar] -f [pak file] [path(s)] -d [destination]\n", argv[0]);
+    fprintf(stderr, "Usage: %s -h [-lxcar] -f [pak file] [path(s)] -d [destination]\n", name);
 }
 
-void usage(char *argv[]) {
-    usage_banner(argv);
+void usage() {
+    usage_banner();
     exit(1);
 }
 
-void help(char *argv[]) {
-    usage_banner(argv);
+void help() {
+    usage_banner();
+
+    fprintf(stderr, "\nOperation Modes:\n");
+    fprintf(stderr, "You must specify one [lxcar] option\n");
+    fprintf(stderr, " -l    list files contained in pak file\n");
+    fprintf(stderr, " -x    extract files from pak file\n");
+    fprintf(stderr, " -c    create a new pak file\n");
+    fprintf(stderr, " -a    add files to pak file\n");
+    fprintf(stderr, " -r    remove files from pak file\n");
+    fprintf(stderr, " -h    this help\n");
 
     fprintf(stderr, "\nExamples:\n");
-    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", argv[0]);
-    fprintf(stderr, "  %s -xf pak1.pak -d /some/path # Extract pak1.pak to /some/path\n", argv[0]);
+    fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", name);
+    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", name);
+    fprintf(stderr, "  %s -xf pak1.pak -d /some/path # Extract pak1.pak to /some/path\n", name);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
-    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", argv[0]);
+    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", name);
     
     exit(1);
 }
