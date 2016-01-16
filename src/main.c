@@ -44,7 +44,7 @@ int main(int argc, char *argv[]) {
             break;
         case PAK_ADD:
         case PAK_CREATE:
-            printf("Not implemented\n");
+            add_files(pak, opts.paths, opts.path_count);
             break;
         case PAK_REMOVE:
             printf("Not implemented\n");
