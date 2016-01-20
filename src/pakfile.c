@@ -1,4 +1,5 @@
 #include "common.h"
+#include "dirent.h"
 
 static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *pak);
@@ -119,7 +120,7 @@ int add_files(Pak_t *pak, char **paths, int path_count) {
     int i;
 
     for (i = 0; i < path_count; i++) {
-        if (add_file(pak, paths[i]) != 0) {
+        if (add_to_pak(pak, paths[i]) != 0) {
             error_exit("Could not add %s to pak", paths[i]);
         }
     }
@@ -129,21 +130,61 @@ int add_files(Pak_t *pak, char **paths, int path_count) {
     return 0;
 }
 
-int add_file(Pak_t *pak, char* path) {
+int add_to_pak(Pak_t *pak, char* path) {
     struct stat sb;
+
+    if (stat(path, &sb) != 0) {
+        error_exit("Cannot add %s", path);
+    } else if (S_ISREG(sb.st_mode)) {
+        add_file(pak, path);
+    } else if (S_ISDIR(sb.st_mode)) {
+        add_folder(pak, path);
+    } else {
+        error_exit("Error adding %s: can only add regular files and folders", path);
+    }
+
+    return 0;
+}
+
+int add_folder(Pak_t *pak, char *path) {
+    DIR *d;
+    struct dirent *dirp;
+    struct stat sb;
+    char tmp[255];
+
+    if (! (d = opendir(path))) {
+        error_exit("Cannot open directory %s", path);
+    }
+
+    while ((dirp = readdir(d)) != NULL) {
+        tmp[0] = '\0';
+        if (strcmp(dirp->d_name, "..") == 0
+           || strcmp(dirp->d_name, ".") == 0) {
+            continue;
+        }
+        
+        build_filename(path, dirp->d_name, tmp);
+        
+        if (stat(tmp, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) {
+                add_folder(pak, tmp);
+            } else if (S_ISREG(sb.st_mode)) {
+                add_file(pak, tmp);
+            }
+        } else {
+            error_exit("Couldn't stat %s", tmp);
+        }
+    }
+
+    return 0;
+}
+
+int add_file(Pak_t *pak, char *path) {
     FILE *tfd;
     int size;
     Pakfileentry_t *tail;
     Pakfileentry_t *entry;
     unsigned char byte[1];
-
-    if (stat(path, &sb) != 0) {
-        error_exit("Cannot add %s", path);
-    } else {
-        if (! S_ISREG(sb.st_mode)) {
-            error_exit("Error adding %s: can only add regular files", path);
-        }
-    }
 
     printf("Adding %s to pak\n", path);
     
@@ -152,7 +193,7 @@ int add_file(Pak_t *pak, char* path) {
     }
 
     entry = calloc(sizeof(Pakfileentry_t), 1);
-    
+
     size = filesize(tfd);
     tail = find_tail(pak);
     /* this will be the new head */
@@ -254,6 +295,10 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
 void write_pak_directory(Pak_t *pak) {
     fseek(fp, 0L, SEEK_END);
     Pakfileentry_t *current = pak->head; 
+
+    if (current == NULL) {
+        return;
+    }
 
     pak->diroffset = ftell(fp);
 
