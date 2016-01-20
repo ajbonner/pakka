@@ -7,6 +7,7 @@ static void load_directory(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
 static int filesize (FILE *fd);
 static void write_pak_directory(Pak_t *pak);
+static void debug_directory_entry(Pakfileentry_t *entry);
 
 FILE *fp;
 
@@ -36,7 +37,7 @@ Pak_t *create_pakfile(const char *pakpath) {
     }
 
     strncpy(pak->signature, "PACK", 4);
-    pak->diroffset = 4;
+    pak->diroffset = 12;
     pak->dirlength = 0;
     
     if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
@@ -146,6 +147,50 @@ int add_to_pak(Pak_t *pak, char* path) {
     return 0;
 }
 
+int add_file(Pak_t *pak, char *path) {
+    FILE *tfd;
+    int size;
+    Pakfileentry_t *tail;
+    Pakfileentry_t *entry;
+    char *bytes;
+
+    printf("Adding %s to pak\n", path);
+    
+    if (! (tfd = fopen(path, "r"))) {
+        error_exit("Cannot open %s", path);
+    }
+
+    entry = calloc(sizeof(Pakfileentry_t), 1);
+
+    /* add data to pack */
+    size = filesize(tfd);
+    bytes = malloc(sizeof(char) * size);
+    while (fread(bytes, size, 1, tfd)) {
+        if (fwrite(bytes, size, 1, fp) == -1)  {
+            free(bytes);
+            error_exit("Could not add %s to pak\n", path);
+        }
+    }
+    free(bytes);
+
+    /* add entry to directory linked list */
+    tail = find_tail(pak);
+    if (tail == NULL) { /* this will be the new head */
+        strcpy(entry->filename, path);
+        entry->length = size;
+        entry->offset = pak->diroffset;
+        pak->head = entry;
+    } else { /* this will be added to the tail */
+        strcpy(entry->filename, path);
+        entry->length = size;
+        entry->offset = tail->offset + tail->length;
+        tail->next = entry;
+    }
+
+    fclose(tfd);
+    return 0;
+}
+
 int add_folder(Pak_t *pak, char *path) {
     DIR *d;
     struct dirent *dirp;
@@ -176,46 +221,6 @@ int add_folder(Pak_t *pak, char *path) {
         }
     }
 
-    return 0;
-}
-
-int add_file(Pak_t *pak, char *path) {
-    FILE *tfd;
-    int size;
-    Pakfileentry_t *tail;
-    Pakfileentry_t *entry;
-    unsigned char byte[1];
-
-    printf("Adding %s to pak\n", path);
-    
-    if (! (tfd = fopen(path, "r"))) {
-        error_exit("Cannot open %s", path);
-    }
-
-    entry = calloc(sizeof(Pakfileentry_t), 1);
-
-    size = filesize(tfd);
-    tail = find_tail(pak);
-    /* this will be the new head */
-    if (tail == NULL) {
-        strcpy(entry->filename, path);
-        entry->length = size;
-        entry->offset = pak->diroffset;
-        pak->head = entry;
-    } else { /* this will be added to the tail */
-        strcpy(entry->filename, path);
-        entry->length = size;
-        entry->offset = tail->offset + tail->length;
-        tail->next = entry;
-    }
-
-    while (fread(byte, 1, 1, tfd)) {
-        if (fwrite(byte, 1, 1, fp) == -1)  {
-            error_exit("Could not add %s to pak\n", path);
-        }
-    }
-
-    fclose(tfd);
     return 0;
 }
 
@@ -285,9 +290,9 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
         return pak->head;
     }
 
-    tail = pak->head;
+    tail = pak->head->next;
 
-    while ((tail = tail->next) != NULL);
+    while (tail->next != NULL) { tail = tail->next; }
 
     return tail;
 }
@@ -296,6 +301,7 @@ void write_pak_directory(Pak_t *pak) {
     fseek(fp, 0L, SEEK_END);
     Pakfileentry_t *current = pak->head; 
 
+    /* i.e. pak contains no entries */
     if (current == NULL) {
         return;
     }
@@ -311,4 +317,13 @@ void write_pak_directory(Pak_t *pak) {
 
     fseek(fp, 0L, SEEK_SET);
     fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp);
+}
+
+void debug_directory_entry(Pakfileentry_t *entry) {
+    if (entry == NULL) { fprintf(stderr, "Null pak entry\n"); }
+
+    fprintf(stderr, "%s\n", entry->filename);
+    fprintf(stderr, "%u\n", entry->offset);
+    fprintf(stderr, "%u\n", entry->length);
+    fprintf(stderr, "%p\n", entry->next);
 }
