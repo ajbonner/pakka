@@ -5,10 +5,13 @@ static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *pak);
 static void load_directory(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
-static int filesize (FILE *fd);
+static int write_pak_header(Pak_t *pak);
 static void write_pak_directory(Pak_t *pak);
 static void debug_directory_entry(Pakfileentry_t *entry);
 
+int is_new = 0;
+char new_pakpath[OS_PATH_MAX];
+char tmp_pakpath[L_tmpnam];
 FILE *fp;
 
 Pak_t *open_pakfile(const char *pakpath) {
@@ -28,20 +31,24 @@ Pak_t *create_pakfile(const char *pakpath) {
     Pak_t *pak = calloc(sizeof(Pak_t), 1);
     struct stat sb;
 
+    is_new = 1;
+    strcpy(tmp_pakpath, "/tmp/pakkaXXXXXX");
+    strcpy(new_pakpath, pakpath);
+
     if (stat(pakpath, &sb) == 0) {
         error_exit("File already exists at destination %s", pakpath);
     }
 
-    if (! (fp = fopen(pakpath, "w"))) {
-        error_exit("Cannot open pak file %s", pakpath); 
+    if (! mkstemp(tmp_pakpath)) {
+        error_exit("Cannot create temp pak file");
     }
 
-    strncpy(pak->signature, "PACK", 4);
-    pak->diroffset = 12;
-    pak->dirlength = 0;
-    
-    if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
-        error_exit("Cannot write to %s", pakpath);
+    if (! (fp = fopen(tmp_pakpath, "w"))) {
+        error_exit("Cannot open %s", tmp_pakpath);
+    }
+
+    if (write_pak_header(pak) != 0) {
+        error_exit("Cannot write to temp pak file");
     }
 
     return pak;
@@ -64,7 +71,15 @@ int close_pakfile(Pak_t *pak) {
 
     free(pak);
 
-    return fclose(fp);
+    if (is_new) {
+        if (rename(tmp_pakpath, new_pakpath) == -1) {
+            error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
+        }
+    }
+
+    fclose(fp);
+
+    return 0;
 }
 
 void load_pakfile(Pak_t *pak) {
@@ -269,16 +284,6 @@ void build_filename(char *basedir, char *filename, char *dest) {
     strcat(dest, filename);
 }
 
-int filesize(FILE *fd) {
-    int size;
-
-    fseek(fd, 0L, SEEK_END);
-    size = ftell(fd);
-    rewind(fd);
-
-    return size;
-}
-
 Pakfileentry_t *find_tail(Pak_t *pak) {
     Pakfileentry_t *tail;
 
@@ -295,6 +300,18 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
     while (tail->next != NULL) { tail = tail->next; }
 
     return tail;
+}
+
+int write_pak_header(Pak_t *pak) {
+    strncpy(pak->signature, "PACK", 4);
+    pak->diroffset = 12;
+    pak->dirlength = 0;
+    
+    if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
+        return -1;
+    }
+
+    return 0;
 }
 
 void write_pak_directory(Pak_t *pak) {

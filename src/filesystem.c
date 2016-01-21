@@ -49,3 +49,13 @@ int mkdir_r(char *path) {
 
     return 0;
 }
+
+int filesize(FILE *fd) {
+    int size;
+
+    fseek(fd, 0L, SEEK_END);
+    size = ftell(fd);
+    rewind(fd);
+
+    return size;
+}

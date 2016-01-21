@@ -7,3 +7,4 @@
 
 int file_exists(const char *dirname);
 int mkdir_r(char *path);
+int filesize (FILE *fd);
