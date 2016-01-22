@@ -5,7 +5,7 @@ static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *pak);
 static void load_directory(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
-static int write_pak_header(Pak_t *pak);
+static void init_pak_header(Pak_t *pak);
 static void write_pak_directory(Pak_t *pak);
 static void debug_directory_entry(Pakfileentry_t *entry);
 
@@ -17,7 +17,7 @@ FILE *fp;
 Pak_t *open_pakfile(const char *pakpath) {
     Pak_t *pak = calloc(sizeof(Pak_t), 1);
 
-    if (! (fp = fopen(pakpath, "r"))) {
+    if (! (fp = fopen(pakpath, "r+"))) {
         error_exit("Cannot open %s", pakpath);
     }
 
@@ -47,9 +47,7 @@ Pak_t *create_pakfile(const char *pakpath) {
         error_exit("Cannot open %s", tmp_pakpath);
     }
 
-    if (write_pak_header(pak) != 0) {
-        error_exit("Cannot write to temp pak file");
-    }
+    init_pak_header(pak);
 
     return pak;
 }
@@ -98,11 +96,14 @@ void load_pakfile(Pak_t *pak) {
 void load_directory(Pak_t *pak) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
-    int i;
+    int i, entry_pos;
 
-    fseek(fp, pak->diroffset, SEEK_SET);
     if (pak->num_entries > 0) {
-        for (i = 0; i < pak->num_entries; i++) {
+        for (i = 1; i <= pak->num_entries; i++) {
+            entry_pos = pak->diroffset + pak->dirlength 
+                - (i * PAKFILE_DIR_ENTRY_SIZE);
+            fseek(fp, entry_pos, SEEK_SET);
+
             current = malloc(sizeof(Pakfileentry_t));
             fread(current->filename, 56, 1, fp);
             fread(&current->offset, 4, 1, fp);
@@ -177,6 +178,14 @@ int add_file(Pak_t *pak, char *path) {
 
     entry = calloc(sizeof(Pakfileentry_t), 1);
 
+    /* identify where in the pak file we should append file */
+    tail = find_tail(pak);
+    if (tail == NULL) {
+        fseek(fp, PAKFILE_HEADER_SIZE, SEEK_SET);
+    } else {
+        fseek(fp, tail->offset + tail->length, SEEK_SET);
+    }
+    
     /* add data to pack */
     size = filesize(tfd);
     bytes = malloc(sizeof(char) * size);
@@ -189,11 +198,10 @@ int add_file(Pak_t *pak, char *path) {
     free(bytes);
 
     /* add entry to directory linked list */
-    tail = find_tail(pak);
     if (tail == NULL) { /* this will be the new head */
         strcpy(entry->filename, path);
         entry->length = size;
-        entry->offset = pak->diroffset;
+        entry->offset = PAKFILE_HEADER_SIZE;
         pak->head = entry;
     } else { /* this will be added to the tail */
         strcpy(entry->filename, path);
@@ -203,6 +211,7 @@ int add_file(Pak_t *pak, char *path) {
     }
 
     fclose(tfd);
+
     return 0;
 }
 
@@ -302,28 +311,25 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
     return tail;
 }
 
-int write_pak_header(Pak_t *pak) {
+void init_pak_header(Pak_t *pak) {
     strncpy(pak->signature, "PACK", 4);
     pak->diroffset = 12;
     pak->dirlength = 0;
-    
-    if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
-        return -1;
-    }
-
-    return 0;
 }
 
 void write_pak_directory(Pak_t *pak) {
-    fseek(fp, 0L, SEEK_END);
     Pakfileentry_t *current = pak->head; 
+    Pakfileentry_t *tail;
 
     /* i.e. pak contains no entries */
     if (current == NULL) {
         return;
     }
 
-    pak->diroffset = ftell(fp);
+    tail = find_tail(pak);
+    pak->diroffset = tail->offset + tail->length;
+    pak->dirlength = 0;
+    fseek(fp, pak->diroffset, SEEK_SET);
 
     do {
         if (fwrite(current, PAKFILE_DIR_ENTRY_SIZE, 1, fp) == -1) {
@@ -333,11 +339,14 @@ void write_pak_directory(Pak_t *pak) {
     } while ((current = current->next) != NULL);
 
     fseek(fp, 0L, SEEK_SET);
-    fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp);
+    
+    if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
+        error_exit("Cannot write pak header");
+    }
 }
 
 void debug_directory_entry(Pakfileentry_t *entry) {
-    if (entry == NULL) { fprintf(stderr, "Null pak entry\n"); }
+    if (entry == NULL) { fprintf(stderr, "Null pak entry\n"); return; }
 
     fprintf(stderr, "%s\n", entry->filename);
     fprintf(stderr, "%u\n", entry->offset);
