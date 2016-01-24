@@ -28,7 +28,7 @@ Pakka has 5 major modes:
 * Create ./pakka -cf <pakfile.pak> <list of paths/files to add>
 * Add to pak ./pakka -af <pakfile.pak> <list of files to add>
 * Delete from pak ./pakka -df <pakfile.pak> <list of paths to remove>
-* List pak contents ./pakka -tf <pakfile.pak>
+* List pak contents ./pakka -lf <pakfile.pak>
 
 ## Contributing
 1. Fork it!

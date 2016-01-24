@@ -88,7 +88,7 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
         usage();
     }
 
-    while ((c = getopt(argc, argv, "lxcarhf:d:")) != -1) {
+    while ((c = getopt(argc, argv, "lxcadhf:C:")) != -1) {
         switch (c) {
             case 'l':
                 setmodetype(opts, PAK_LIST);
@@ -102,13 +102,13 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
             case 'a':
                 setmodetype(opts, PAK_ADD);
                 break;
-            case 'r':
+            case 'd':
                 setmodetype(opts, PAK_REMOVE);
                 break;
             case 'f':
                 opts->pakfile = optarg;
                 break;
-            case 'd':
+            case 'C':
                 opts->destination = optarg;
                 break;
             case 'h':
@@ -125,7 +125,7 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
     }
 
     if (! opts->mode) {
-        fprintf(stderr, "You must specify one -lxcar option\n");
+        fprintf(stderr, "You must specify one -lxcad option\n");
         usage();
     }
 
@@ -141,14 +141,14 @@ void setmodetype(opts_t *opt, short mode) {
     if (! opt->mode) {
         opt->mode = mode;
     } else {
-        fprintf(stderr, "You may not specify more than one -lxcar option\n");
+        fprintf(stderr, "You may not specify more than one -lxcad option\n");
         usage();
     }
 }
 
 void usage_banner() {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-lxcar] -f [pak file] [path(s)] -d [destination]\n", name);
+    fprintf(stderr, "Usage: %s -h [-lxcad] -f [pak file] -C [destination path] [path(s)]\n", name);
 }
 
 void usage() {
@@ -160,18 +160,19 @@ void help() {
     usage_banner();
 
     fprintf(stderr, "\nOperation Modes:\n");
-    fprintf(stderr, "You must specify one [lxcar] option\n");
+    fprintf(stderr, "You must specify one [lxcad] option\n");
     fprintf(stderr, " -l    list files contained in pak file\n");
     fprintf(stderr, " -x    extract files from pak file\n");
     fprintf(stderr, " -c    create a new pak file\n");
     fprintf(stderr, " -a    add files to pak file\n");
-    fprintf(stderr, " -r    remove files from pak file\n");
+    fprintf(stderr, " -d    remove files from pak file\n");
+
     fprintf(stderr, " -h    this help\n");
 
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", name);
     fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", name);
-    fprintf(stderr, "  %s -xf pak1.pak -d /some/path # Extract pak1.pak to /some/path\n", name);
+    fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", name);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
     fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", name);
     
