@@ -47,7 +47,7 @@ int main(int argc, char *argv[]) {
             add_files(pak, opts.paths, opts.path_count);
             break;
         case PAK_REMOVE:
-            printf("Not implemented\n");
+            delete_files(pak, opts.paths, opts.path_count);
             break;
         default:
             fprintf(stderr, "Unknown operation mode selected\n");

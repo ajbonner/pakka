@@ -33,6 +33,9 @@ Pak_t *create_pakfile(const char *);
 int close_pakfile(Pak_t *);
 void list_files(Pak_t *);
 void extract_files(Pak_t *, char *);
+void delete_files(Pak_t *, char **, int);
+void debug_header(Pak_t *); 
+void debug_directory_entry(Pakfileentry_t *);
 
 int add_file(Pak_t *, char *);
 int add_to_pak(Pak_t *, char *);

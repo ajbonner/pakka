@@ -2,19 +2,25 @@
 #include "dirent.h"
 
 static void build_filename(char *basedir, char *filename, char *dest);
-static void load_pakfile(Pak_t *pak);
-static void load_directory(Pak_t *pak);
-static Pakfileentry_t *find_tail(Pak_t *pak);
-static void init_pak_header(Pak_t *pak);
-static void write_pak_directory(Pak_t *pak);
-static void debug_directory_entry(Pakfileentry_t *entry);
+static void load_pakfile(Pak_t *);
+static void load_directory(Pak_t *);
+static Pakfileentry_t *find_tail(Pak_t *);
+static void init_pak_header(Pak_t *);
+static void write_pak_directory(Pak_t *);
+static Pakfileentry_t *find_entry(Pak_t *, char *);
+static int delete_entries(Pak_t *, Pakfileentry_t **, int);
+static int copy_between_paks(Pakfileentry_t *, FILE *, FILE *);
+static FILE *create_tmp_pakfile();
+static int in_array(Pakfileentry_t *, Pakfileentry_t **, int);
 
 int is_new = 0;
+char cur_pakpath[OS_PATH_MAX];
 char new_pakpath[OS_PATH_MAX];
 char tmp_pakpath[L_tmpnam];
 FILE *fp;
 
 Pak_t *open_pakfile(const char *pakpath) {
+    strcpy(cur_pakpath, pakpath);
     Pak_t *pak = calloc(sizeof(Pak_t), 1);
 
     if (! (fp = fopen(pakpath, "r+"))) {
@@ -129,7 +135,7 @@ void list_files(Pak_t *pak) {
     }
 
     do {
-        printf("%s\n", current->filename);
+        printf("%s (%d bytes)\n", current->filename, current->length);
     } while ((current = current->next) != NULL);
 }
 
@@ -287,8 +293,141 @@ void extract_files(Pak_t *pak, char *dest) {
     } while ((current = current->next) != NULL);
 }
 
+void delete_files(Pak_t *pak, char *paths[], int path_count) {
+    int i;
+    Pakfileentry_t *entry;
+    Pakfileentry_t **to_delete;
+
+    to_delete = calloc(sizeof(Pakfileentry_t *), path_count);
+
+    /* search directory for paths */
+    for (i = 0; i < path_count; i++) {
+        if ((entry = find_entry(pak, paths[i])) != NULL) {
+            to_delete[i] = entry;
+        } else {
+            error_exit("Cannot find %s in pak file", paths[i]);
+        }
+    }
+
+    /*for (i = 0; i < path_count; i++) {*/
+        /*debug_directory_entry(to_delete[i]);*/
+    /*}*/
+
+    if (delete_entries(pak, to_delete, path_count) != 0) {
+        error_exit("Could not remove paths from pak file");
+    }
+}
+
+Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
+    Pakfileentry_t *current;
+
+    if (pak->head == NULL) {
+        return NULL;
+    }
+
+    current = pak->head;
+
+    do {
+        if (strcmp(current->filename, path) == 0) {
+            return current;
+        }
+    } while ((current = current->next) != NULL);
+    
+    return NULL;
+}
+
+/**
+ * It would be easy to just assume files are stored in the pak file in the
+ * same order as they are listed in the directory. But there is no
+ * specification that this is the case. So, when we remove a file, we have to
+ * get a list of entries sorted by file position and move up everything that
+ * comes after the removed file. 
+ *
+ * The relevant directory entries need to reflect these movements.
+ *
+ * There's an obvious optimization here, don't collapse the file 
+ * until all modifications are complete but for now we'll do it naively
+ */
+int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
+    Pakfileentry_t *current = NULL;
+    Pakfileentry_t *last = NULL;
+    FILE *tfd;
+    FILE *tempfp;
+    
+    if ((current = pak->head) == NULL) {
+        return -1;
+    }
+    
+    tfd = create_tmp_pakfile();
+
+    /* need to delete entry's bytes from file, and move everything up to fill
+     * the newly empty space - then update the directory with new offsets */
+    do {
+        if (! in_array(current, entries, num_entries)) {
+            copy_between_paks(current, fp, tfd);
+                
+            if (last != NULL) {
+                last->next = current;
+            }
+
+            last = current;
+        }
+        
+        /* handle end of list use case */
+        if (current->next == NULL && last != NULL && last != current) {
+           last->next = NULL; 
+        } 
+    } while ((current = current->next) != NULL);
+
+    /* incase last item in linked list was one that was deleted */
+   
+    tempfp = fp;
+    fp = tfd;
+    write_pak_directory(pak);
+    fp = tempfp;
+
+    fclose(tfd);
+    
+    if (rename(tmp_pakpath, cur_pakpath) == -1) {
+        error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
+    }
+
+    return 0;
+}
+
+int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd) {
+    char *buffer;
+    buffer = calloc(entry->length, 1);
+    fseek(ffd, entry->offset, SEEK_SET);
+
+    if (fread(buffer, entry->length, 1, ffd) <= 0) {
+        free(buffer);
+        error_exit("Error reading from source pak\n");
+    }
+   
+    entry->offset = ftell(tfd);
+    if (fwrite(buffer, entry->length, 1, tfd) <= 0) {
+        free(buffer);
+        error_exit("Error writing to dest pak\n");
+    }
+
+    free(buffer);
+    return 0;
+}
+
+int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries) {
+    int i;
+    for (i = 0; i < num_entries; i++) {
+        if (entries[i] == entry) {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
 void build_filename(char *basedir, char *filename, char *dest) {
-    strcat(dest, basedir) ;
+    strcat(dest, basedir);
     strcat(dest, "/");
     strcat(dest, filename);
 }
@@ -336,20 +475,35 @@ void write_pak_directory(Pak_t *pak) {
             error_exit("Cannot write new pak directory");
         }
         pak->dirlength += PAKFILE_DIR_ENTRY_SIZE;
+#ifndef _DEBUG
+        debug_directory_entry(current);
+#endif
     } while ((current = current->next) != NULL);
 
     fseek(fp, 0L, SEEK_SET);
-    
+        
+#ifndef _DEBUG
+    debug_header(pak);
+#endif
     if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) == -1) {
         error_exit("Cannot write pak header");
     }
 }
 
-void debug_directory_entry(Pakfileentry_t *entry) {
-    if (entry == NULL) { fprintf(stderr, "Null pak entry\n"); return; }
+FILE *create_tmp_pakfile() {
+    FILE *tfd;
 
-    fprintf(stderr, "%s\n", entry->filename);
-    fprintf(stderr, "%u\n", entry->offset);
-    fprintf(stderr, "%u\n", entry->length);
-    fprintf(stderr, "%p\n", entry->next);
+    strcpy(tmp_pakpath, "/tmp/pakkaXXXXXX");
+
+    if (! mkstemp(tmp_pakpath)) {
+        error_exit("Cannot create temp pak file name");
+    }
+
+    if (! (tfd = fopen(tmp_pakpath, "w"))) {
+        error_exit("Cannot open %s", tmp_pakpath);
+    }
+
+    fseek(tfd, sizeof(PAKFILE_HEADER_SIZE), SEEK_SET);
+
+    return tfd;
 }
