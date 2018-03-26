@@ -1,6 +1,16 @@
 #include <stdarg.h>
 #include "common.h"
 
+char *_dirname(const char * path) {
+#ifdef _WIN32
+	char *dir = malloc(sizeof(path));
+	_splitpath(path, NULL, dir, NULL, NULL);
+	return dir;
+#else
+	return dirname(path);
+#endif
+}
+
 void error_exit(const char *format, ...) {
     char msg[1000];
     va_list args;

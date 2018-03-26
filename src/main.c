@@ -1,29 +1,13 @@
 #include "common.h"
 
-#define PAK_EXTRACT 1
-#define PAK_CREATE  2
-#define PAK_ADD     4
-#define PAK_REMOVE  8
-#define PAK_LIST    16
-
-typedef struct opts_s {
-    short mode;
-    char *pakfile;
-    char *destination;
-    char **paths;
-    int path_count;
-} opts_t;
-
 char *name;
-static void listpakfiles(Pak_t *);
-static void extract(Pak_t *, char *, char **, int);
-static void usage();
-static void usage_banner();
-static void help();
-static int parseopts(int, char **, opts_t *);
-static void setmodetype(opts_t *, short);
+void listpakfiles(Pak_t *);
+void extract(Pak_t *, char *, char **, int);
+void usage();
+void usage_banner();
+void help();
 
-int main(int argc, char *argv[]) {
+int main(int argc, char* argv[]) {
     name = argv[0];
     opts_t opts;
     parseopts(argc, argv, &opts);
@@ -71,79 +55,14 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
         if (realpath(destination, realdest) == NULL) {
            error_exit("Cannot open destination path '%s'", destination);
         }
-    } else {
-        if (getcwd(realdest, sizeof(realdest) * OS_PATH_MAX) == NULL) {
-            error_exit("Cannot get current working directory");
-        }
+    }
+
+    if (getcwd(realdest, sizeof(realdest) * OS_PATH_MAX) == NULL) {
+        error_exit("Cannot get current working directory");
     }
 
     extract_files(pak, realdest);
     free(realdest);
-}
-
-int parseopts(int argc, char* argv[], opts_t *opts) {
-    int c;
-    
-    if (argc < 2) {
-        usage();
-    }
-
-    while ((c = getopt(argc, argv, "lxcadhf:C:")) != -1) {
-        switch (c) {
-            case 'l':
-                setmodetype(opts, PAK_LIST);
-                break;
-            case 'x':
-                setmodetype(opts, PAK_EXTRACT);
-                break;
-            case 'c':
-                setmodetype(opts, PAK_CREATE);
-                break;
-            case 'a':
-                setmodetype(opts, PAK_ADD);
-                break;
-            case 'd':
-                setmodetype(opts, PAK_REMOVE);
-                break;
-            case 'f':
-                opts->pakfile = optarg;
-                break;
-            case 'C':
-                opts->destination = optarg;
-                break;
-            case 'h':
-                help();
-                break;
-        }
-    }
-    
-    if (optind < argc) {
-         opts->paths = (char **) malloc(sizeof(char *) * (argc - optind));
-        while (optind < argc) {
-            opts->paths[opts->path_count++] = argv[optind++];
-        }
-    }
-
-    if (! opts->mode) {
-        fprintf(stderr, "You must specify one -lxcad option\n");
-        usage();
-    }
-
-    if (! opts->pakfile) {
-        fprintf(stderr, "You must specify a pakfile name with -f\n");
-        usage();
-    }
-
-    return 0;
-}
-
-void setmodetype(opts_t *opt, short mode) {
-    if (! opt->mode) {
-        opt->mode = mode;
-    } else {
-        fprintf(stderr, "You may not specify more than one -lxcad option\n");
-        usage();
-    }
 }
 
 void usage_banner() {

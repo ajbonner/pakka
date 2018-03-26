@@ -1,4 +1,5 @@
 #include "filesystem.h"
+#include "win/msdirent.h"
 
 int file_exists(const char *filename) {
 	struct stat sb;

@@ -1,5 +1,4 @@
 #include "common.h"
-#include "dirent.h"
 
 static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *);
