@@ -58,15 +58,17 @@ Pak_t *create_pakfile(const char *pakpath) {
 }
 
 int close_pakfile(Pak_t *pak) {
-    Pakfileentry_t *e;
+    Pakfileentry_t *e, *n;
 
     if (pak->head != NULL) {
         e = pak->head->next;
         
         if (e != NULL) {
             do {
+				n = e->next;
                 free(e);
-            } while ((e = e->next) != NULL);
+				e = n;
+            } while (e != NULL);
         }
 
         free(pak->head);
@@ -116,7 +118,9 @@ void load_directory(Pak_t *pak) {
 
             if (last != NULL) {
                 current->next = last;
-            }
+			} else {
+				current->next = NULL;
+			}
 
             last = current;
         }
@@ -254,7 +258,7 @@ int add_folder(Pak_t *pak, char *path) {
 }
 
 void extract_files(Pak_t *pak, char *dest) {
-    char *destfile, *destdir;
+	char *destfile, *destdir;
     unsigned char *buffer;
     FILE *tfd;
 
@@ -263,10 +267,11 @@ void extract_files(Pak_t *pak, char *dest) {
     do {
         /* + 2 one for trailing null and the / we concat between basedir and pakfile path */
         destfile = malloc(sizeof(char) * (strlen(dest) + strlen(current->filename) + 2));
+		destdir = malloc(sizeof(char) * OS_PATH_MAX);
 		*destfile = '\0';
         build_filename(dest, current->filename, destfile);
 
-        destdir = dirname(destfile);
+		realpath(dirname(destfile), destdir);
 		
         if (! (file_exists(destdir)) && (mkdir_r(destdir) != 0)) {
             error_exit("Cannot create directory %s", destdir);
@@ -289,6 +294,7 @@ void extract_files(Pak_t *pak, char *dest) {
         fclose(tfd);
         free(buffer);
 		free(destfile);
+		free(destdir);
     } while ((current = current->next) != NULL);
 }
 
@@ -416,6 +422,7 @@ int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd) {
 
 int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries) {
     int i;
+
     for (i = 0; i < num_entries; i++) {
         if (entries[i] == entry) {
             return 1;
@@ -427,7 +434,7 @@ int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries) 
 
 void build_filename(char *basedir, char *filename, char *dest) {
     strcat(dest, basedir);
-    strcat(dest, "/");
+    strcat(dest, PATH_SEPARATOR);
     strcat(dest, filename);
 }
 

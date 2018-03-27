@@ -1,3 +1,4 @@
+#include "common.h"
 #include "filesystem.h"
 #include "win/msdirent.h"
 
@@ -10,6 +11,7 @@ int mkdir_r(char *path) {
     struct stat sb;
     char *curpos = path;
     int mode = 0777;
+	
 
     /* check if something already exists at path */
     if (stat(path, &sb) == 0) {
@@ -21,11 +23,11 @@ int mkdir_r(char *path) {
         return 0;
     }
 
-    while (*curpos == '/') {
+    while (*curpos == PATH_SEPARATOR[0]) {
         curpos++;
     }
 
-    while ((curpos = strchr(curpos, '/'))) {
+    while ((curpos = strchr(curpos, PATH_SEPARATOR[0]))) {
         *curpos = '\0';
         if (stat(path, &sb) != 0) {
             if (mkdir(path, mode)) {
@@ -37,8 +39,8 @@ int mkdir_r(char *path) {
             return -1;
         }
         
-        *curpos++ = '/';
-        while (*curpos == '/') {
+        *curpos++ = PATH_SEPARATOR[0];
+        while (*curpos == PATH_SEPARATOR[0]) {
             curpos++;
         }
     }

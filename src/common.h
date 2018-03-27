@@ -8,8 +8,10 @@
 	#define dirname(P) _dirname(P)
 	#define mkstemp(P) mktemp(P)
 	#define getcwd(D,S) _getcwd(D,S)
+	#define PATH_SEPARATOR "\\"
 #else 
 	#include <unistd.h>
+	#define PATH_SEPARATOR "/"
 #endif
 #include "options.h"
 #include <limits.h>

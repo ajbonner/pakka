@@ -9,7 +9,7 @@ void help();
 
 int main(int argc, char* argv[]) {
     name = argv[0];
-    opts_t opts;
+	opts_t opts = { 0, NULL, NULL, NULL, 0 };
     parseopts(argc, argv, &opts);
     Pak_t *pak;
     
@@ -55,12 +55,12 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
         if (realpath(destination, realdest) == NULL) {
            error_exit("Cannot open destination path '%s'", destination);
         }
-    }
-
-    if (getcwd(realdest, sizeof(realdest) * OS_PATH_MAX) == NULL) {
-        error_exit("Cannot get current working directory");
-    }
-
+	} else {
+		if (getcwd(realdest, sizeof(realdest) * OS_PATH_MAX) == NULL) {
+			error_exit("Cannot get current working directory");
+		}
+	}
+	
     extract_files(pak, realdest);
     free(realdest);
 }
@@ -93,7 +93,7 @@ void help() {
     fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", name);
     fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", name);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
-    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", name);
+    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx\n", name);
     
     exit(1);
 }

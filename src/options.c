@@ -59,8 +59,7 @@ int parseopts(int argc, char **argv, opts_t *opts) {
 void setmodetype(opts_t *opt, short mode) {
 	if (!opt->mode) {
 		opt->mode = mode;
-	}
-	else {
+	} else {
 		fprintf(stderr, "You may not specify more than one -lxcad option\n");
 		usage();
 	}
