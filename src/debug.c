@@ -8,7 +8,7 @@ void debug_directory_entry(Pakfileentry_t *entry) {
     fprintf(stderr, "Filename: %s\n", entry->filename);
     fprintf(stderr, "Position Offset: 0x%08x\n", entry->offset);
     fprintf(stderr, "Length (bytes) %u\n", entry->length);
-    fprintf(stderr, "Next Sibling: %p\n", entry->next);
+    fprintf(stderr, "Next Sibling: %p\n", (void *) entry->next);
 }
 
 void debug_header(Pak_t *pak) {

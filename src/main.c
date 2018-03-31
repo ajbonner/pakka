@@ -3,9 +3,6 @@
 char *name;
 void listpakfiles(Pak_t *);
 void extract(Pak_t *, char *, char **, int);
-void usage();
-void usage_banner();
-void help();
 
 int main(int argc, char* argv[]) {
     name = argv[0];
@@ -94,6 +91,6 @@ void help() {
     fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", name);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
     fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx\n", name);
-    
+
     exit(1);
 }

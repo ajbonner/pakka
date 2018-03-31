@@ -1,6 +1,8 @@
 #include "common.h"
 #include "filesystem.h"
-#include "win/msdirent.h"
+#ifdef _WIN32
+    #include "win/msdirent.h"
+#endif
 
 int file_exists(const char *filename) {
 	struct stat sb;

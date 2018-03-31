@@ -1,7 +1,7 @@
 #include <stdarg.h>
 #include "common.h"
 
-char *_dirname(const char * path) {
+char *_dirname(char * path) {
 #ifdef _WIN32
 	char *dir = malloc(sizeof(path));
 	_splitpath(path, NULL, dir, NULL, NULL);

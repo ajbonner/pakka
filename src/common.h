@@ -11,6 +11,8 @@
 	#define PATH_SEPARATOR "\\"
 #else 
 	#include <unistd.h>
+	#include <dirent.h>
+	#include <libgen.h>
 	#define PATH_SEPARATOR "/"
 #endif
 #include "options.h"
@@ -44,7 +46,7 @@ typedef struct {
 	Pakfileentry_t *head;
 } Pak_t;
 
-char *_dirname(const char *);
+char *_dirname(char *);
 void error_exit(const char *, ...);
 Pak_t *open_pakfile(const char *);
 Pak_t *create_pakfile(const char *);
@@ -59,3 +61,7 @@ int add_file(Pak_t *, char *);
 int add_to_pak(Pak_t *, char *);
 int add_folder(Pak_t *, char *);
 int add_files(Pak_t *, char **, int);
+
+void usage();
+void usage_banner();
+void help();
