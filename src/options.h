@@ -6,5 +6,5 @@ typedef struct opts_s {
 	int path_count;
 } opts_t;
 
-int parseopts(int, char **, opts_t *);
-void setmodetype(opts_t *, short);
+int parseopts(int argc, char *argv[], opts_t *opts);
+void setmodetype(opts_t *opts, short mode);

@@ -36,6 +36,9 @@
     <ClCompile Include="src\win\wingetopt-0.95\src\getopt.c">
       <Filter>Source Files</Filter>
     </ClCompile>
+    <ClCompile Include="src\string.c">
+      <Filter>Source Files</Filter>
+    </ClCompile>
   </ItemGroup>
   <ItemGroup>
     <ClInclude Include="src\common.h">
@@ -51,6 +54,9 @@
       <Filter>Header Files</Filter>
     </ClInclude>
     <ClInclude Include="src\win\msdirent.h">
+      <Filter>Header Files</Filter>
+    </ClInclude>
+    <ClInclude Include="src\string.h">
       <Filter>Header Files</Filter>
     </ClInclude>
   </ItemGroup>

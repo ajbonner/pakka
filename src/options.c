@@ -1,6 +1,6 @@
 #include "common.h"
 
-int parseopts(int argc, char **argv, opts_t *opts) {
+int parseopts(int argc, char *argv[], opts_t *opts) {
 	int c;
 
 	if (argc < 2) {

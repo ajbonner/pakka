@@ -1,4 +1,5 @@
 #include "common.h"
+#include "string.h"
 
 static void build_filename(char *basedir, char *filename, char *dest);
 static void load_pakfile(Pak_t *);
@@ -7,10 +8,10 @@ static Pakfileentry_t *find_tail(Pak_t *);
 static void init_pak_header(Pak_t *);
 static void write_pak_directory(Pak_t *);
 static Pakfileentry_t *find_entry(Pak_t *, char *);
-static int delete_entries(Pak_t *, Pakfileentry_t **, int);
+static int delete_entries(Pak_t *, Pakfileentry_t *entries[], int);
 static int copy_between_paks(Pakfileentry_t *, FILE *, FILE *);
 static FILE *create_tmp_pakfile();
-static int in_array(Pakfileentry_t *, Pakfileentry_t **, int);
+static int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries);
 
 int is_new = 0;
 char cur_pakpath[OS_PATH_MAX];
@@ -22,7 +23,7 @@ Pak_t *open_pakfile(const char *pakpath) {
     strcpy(cur_pakpath, pakpath);
     Pak_t *pak = calloc(sizeof(Pak_t), 1);
 
-    if (! (fp = fopen(pakpath, "r+"))) {
+    if (! (fp = fopen(pakpath, "rb+"))) {
         error_exit("Cannot open %s", pakpath);
     }
 
@@ -44,11 +45,11 @@ Pak_t *create_pakfile(const char *pakpath) {
         error_exit("File already exists at destination %s", pakpath);
     }
 
-    if (! mkstemp(tmp_pakpath)) {
+    if (! PKA_mkstemp(tmp_pakpath)) {
         error_exit("Cannot create temp pak file");
     }
 
-    if (! (fp = fopen(tmp_pakpath, "w"))) {
+    if (! (fp = fopen(tmp_pakpath, "wb"))) {
         error_exit("Cannot open %s", tmp_pakpath);
     }
 
@@ -103,19 +104,24 @@ void load_pakfile(Pak_t *pak) {
 void load_directory(Pak_t *pak) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
-    int i, entry_pos;
+	int i, entry_pos;
 
     if (pak->num_entries > 0) {
         for (i = 1; i <= pak->num_entries; i++) {
-            entry_pos = pak->diroffset + pak->dirlength 
-                - (i * PAKFILE_DIR_ENTRY_SIZE);
+            entry_pos = pak->diroffset + pak->dirlength - (i * PAKFILE_DIR_ENTRY_SIZE);
             fseek(fp, entry_pos, SEEK_SET);
 
             current = malloc(sizeof(Pakfileentry_t));
-            fread(current->filename, 56, 1, fp);
-            fread(&current->offset, 4, 1, fp);
-            fread(&current->length, 4, 1, fp);
-
+			if (! fread(current->filename, 56, 1, fp)) {
+				error_exit("Error reading filename from pak directory entry");
+			}
+			if (! fread(&current->offset, 4, 1, fp)) {
+				error_exit("Error reading file offset from pak directory entry");
+			}
+			if (! fread(&current->length, 4, 1, fp)) {
+				error_exit("Error reading file length from pak directory entry");
+			}
+			
             if (last != NULL) {
                 current->next = last;
 			} else {
@@ -181,7 +187,7 @@ int add_file(Pak_t *pak, char *path) {
 
     printf("Adding %s to pak\n", path);
     
-    if (! (tfd = fopen(path, "r"))) {
+    if (! (tfd = fopen(path, "rb"))) {
         error_exit("Cannot open %s", path);
     }
 
@@ -258,7 +264,7 @@ int add_folder(Pak_t *pak, char *path) {
 }
 
 void extract_files(Pak_t *pak, char *dest) {
-	char *destfile, *destdir;
+	char *destfile, *destdir, *os_normalized_filepath;
     unsigned char *buffer;
     FILE *tfd;
 
@@ -266,12 +272,13 @@ void extract_files(Pak_t *pak, char *dest) {
 
     do {
         /* + 2 one for trailing null and the / we concat between basedir and pakfile path */
-        destfile = malloc(sizeof(char) * (strlen(dest) + strlen(current->filename) + 2));
+		os_normalized_filepath = str_replace(current->filename, "/", PATH_SEPARATOR);
+        destfile = malloc(sizeof(char) * (strlen(dest) + strlen(os_normalized_filepath) + 2));
 		destdir = malloc(sizeof(char) * OS_PATH_MAX);
 		*destfile = '\0';
-        build_filename(dest, current->filename, destfile);
+        build_filename(dest, os_normalized_filepath, destfile);
 
-		realpath(dirname(destfile), destdir);
+		PKA_realpath(PKA_dirname(destfile), destdir);
 		
         if (! (file_exists(destdir)) && (mkdir_r(destdir) != 0)) {
             error_exit("Cannot create directory %s", destdir);
@@ -283,7 +290,7 @@ void extract_files(Pak_t *pak, char *dest) {
         buffer = malloc(sizeof(unsigned char) * current->length);
         fread(buffer, current->length, 1, fp);
 
-        if (! (tfd = fopen(destfile, "w"))) {
+        if (! (tfd = fopen(destfile, "wb"))) {
             error_exit("Cannot open %s for writing", destfile);
         }
 
@@ -501,11 +508,11 @@ FILE *create_tmp_pakfile() {
 
     strcpy(tmp_pakpath, "/tmp/pakkaXXXXXX");
 
-    if (! mkstemp(tmp_pakpath)) {
+    if (! PKA_mkstemp(tmp_pakpath)) {
         error_exit("Cannot create temp pak file name");
     }
 
-    if (! (tfd = fopen(tmp_pakpath, "w"))) {
+    if (! (tfd = fopen(tmp_pakpath, "wb"))) {
         error_exit("Cannot open %s", tmp_pakpath);
     }
 

@@ -1,22 +1,15 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <limits.h>
 #ifdef _WIN32
 	#include "win/wingetopt-0.95/src/getopt.h"
 	#include "win/msdirent.h"
-	#define realpath(N,R) _fullpath((R),(N),_MAX_PATH)
-	#define dirname(P) _dirname(P)
-	#define mkstemp(P) mktemp(P)
-	#define getcwd(D,S) _getcwd(D,S)
-	#define PATH_SEPARATOR "\\"
 #else 
 	#include <unistd.h>
 	#include <dirent.h>
-	#include <libgen.h>
-	#define PATH_SEPARATOR "/"
 #endif
 #include "options.h"
-#include <limits.h>
 #include "filesystem.h"
 
 #define PAK_EXTRACT 1
@@ -46,8 +39,10 @@ typedef struct {
 	Pakfileentry_t *head;
 } Pak_t;
 
-char *_dirname(char *);
+
 void error_exit(const char *, ...);
+//char *str_replace(const char *subject, const char *search, const char *replace);
+
 Pak_t *open_pakfile(const char *);
 Pak_t *create_pakfile(const char *);
 int close_pakfile(Pak_t *);
