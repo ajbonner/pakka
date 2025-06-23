@@ -44,8 +44,7 @@ Created as an excuse to re-learn some C circa December '15-January '16
 John Carmack for not only creating quake, but then open sourcing it and its
 successor games. He is the reason I am a programmer today.
 
-I am unsure who the correct author is but I followed this documentation on
-the [Quake PAK File Format](http://debian.fmi.uni-sofia.bg/~sergei/cgsr/docs/pak.txt)
+I am unsure who the correct author is, and the original link is now long since dead, but I followed [Quake PAK File Format](https://web.archive.org/web/20160711041711/https://debian.fmi.uni-sofia.bg/~sergei/cgsr/docs/pak.txt)
 in building this utility.
 
 ## License
