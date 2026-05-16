@@ -28,7 +28,7 @@ PAK0=$(TEST_DIR)/pak0.pak
 
 CLANG_TIDY ?= clang-tidy
 
-.PHONY: all clean test test-clean distclean lint verify-tarball
+.PHONY: all clean test test-clean distclean lint verify-tarball fixture
 
 all: $(TARGET)
 
@@ -70,6 +70,11 @@ verify-tarball: $(QUAKE_TARBALL)
 $(PAK0): verify-tarball
 	@cd $(TEST_DIR) && tar xzf quakesw.tar.gz
 	@cp $(TEST_DIR)/id1/pak0.pak $(PAK0)
+
+# Download + SHA-verify pak0.pak only. Useful for CI configurations that
+# build pakka through a non-Make path (e.g. CMake/MSVC on Windows) but
+# still want to drive the bats suite against the canonical fixture.
+fixture: $(PAK0)
 
 test: $(TARGET) $(PAK0)
 	bats tests/

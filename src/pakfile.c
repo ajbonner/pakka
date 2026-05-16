@@ -1,5 +1,4 @@
 #include "common.h"
-#include "dirent.h"
 
 /* UTF-8 box-drawing sequences for --tree output. Encoded as octal escapes
  * so the source file's text encoding doesn't change the emitted bytes. */
@@ -40,14 +39,15 @@ static int is_unsafe_extract_path(const char *path);
 static int is_new = 0;
 static char cur_pakpath[OS_PATH_MAX];
 static char new_pakpath[OS_PATH_MAX];
-static char tmp_pakpath[L_tmpnam];
+/* L_tmpnam on MSVC is 20 bytes — not enough for "C:\Users\...\Temp\pakkaXXXXXX". */
+static char tmp_pakpath[OS_PATH_MAX];
 static FILE *fp;
 
 Pak_t *open_pakfile(const char *pakpath) {
     strcpy(cur_pakpath, pakpath);
     Pak_t *pak = calloc(sizeof(Pak_t), 1);
 
-    if (! (fp = fopen(pakpath, "r+"))) {
+    if (! (fp = fopen(pakpath, "r+b"))) {
         error_exit("Cannot open %s", pakpath);
     }
 
@@ -62,21 +62,14 @@ Pak_t *create_pakfile(const char *pakpath) {
     struct stat sb;
 
     is_new = 1;
-    strcpy(tmp_pakpath, "/tmp/pakkaXXXXXX");
     strcpy(new_pakpath, pakpath);
 
     if (stat(pakpath, &sb) == 0) {
         error_exit("File already exists at destination %s", pakpath);
     }
 
-    int fd;
-    if ((fd = mkstemp(tmp_pakpath)) == -1) {
+    if (! (fp = compat_mkstemp_open("pakkaXXXXXX", tmp_pakpath, sizeof(tmp_pakpath)))) {
         error_exit("Cannot create temp pak file");
-    }
-
-    if (! (fp = fdopen(fd, "w"))) {
-        close(fd);
-        error_exit("Cannot open %s", tmp_pakpath);
     }
 
     init_pak_header(pak);
@@ -96,13 +89,20 @@ int close_pakfile(Pak_t *pak) {
 
     free(pak);
 
+    /* fclose BEFORE rename: CRT fopen on Windows does not request
+     * FILE_SHARE_DELETE, so MoveFileEx would otherwise be blocked by
+     * the still-open handle. delete_entries may have already closed
+     * fp on its own (it sets fp = NULL), so tolerate that. */
+    if (fp != NULL) {
+        fclose(fp);
+        fp = NULL;
+    }
+
     if (is_new) {
-        if (rename(tmp_pakpath, new_pakpath) == -1) {
+        if (compat_rename_replace(tmp_pakpath, new_pakpath) != 0) {
             error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
         }
     }
-
-    fclose(fp);
 
     return 0;
 }
@@ -206,7 +206,7 @@ void insert_tree_path(Paktreenode_t *root, const char *path,
         return;
     }
 
-    path_copy = strdup(path);
+    path_copy = compat_strdup(path);
     component = strtok(path_copy, "/");
 
     while (component != NULL) {
@@ -346,7 +346,7 @@ int add_file(Pak_t *pak, char *path) {
 
     printf("Adding %s to pak\n", path);
     
-    if (! (tfd = fopen(path, "r"))) {
+    if (! (tfd = fopen(path, "rb"))) {
         error_exit("Cannot open %s", path);
     }
 
@@ -468,8 +468,8 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
 
         /* POSIX dirname() may modify its argument and/or return a static buffer
          * that subsequent calls overwrite. Pass it a throwaway copy. */
-        destdir_copy = strdup(destfile);
-        destdir = dirname(destdir_copy);
+        destdir_copy = compat_strdup(destfile);
+        destdir = compat_dirname(destdir_copy);
 
         if (! (file_exists(destdir)) && (mkdir_r(destdir) != 0)) {
             error_exit("Cannot create directory %s", destdir);
@@ -482,7 +482,7 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
         buffer = malloc(sizeof(unsigned char) * current->length);
         fread(buffer, current->length, 1, fp);
 
-        if (! (tfd = fopen(destfile, "w"))) {
+        if (! (tfd = fopen(destfile, "wb"))) {
             error_exit("Cannot open %s for writing", destfile);
         }
 
@@ -588,8 +588,15 @@ int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
     fp = tempfp;
 
     fclose(tfd);
-    
-    if (rename(tmp_pakpath, cur_pakpath) == -1) {
+
+    /* Close the original pak before the rename. On Windows the open
+     * handle on cur_pakpath would block MoveFileEx; on POSIX this just
+     * ensures buffered data is flushed before we replace the file
+     * underneath ourselves. close_pakfile tolerates fp == NULL. */
+    fclose(fp);
+    fp = NULL;
+
+    if (compat_rename_replace(tmp_pakpath, cur_pakpath) != 0) {
         error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
     }
 
@@ -744,17 +751,9 @@ void write_pak_directory(Pak_t *pak) {
 
 FILE *create_tmp_pakfile(void) {
     FILE *tfd;
-    int fd;
 
-    strcpy(tmp_pakpath, "/tmp/pakkaXXXXXX");
-
-    if ((fd = mkstemp(tmp_pakpath)) == -1) {
+    if (! (tfd = compat_mkstemp_open("pakkaXXXXXX", tmp_pakpath, sizeof(tmp_pakpath)))) {
         error_exit("Cannot create temp pak file");
-    }
-
-    if (! (tfd = fdopen(fd, "w"))) {
-        close(fd);
-        error_exit("Cannot open %s", tmp_pakpath);
     }
 
     fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET);

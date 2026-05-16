@@ -190,3 +190,49 @@ jobs:
           sync: rsync
           prepare: pkg_add -I gmake curl bats
           run: gmake test
+
+  # Windows / MSVC build. Uses CMake to drive cl.exe (the Unix Makefile
+  # doesn't apply here) and MSYS2 to provide bash + bats for running
+  # the existing test suite against the resulting pakka.exe.
+  windows-msvc-x86_64:
+    runs-on: windows-latest
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      - uses: ilammy/msvc-dev-cmd@v1
+      - uses: msys2/setup-msys2@v2
+        with:
+          update: true
+          install: >-
+            bash
+            bats
+            coreutils
+            curl
+            openssl
+            tar
+            make
+      # CMake/Ninja are preinstalled on the windows-latest image but live
+      # outside the MSYS2 environment; expose them via a cmd shell that
+      # has both MSVC and the runner PATH set up.
+      - name: Configure (CMake / Ninja / MSVC)
+        shell: pwsh
+        run: cmake -B build/cmake -G Ninja .
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/cmake
+      - name: Fetch + verify Quake fixture
+        run: make fixture
+      - name: Run bats tests against pakka.exe
+        # Relative path so MSYS2 bash resolves it against $PWD instead
+        # of choking on the mixed-separator $GITHUB_WORKSPACE form.
+        env:
+          PAKKA: ./build/cmake/pakka.exe
+        run: bats tests/

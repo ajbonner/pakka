@@ -14,7 +14,10 @@
 # setup_file) rather than pak0.pak directly.
 
 PROJECT_ROOT="${BATS_TEST_DIRNAME}/.."
-PAKKA="${PROJECT_ROOT}/pakka"
+# PAKKA can be pre-set by the caller (Windows CI points it at the MSVC
+# build's pakka.exe; the Makefile-driven path leaves it unset and we
+# fall through to the default location).
+PAKKA="${PAKKA:-${PROJECT_ROOT}/pakka}"
 PAK0="${PROJECT_ROOT}/build/test/pak0.pak"
 
 # Build a minimal valid pak with a single directory entry of the given
@@ -204,7 +207,9 @@ setup_file() {
 EOF
 )
 
-    [ "$output" = "$expected" ]
+    # Strip \r so MSVC-built pakka.exe (whose stdout is text-mode by
+    # default and emits CRLF) matches the same expected text as POSIX.
+    [ "${output//$'\r'/}" = "$expected" ]
 }
 
 @test "list --tree: empty pak prints root and zero summary" {
@@ -217,7 +222,7 @@ EOF
     [ "$status" -eq 0 ]
 
     expected=$(printf '.\n\n0 directories, 0 files')
-    [ "$output" = "$expected" ]
+    [ "${output//$'\r'/}" = "$expected" ]
 }
 
 @test "list --tree: rejected when combined with a non-list mode" {

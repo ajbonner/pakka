@@ -74,11 +74,11 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
     char *realdest = malloc(sizeof(char) * OS_PATH_MAX);
 
     if (destination != NULL) {
-        if (realpath(destination, realdest) == NULL) {
+        if (compat_realpath(destination, realdest) == NULL) {
            error_exit("Cannot open destination path '%s'", destination);
         }
     } else {
-        if (getcwd(realdest, OS_PATH_MAX) == NULL) {
+        if (compat_getcwd(realdest, OS_PATH_MAX) == NULL) {
             error_exit("Cannot get current working directory");
         }
     }
