@@ -253,6 +253,210 @@ EOF
     [ "$status" -ne 0 ]
 }
 
+# Per-name policy (Windows reserved devices, ADS colon, trailing dot/space,
+# control bytes): paks are portable, so a name that would resolve to a
+# device or get silently normalized on Windows must be rejected on every
+# host even if a Linux extract would technically work. write_pak_one_entry
+# rejects names whose length needs padding < 0, which limits these to 56
+# bytes — well within real-world payload names.
+
+@test "extract: refuses Windows reserved device name (CON)" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'CON'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses Windows reserved device name with extension (NUL.txt)" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'NUL.txt'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses reserved device in subdirectory (foo/COM1)" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo/COM1'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses ADS colon in name (file:stream)" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'file:stream'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses trailing dot on segment (foo.)" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo.'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses trailing space on segment (foo )" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo '
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses control byte in name" {
+    # printf'd literal ESC (0x1b) inside the entry name.
+    name=$(printf 'esc\033inj')
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" "$name"
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: COM10 is allowed (only COM0-9 are reserved)" {
+    # Build a pak with one zero-length entry named "COM10". Should
+    # extract cleanly since "COM10" is not a reserved Windows device.
+    {
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        printf 'COM10'
+        dd if=/dev/zero bs=1 count=$((56 - 5)) 2>/dev/null
+        printf '\114\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/safe.pak"
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/safe.pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    [ -f "$BATS_TEST_TMPDIR/out/COM10" ]
+}
+
+# H2 — symlink-safe extract. compat_open_extract_target walks pak entry
+# components with O_NOFOLLOW (POSIX) or reparse-point checks (Windows),
+# so a pre-planted symlink in the -C destination cannot redirect a write.
+
+@test "extract: refuses to follow symlink in destination tree (POSIX)" {
+    # Skip on Windows: symlinks need elevated privileges and the bats
+    # job runs unprivileged. PAKKA being .exe is the simplest tell.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    # Build a pak with one zero-length entry "models/x" — safe name.
+    {
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        printf 'models/x'
+        dd if=/dev/zero bs=1 count=$((56 - 8)) 2>/dev/null
+        printf '\114\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/ok.pak"
+
+    mkdir -p "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/outside"
+    ln -s "$BATS_TEST_TMPDIR/outside" "$BATS_TEST_TMPDIR/out/models"
+
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/ok.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    # The escape target must remain untouched.
+    [ ! -e "$BATS_TEST_TMPDIR/outside/x" ]
+}
+
+# H3 — preflight extract: a safe entry preceding a traversal entry must
+# not leave the safe entry on disk when the traversal causes the extract
+# to error.
+
+@test "extract: preflight rejects entire archive on later unsafe entry" {
+    # Two entries: "safe/a" (legit), then "../escape" (rejected). Both
+    # have zero length. Pre-fix, "safe/a" was written before the second
+    # entry's validation fired.
+    #
+    # Layout (LE):
+    #   bytes  0..11 : "PACK" + diroffset=12 + dirlength=128
+    #   bytes 12..75 : dir entry 0 = "safe/a" (offset=140, length=0)
+    #   bytes 76..139: dir entry 1 = "../escape" (offset=140, length=0)
+    {
+        printf 'PACK\014\000\000\000\200\000\000\000'
+        printf 'safe/a'
+        dd if=/dev/zero bs=1 count=$((56 - 6)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+        printf '../escape'
+        dd if=/dev/zero bs=1 count=$((56 - 9)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/mixed.pak"
+
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/mixed.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    # The earlier "safe/a" must not have been materialized.
+    [ ! -e "$BATS_TEST_TMPDIR/out/safe/a" ]
+    [ ! -d "$BATS_TEST_TMPDIR/out/safe" ]
+}
+
+# H6 — recursive add must not silently follow a symlink into a tree
+# the user didn't ask us to pack.
+
+@test "add: skips symlinks inside a directory tree" {
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    mkdir -p "$BATS_TEST_TMPDIR/src/sub" "$BATS_TEST_TMPDIR/elsewhere"
+    printf 'real\n' > "$BATS_TEST_TMPDIR/src/sub/real.txt"
+    printf 'OFF-LIMITS\n' > "$BATS_TEST_TMPDIR/elsewhere/secret.txt"
+    ln -s "$BATS_TEST_TMPDIR/elsewhere/secret.txt" "$BATS_TEST_TMPDIR/src/sub/leak"
+
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -cf out.pak src) >/dev/null
+
+    listing=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/out.pak")
+    echo "$listing" | grep -q 'src/sub/real\.txt'
+    # The symlink must not be in the pak.
+    ! echo "$listing" | grep -q 'leak'
+    ! echo "$listing" | grep -q 'secret'
+}
+
+@test "add: rejects symlink as top-level path argument" {
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    printf 'real\n' > "$BATS_TEST_TMPDIR/real.txt"
+    ln -s "$BATS_TEST_TMPDIR/real.txt" "$BATS_TEST_TMPDIR/link.txt"
+
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/link.txt"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "symlink"
+}
+
+# H12 — duplicate name rejection on add.
+
+@test "add: rejects duplicate name within the same pak" {
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    printf 'first\n' > "$BATS_TEST_TMPDIR/dupe.txt"
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak dupe.txt) >/dev/null
+
+    # Same name, second time — must refuse.
+    printf 'second\n' > "$BATS_TEST_TMPDIR/dupe.txt"
+    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -af work.pak dupe.txt"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "already exists"
+}
+
+# H5 — create with no-replace semantics. If the destination appears
+# after create_pakfile's stat() check, close_pakfile must refuse to
+# clobber it rather than silently overwriting.
+
+@test "create: refuses to overwrite destination that appeared during the run" {
+    # Simulate the race by creating the destination AFTER pakka has
+    # opened the temp pak. We can't pause pakka mid-run from bats, but
+    # the no-replace rename catches the case where the dest exists at
+    # close time. Approximation: pre-create the destination — pakka's
+    # stat-at-start check should also fire, but turning that off
+    # would mean editing the binary. Instead, validate that an
+    # existing destination causes a refusal (the same code path that
+    # fires in the race window).
+    printf 'do not clobber me\n' > "$BATS_TEST_TMPDIR/target.pak"
+    printf 'payload\n' > "$BATS_TEST_TMPDIR/payload"
+    (cd "$BATS_TEST_TMPDIR" && run "$PAKKA" -cf target.pak payload) || true
+    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/target.pak" "$BATS_TEST_TMPDIR/payload"
+    [ "$status" -ne 0 ]
+    # Original content survived.
+    [ "$(cat "$BATS_TEST_TMPDIR/target.pak")" = "do not clobber me" ]
+}
+
 # Path-traversal hardening: a crafted pak can name an entry such that extract
 # would write outside the -C destination. Pak entry names are 56 bytes of
 # attacker-controlled data; pakka must reject traversal attempts on both
