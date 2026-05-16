@@ -1,9 +1,10 @@
 # Requires GNU make. On BSD: pkg_add gmake (or pkg install gmake), then run gmake.
 APP_NAME="\"Pakka\""
 MAJOR=1
-MINOR=0
+MINOR=1
+PATCH=0
 BUILD_DATE="\"$(shell date +'%b %d, %Y')\""
-VERSION="\"$(MAJOR).$(MINOR)\""
+VERSION="\"$(MAJOR).$(MINOR).$(PATCH)\""
 TARGET=pakka
 # _XOPEN_SOURCE=700 (POSIX.1-2008 + XSI) — needed for realpath():
 # glibc gates it on __USE_XOPEN_EXTENDED, musl on _XOPEN_SOURCE, neither

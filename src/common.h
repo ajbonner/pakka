@@ -35,6 +35,7 @@ Pak_t *open_pakfile(const char *pakpath);
 Pak_t *create_pakfile(const char *pakpath);
 int close_pakfile(Pak_t *pak);
 void list_files(Pak_t *pak);
+void list_files_tree(Pak_t *pak);
 void extract_files(Pak_t *pak, char *dest, char **paths, int path_count);
 void delete_files(Pak_t *pak, char **paths, int path_count);
 void debug_header(Pak_t *pak);

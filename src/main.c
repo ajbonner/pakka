@@ -12,14 +12,16 @@ typedef struct opts_s {
     char *destination;
     char **paths;
     int path_count;
+    int tree;
 } opts_t;
 
 static char *name;
-static void listpakfiles(Pak_t *pak);
+static void listpakfiles(Pak_t *pak, int tree);
 static void extract(Pak_t *pak, char *destination, char **paths, int path_count);
 static void usage(void);
 static void usage_banner(void);
 static void help(void);
+static int strip_long_options(int argc, char **argv, opts_t *opts);
 static int parseopts(int argc, char **argv, opts_t *opts);
 static void setmodetype(opts_t *opts, short mode);
 
@@ -37,7 +39,7 @@ int main(int argc, char *argv[]) {
     
     switch (opts.mode) {
         case PAK_LIST:
-            listpakfiles(pak);
+            listpakfiles(pak, opts.tree);
             break;
         case PAK_EXTRACT:
             extract(pak, opts.destination, opts.paths, opts.path_count);
@@ -60,8 +62,12 @@ int main(int argc, char *argv[]) {
     return 0;
 }
 
-void listpakfiles(Pak_t *pak) {
-    list_files(pak);
+void listpakfiles(Pak_t *pak, int tree) {
+    if (tree) {
+        list_files_tree(pak);
+    } else {
+        list_files(pak);
+    }
 }
 
 void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
@@ -81,9 +87,34 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
     free(realdest);
 }
 
+/* Pull long options ("--tree") out of argv before POSIX getopt() runs.
+ * Honors "--" as end-of-options so a literal path named "--tree" can be
+ * passed through unchanged. */
+int strip_long_options(int argc, char **argv, opts_t *opts) {
+    int src;
+    int dst = 1;
+    int option_end = 0;
+
+    for (src = 1; src < argc; src++) {
+        if (! option_end && strcmp(argv[src], "--") == 0) {
+            option_end = 1;
+        } else if (! option_end && strcmp(argv[src], "--tree") == 0) {
+            opts->tree = 1;
+            continue;
+        }
+
+        argv[dst++] = argv[src];
+    }
+
+    argv[dst] = NULL;
+    return dst;
+}
+
 int parseopts(int argc, char* argv[], opts_t *opts) {
     int c;
-    
+
+    argc = strip_long_options(argc, argv, opts);
+
     if (argc < 2) {
         usage();
     }
@@ -136,6 +167,11 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
         usage();
     }
 
+    if (opts->tree && opts->mode != PAK_LIST) {
+        fprintf(stderr, "--tree may only be used with -l\n");
+        usage();
+    }
+
     return 0;
 }
 
@@ -150,7 +186,7 @@ void setmodetype(opts_t *opt, short mode) {
 
 void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-lxcad] -f [pak file] -C [destination path] [path(s)]\n", name);
+    fprintf(stderr, "Usage: %s -h [-lxcad] [--tree] -f [pak file] -C [destination path] [path(s)]\n", name);
 }
 
 void usage(void) {
@@ -171,8 +207,12 @@ void help(void) {
 
     fprintf(stderr, " -h    this help\n");
 
+    fprintf(stderr, "\nModifiers:\n");
+    fprintf(stderr, " --tree    list pak contents as a directory tree (only with -l)\n");
+
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", name);
+    fprintf(stderr, "  %s -lf pak1.pak --tree        # List contents as a directory tree\n", name);
     fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", name);
     fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", name);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");

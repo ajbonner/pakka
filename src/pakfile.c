@@ -1,7 +1,30 @@
 #include "common.h"
 #include "dirent.h"
 
+/* UTF-8 box-drawing sequences for --tree output. Encoded as octal escapes
+ * so the source file's text encoding doesn't change the emitted bytes. */
+#define PAK_TREE_ROOT         "."
+#define PAK_TREE_BRANCH_MID   "\342\224\234\342\224\200\342\224\200 "  /* "├── " */
+#define PAK_TREE_BRANCH_LAST  "\342\224\224\342\224\200\342\224\200 "  /* "└── " */
+#define PAK_TREE_PREFIX_MID   "\342\224\202   "                        /* "│   " */
+#define PAK_TREE_PREFIX_LAST  "    "
+
+typedef struct Paktreenode_s {
+    char *name;
+    int is_dir;
+    struct Paktreenode_s *children;
+    struct Paktreenode_s *next;
+} Paktreenode_t;
+
 static void build_filename(char *basedir, char *filename, char *dest);
+static Paktreenode_t *create_tree_node(const char *name, int is_dir);
+static void insert_tree_path(Paktreenode_t *root, const char *path,
+                             uint32_t *dir_count, uint32_t *file_count);
+static Paktreenode_t *find_tree_dir(Paktreenode_t *parent, const char *name);
+static void insert_tree_child(Paktreenode_t *parent, Paktreenode_t *node);
+static void print_tree_children(Paktreenode_t *node, const char *prefix);
+static void print_tree_summary(uint32_t dir_count, uint32_t file_count);
+static void free_tree(Paktreenode_t *node);
 static void load_pakfile(Pak_t *pak);
 static void load_directory(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
@@ -138,6 +161,149 @@ void list_files(Pak_t *pak) {
     do {
         printf("%s (%" PRIu32 " bytes)\n", current->filename, current->length);
     } while ((current = current->next) != NULL);
+}
+
+void list_files_tree(Pak_t *pak) {
+    Pakfileentry_t *current = pak->head;
+    Paktreenode_t *root = create_tree_node(PAK_TREE_ROOT, 1);
+    uint32_t dir_count = 0;
+    uint32_t file_count = 0;
+
+    printf("%s\n", PAK_TREE_ROOT);
+
+    if (current != NULL) {
+        do {
+            insert_tree_path(root, current->filename, &dir_count, &file_count);
+        } while ((current = current->next) != NULL);
+
+        print_tree_children(root, "");
+    }
+
+    print_tree_summary(dir_count, file_count);
+    free_tree(root);
+}
+
+Paktreenode_t *create_tree_node(const char *name, int is_dir) {
+    Paktreenode_t *node = calloc(1, sizeof(Paktreenode_t));
+
+    node->name = malloc(strlen(name) + 1);
+    strcpy(node->name, name);
+    node->is_dir = is_dir;
+
+    return node;
+}
+
+void insert_tree_path(Paktreenode_t *root, const char *path,
+                      uint32_t *dir_count, uint32_t *file_count) {
+    char *path_copy;
+    char *component;
+    char *next;
+    Paktreenode_t *parent = root;
+    Paktreenode_t *dir;
+
+    if (path[0] == '\0') {
+        return;
+    }
+
+    path_copy = strdup(path);
+    component = strtok(path_copy, "/");
+
+    while (component != NULL) {
+        next = strtok(NULL, "/");
+
+        if (next == NULL) {
+            insert_tree_child(parent, create_tree_node(component, 0));
+            (*file_count)++;
+        } else {
+            dir = find_tree_dir(parent, component);
+            if (dir == NULL) {
+                dir = create_tree_node(component, 1);
+                insert_tree_child(parent, dir);
+                (*dir_count)++;
+            }
+            parent = dir;
+        }
+
+        component = next;
+    }
+
+    free(path_copy);
+}
+
+Paktreenode_t *find_tree_dir(Paktreenode_t *parent, const char *name) {
+    Paktreenode_t *current = parent->children;
+
+    while (current != NULL) {
+        if (current->is_dir && strcmp(current->name, name) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+
+    return NULL;
+}
+
+void insert_tree_child(Paktreenode_t *parent, Paktreenode_t *node) {
+    Paktreenode_t *current = parent->children;
+    Paktreenode_t *previous = NULL;
+
+    while (current != NULL && strcmp(current->name, node->name) <= 0) {
+        previous = current;
+        current = current->next;
+    }
+
+    if (previous == NULL) {
+        node->next = parent->children;
+        parent->children = node;
+    } else {
+        node->next = previous->next;
+        previous->next = node;
+    }
+}
+
+void print_tree_children(Paktreenode_t *node, const char *prefix) {
+    Paktreenode_t *current = node->children;
+    char *next_prefix;
+    const char *branch;
+    const char *prefix_suffix;
+
+    while (current != NULL) {
+        branch        = current->next == NULL ? PAK_TREE_BRANCH_LAST : PAK_TREE_BRANCH_MID;
+        prefix_suffix = current->next == NULL ? PAK_TREE_PREFIX_LAST : PAK_TREE_PREFIX_MID;
+
+        printf("%s%s%s\n", prefix, branch, current->name);
+
+        if (current->is_dir) {
+            next_prefix = malloc(strlen(prefix) + strlen(prefix_suffix) + 1);
+            strcpy(next_prefix, prefix);
+            strcat(next_prefix, prefix_suffix);
+            print_tree_children(current, next_prefix);
+            free(next_prefix);
+        }
+
+        current = current->next;
+    }
+}
+
+void print_tree_summary(uint32_t dir_count, uint32_t file_count) {
+    printf("\n%" PRIu32 " %s, %" PRIu32 " %s\n",
+           dir_count,
+           dir_count == 1 ? "directory" : "directories",
+           file_count,
+           file_count == 1 ? "file" : "files");
+}
+
+void free_tree(Paktreenode_t *node) {
+    Paktreenode_t *current = node;
+    Paktreenode_t *next;
+
+    while (current != NULL) {
+        next = current->next;
+        free_tree(current->children);
+        free(current->name);
+        free(current);
+        current = next;
+    }
 }
 
 int add_files(Pak_t *pak, char **paths, int path_count) {
