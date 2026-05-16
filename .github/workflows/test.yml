@@ -38,6 +38,12 @@ jobs:
           tar xzf actionlint.tar.gz actionlint
       - run: ./actionlint -color .github/workflows/test.yml
       - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          # Pakka is not a Python project; the default cache glob hunts
+          # for requirements.txt / pyproject.toml and warns that the
+          # cache will never invalidate. We only use uv to run zizmor
+          # once — caching buys nothing.
+          enable-cache: false
       - run: uvx zizmor==1.25.2 .github/workflows/test.yml
       - name: Install clang-tidy
         run: |
@@ -195,7 +201,9 @@ jobs:
   # doesn't apply here) and MSYS2 to provide bash + bats for running
   # the existing test suite against the resulting pakka.exe.
   windows-msvc-x86_64:
-    runs-on: windows-latest
+    # windows-latest is being redirected to this label by mid-June 2026
+    # per the runner banner; pinning explicitly avoids the noise.
+    runs-on: windows-2025-vs2026
     defaults:
       run:
         shell: msys2 {0}
@@ -207,7 +215,11 @@ jobs:
         with:
           path: build/test/quakesw.tar.gz
           key: quakesw-${{ hashFiles('Makefile') }}
-      - uses: ilammy/msvc-dev-cmd@v1
+      # Fork of ilammy/msvc-dev-cmd that's actively maintained and
+      # runs on Node 24 (ilammy's v1.13.0 is still on Node 20).
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
       - uses: msys2/setup-msys2@v2
         with:
           # setup-msys2 caches its install dir by default (keyed on the
