@@ -241,8 +241,13 @@ jobs:
       - name: Fetch + verify Quake fixture
         run: make fixture
       - name: Run bats tests against pakka.exe
-        # Relative path so MSYS2 bash resolves it against $PWD instead
-        # of choking on the mixed-separator $GITHUB_WORKSPACE form.
-        env:
-          PAKKA: ./build/cmake/pakka.exe
-        run: bats tests/
+        # Resolve PAKKA to an MSYS2-style absolute path: relative paths
+        # can break inside bats's setup_file (bats may chdir into a temp
+        # dir before invoking it), and $GITHUB_WORKSPACE is Windows-shape
+        # which trips MSYS2 bash path resolution. $PWD inside this step
+        # is already the MSYS2 form of the workspace.
+        run: |
+          ls -la build/cmake/ || true
+          test -x build/cmake/pakka.exe
+          export PAKKA="$PWD/build/cmake/pakka.exe"
+          bats tests/
