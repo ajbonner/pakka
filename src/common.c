@@ -40,3 +40,14 @@ void fprint_sanitized(FILE *out, const char *s) {
         fputc((c < 0x20 || c == 0x7F) ? '?' : c, out);
     }
 }
+
+char *sanitize_name(char *dst, size_t dstsz, const char *src) {
+    size_t i = 0;
+    unsigned char c;
+    if (dstsz == 0) return dst;
+    while ((c = (unsigned char)*src++) != '\0' && i + 1 < dstsz) {
+        dst[i++] = (c < 0x20 || c == 0x7F) ? '?' : (char)c;
+    }
+    dst[i] = '\0';
+    return dst;
+}

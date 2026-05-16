@@ -167,7 +167,10 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
     }
     
     if (optind < argc) {
-         opts->paths = (char **) malloc(sizeof(char *) * (argc - optind));
+        opts->paths = (char **) malloc(sizeof(char *) * (argc - optind));
+        if (opts->paths == NULL) {
+            error_exit("Cannot allocate path argument list");
+        }
         while (optind < argc) {
             opts->paths[opts->path_count++] = argv[optind++];
         }
