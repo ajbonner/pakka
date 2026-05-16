@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
@@ -7,4 +8,4 @@
 
 int file_exists(const char *dirname);
 int mkdir_r(char *path);
-int filesize (FILE *fd);
+int64_t filesize(FILE *fd);
