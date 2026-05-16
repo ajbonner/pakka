@@ -153,6 +153,71 @@ setup_file() {
     [ "$status" -ne 0 ]
 }
 
+@test "list --tree: renders hierarchy with sorted branches and summary" {
+    mkdir -p "$BATS_TEST_TMPDIR/src/gfx" "$BATS_TEST_TMPDIR/src/maps"
+    printf 'cfg\n'    > "$BATS_TEST_TMPDIR/src/default.cfg"
+    printf 'dot1\n'   > "$BATS_TEST_TMPDIR/src/gfx/menudot1.lmp"
+    printf 'dot2\n'   > "$BATS_TEST_TMPDIR/src/gfx/menudot2.lmp"
+    printf 'pop\n'    > "$BATS_TEST_TMPDIR/src/gfx/pop.lmp"
+    printf 'battle\n' > "$BATS_TEST_TMPDIR/src/maps/b_batt0.bsp"
+    printf 'start\n'  > "$BATS_TEST_TMPDIR/src/maps/start.bsp"
+    printf 'quake\n'  > "$BATS_TEST_TMPDIR/src/quake.rc"
+
+    (cd "$BATS_TEST_TMPDIR/src" && "$PAKKA" -cf "$BATS_TEST_TMPDIR/tree.pak" default.cfg gfx maps quake.rc) >/dev/null
+
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/tree.pak" --tree
+    [ "$status" -eq 0 ]
+
+    expected=$(cat <<'EOF'
+.
+├── default.cfg
+├── gfx
+│   ├── menudot1.lmp
+│   ├── menudot2.lmp
+│   └── pop.lmp
+├── maps
+│   ├── b_batt0.bsp
+│   └── start.bsp
+└── quake.rc
+
+2 directories, 7 files
+EOF
+)
+
+    [ "$output" = "$expected" ]
+}
+
+@test "list --tree: empty pak prints root and zero summary" {
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    all_paths=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
+    # shellcheck disable=SC2086  # intentional word-splitting for the path list
+    "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
+
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" --tree
+    [ "$status" -eq 0 ]
+
+    expected=$(printf '.\n\n0 directories, 0 files')
+    [ "$output" = "$expected" ]
+}
+
+@test "list --tree: rejected when combined with a non-list mode" {
+    run "$PAKKA" -xf "$PAK0" --tree -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -- "--tree may only be used with -l"
+}
+
+@test "list --tree: literal --tree path is preserved after --" {
+    # Sanity: "--" should end option parsing so a path literally named
+    # "--tree" can still be matched as a pak entry.
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" -- --tree
+    # --tree is not in the pak; we expect a not-found error, NOT the
+    # "--tree may only be used with -l" message that fires when --tree
+    # is consumed as an option.
+    [ "$status" -ne 0 ]
+    ! echo "$output" | grep -q -- "--tree may only be used with -l"
+}
+
 @test "open: pak with truncated directory is rejected (load_directory fread check)" {
     # Header claims 1 entry (dirlength=64) starting at offset 12, but the
     # file ends at byte 12. load_directory's fread should catch the short
