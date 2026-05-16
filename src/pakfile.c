@@ -35,6 +35,7 @@ static int delete_entries(Pak_t *pak, Pakfileentry_t **entries, int num_entries)
 static int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd);
 static FILE *create_tmp_pakfile(void);
 static int in_array(Pakfileentry_t *entry, Pakfileentry_t **entries, int num_entries);
+static int is_unsafe_extract_path(const char *path);
 
 static int is_new = 0;
 static char cur_pakpath[OS_PATH_MAX];
@@ -455,6 +456,11 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
             if (! matched) continue;
         }
 
+        if (is_unsafe_extract_path(current->filename)) {
+            error_exit("Refusing to extract '%s': entry name would escape destination",
+                       current->filename);
+        }
+
         /* + 2 one for trailing null and the / we concat between basedir and pakfile path */
         destfile = malloc(sizeof(char) * (strlen(dest) + strlen(current->filename) + 2));
 		*destfile = '\0';
@@ -625,6 +631,50 @@ void build_filename(char *basedir, char *filename, char *dest) {
     strcat(dest, basedir);
     strcat(dest, "/");
     strcat(dest, filename);
+}
+
+/* Validate a pak entry name before extracting. Pak format places no
+ * constraints on entry names beyond a 56-byte upper bound, so a malicious
+ * pak can name an entry "../../etc/passwd" or "C:\windows\foo" and silently
+ * write outside the -C destination on extract. Both POSIX and Windows
+ * targets are checked here, because pak archives are portable and a pak
+ * crafted on Windows could be unpacked on POSIX (or vice versa). */
+static int is_unsafe_extract_path(const char *path) {
+    const char *p, *seg;
+    size_t seg_len;
+
+    if (path == NULL || *path == '\0') {
+        return 1;
+    }
+
+    if (path[0] == '/' || path[0] == '\\') {
+        return 1;
+    }
+
+    /* Drive-letter prefix ("X:..."): on Windows, fopen honors this and
+     * would route the write to a different drive's CWD or root. Reject
+     * unconditionally — pak entries should never carry one. */
+    if (path[1] == ':') {
+        return 1;
+    }
+
+    /* Walk slash- or backslash-separated segments. Only an exact ".."
+     * segment is rejected; "..foo" or "foo.." are legal characters. */
+    seg = path;
+    for (p = path; ; p++) {
+        if (*p == '/' || *p == '\\' || *p == '\0') {
+            seg_len = (size_t)(p - seg);
+            if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') {
+                return 1;
+            }
+            if (*p == '\0') {
+                break;
+            }
+            seg = p + 1;
+        }
+    }
+
+    return 0;
 }
 
 Pakfileentry_t *find_tail(Pak_t *pak) {

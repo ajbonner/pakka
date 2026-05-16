@@ -17,6 +17,26 @@ PROJECT_ROOT="${BATS_TEST_DIRNAME}/.."
 PAKKA="${PROJECT_ROOT}/pakka"
 PAK0="${PROJECT_ROOT}/build/test/pak0.pak"
 
+# Build a minimal valid pak with a single directory entry of the given
+# name and a zero-length payload. Used by the path-traversal tests to
+# inject names that would never come from pakka's own pack path.
+# Layout: 12-byte header + 64-byte dir entry, no payload bytes.
+write_pak_one_entry() {
+    # NB: split `local` over two statements — `local a="$1" b="$2" c=${#b}`
+    # evaluates `${#b}` *before* b="$2" is processed, yielding zero.
+    local pakfile="$1" name="$2"
+    local pad=$((56 - ${#name}))
+    {
+        # PACK + diroffset=12 (LE) + dirlength=64 (LE)
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        printf '%s' "$name"
+        dd if=/dev/zero bs=1 count="$pad" 2>/dev/null
+        # offset=76 (past directory; never read because we error first)
+        # length=0
+        printf '\114\000\000\000\000\000\000\000'
+    } > "$pakfile"
+}
+
 setup_file() {
     mkdir -p "$BATS_FILE_TMPDIR/extracted"
     "$PAKKA" -xf "$PAK0" -C "$BATS_FILE_TMPDIR/extracted" >/dev/null
@@ -226,4 +246,91 @@ EOF
     printf 'PACK\014\000\000\000\100\000\000\000' > "$BATS_TEST_TMPDIR/short_dir.pak"
     run "$PAKKA" -lf "$BATS_TEST_TMPDIR/short_dir.pak"
     [ "$status" -ne 0 ]
+}
+
+# Path-traversal hardening: a crafted pak can name an entry such that extract
+# would write outside the -C destination. Pak entry names are 56 bytes of
+# attacker-controlled data; pakka must reject traversal attempts on both
+# POSIX and Windows shapes (drive letters, UNC, mixed separators) since
+# paks are cross-platform.
+
+@test "extract: refuses '..' path traversal in POSIX-style entry name" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '../etc/passwd'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+    [ ! -e "$BATS_TEST_TMPDIR/etc" ]
+}
+
+@test "extract: refuses absolute POSIX path in entry name" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '/etc/passwd'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses '..' traversal using backslash separator" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '..\windows\foo'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses leading-backslash absolute path" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '\windows\foo'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses Windows drive-letter prefix" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'C:\windows\foo'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses UNC \\\\server\\share path" {
+    write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '\\server\share\foo'
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: refuses empty (all-NUL) entry name" {
+    {
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        dd if=/dev/zero bs=1 count=56 2>/dev/null
+        printf '\114\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/evil.pak"
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "extract: legitimate '..' substring in name (foo..bar) still extracts" {
+    # Sanity: only an exact ".." path component is unsafe. Substring
+    # patterns like "foo..bar" or "..foo" must continue to work, or
+    # we'd break legitimate filenames.
+    {
+        # Header: diroffset=17 (12-byte header + 5-byte payload), dirlength=64
+        printf 'PACK\021\000\000\000\100\000\000\000'
+        printf 'hello'
+        printf 'foo..bar'
+        dd if=/dev/zero bs=1 count=$((56 - 8)) 2>/dev/null
+        # offset=12 (start of payload), length=5
+        printf '\014\000\000\000\005\000\000\000'
+    } > "$BATS_TEST_TMPDIR/legit.pak"
+
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/legit.pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    [ -f "$BATS_TEST_TMPDIR/out/foo..bar" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/out/foo..bar")" = "hello" ]
 }
