@@ -29,6 +29,12 @@
   #ifndef S_ISDIR
     #define S_ISDIR(m) (((m) & _S_IFMT) == _S_IFDIR)
   #endif
+  /* Win32 has no POSIX symlinks; reparse-point safety is handled
+   * separately. S_ISLNK as a 0 macro lets the symlink-rejection
+   * branches in pakfile.c compile cleanly under MSVC. */
+  #ifndef S_ISLNK
+    #define S_ISLNK(m) 0
+  #endif
 #else
   #include <unistd.h>
   #include <libgen.h>
@@ -56,10 +62,33 @@ char *compat_dirname(char *path);
 int   compat_mkdir(const char *path, int mode);
 char *compat_strdup(const char *s);
 
+/* lstat() on POSIX (does not dereference the final path component);
+ * falls back to stat() on Windows where reparse-point checks belong
+ * to a separate code path. Used by the recursive-add path so symlinks
+ * are detected explicitly rather than silently followed. */
+int compat_lstat(const char *path, struct stat *sb);
+
+/* Open a write FILE* at dest_dir/rel_path, refusing to follow any
+ * symlink (POSIX) or reparse point (Windows) along rel_path. Missing
+ * intermediate directories are created. dest_dir itself MAY be a
+ * symlink — the user supplied it and any indirection there is
+ * intentional. Returns NULL on failure (symlink blocked, mkdir or
+ * open error). On POSIX this is built on openat(2)/mkdirat(2) with
+ * O_NOFOLLOW so the check is atomic with the open; on Windows it
+ * uses GetFileAttributesA + CreateFile with a short TOCTOU window. */
+FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path);
+
 /* Rename src→dst, replacing dst if it exists. Returns 0 on success
  * (POSIX rename convention), -1 on failure. Callers MUST close every
  * open FILE* on dst before calling: CRT fopen on Windows omits
  * FILE_SHARE_DELETE, so an outstanding handle blocks the replace. */
 int compat_rename_replace(const char *src, const char *dst);
+
+/* Rename src→dst with no-replace semantics: fails if dst exists.
+ * Used by create mode to close the TOCTOU window between create_pakfile's
+ * stat() existence check and close_pakfile's final rename. Returns 0
+ * on success, -1 on failure (including dst-already-exists). Same FILE*
+ * close-first rule as compat_rename_replace. */
+int compat_rename_noreplace(const char *src, const char *dst);
 
 #endif
