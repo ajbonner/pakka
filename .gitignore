@@ -1,6 +1,2 @@
-tags
-*.pak
-*.o
-*.swp
-/tmp
+/build/
 /pakka
