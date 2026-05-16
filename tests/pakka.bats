@@ -457,6 +457,81 @@ EOF
     [ "$(cat "$BATS_TEST_TMPDIR/target.pak")" = "do not clobber me" ]
 }
 
+# Wave 3 — CLI arg validation, -C sanity, read-only opens, create-time
+# entry-name validation, terminal-injection defense in depth.
+
+@test "cli: rejects -d with no path arguments" {
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "requires at least one path"
+}
+
+@test "cli: rejects -a with no path arguments" {
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "requires at least one path"
+}
+
+@test "cli: rejects empty -f pakfile name" {
+    run "$PAKKA" -lf ""
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "pakfile name"
+}
+
+@test "extract: refuses -C target that is a regular file" {
+    printf 'hi\n' > "$BATS_TEST_TMPDIR/not-a-dir"
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$PAK0" -C "$BATS_TEST_TMPDIR/not-a-dir"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "not a directory"
+}
+
+@test "add: refuses to bake unsafe entry name into pak" {
+    # Pakka's own bats fixture trees use simple relative names, so use
+    # `--` to push a leading `-` through getopt and a literal name that
+    # is_unsafe_extract_path will catch.
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    printf 'evil\n' > "$BATS_TEST_TMPDIR/CON"
+    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -af work.pak CON"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q "not safe to extract"
+}
+
+@test "list: read-only pak (chmod -w) still lists" {
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/ro.pak"
+    chmod a-w "$BATS_TEST_TMPDIR/ro.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/ro.pak"
+    [ "$status" -eq 0 ]
+    # Restore so bats cleanup can rm it.
+    chmod u+w "$BATS_TEST_TMPDIR/ro.pak"
+}
+
+@test "list: read-only pak still extracts" {
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/ro.pak"
+    chmod a-w "$BATS_TEST_TMPDIR/ro.pak"
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/ro.pak" -C "$BATS_TEST_TMPDIR/out" default.cfg >/dev/null
+    [ -f "$BATS_TEST_TMPDIR/out/default.cfg" ]
+    chmod u+w "$BATS_TEST_TMPDIR/ro.pak"
+}
+
+@test "list: control-byte entry name prints sanitized as '?'" {
+    # Build a pak whose entry name contains an ESC byte. is_unsafe_extract_path
+    # blocks extract, but list still has to print the name — and must not
+    # let the raw byte through to the terminal.
+    name=$(printf 'naughty\033name')
+    write_pak_one_entry "$BATS_TEST_TMPDIR/inj.pak" "$name"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/inj.pak"
+    [ "$status" -eq 0 ]
+    # Raw ESC must not appear in output; '?' must.
+    ! printf '%s' "$output" | grep -q -- $'\033'
+    printf '%s' "$output" | grep -q 'naughty?name'
+}
+
 # Path-traversal hardening: a crafted pak can name an entry such that extract
 # would write outside the -C destination. Pak entry names are 56 bytes of
 # attacker-controlled data; pakka must reject traversal attempts on both

@@ -50,9 +50,15 @@ char *compat_getcwd(char *buf, size_t size);
 /* Open a fresh temp file in binary write mode and write the resolved
  * path into out_path (capacity out_path_size). The basename suffix
  * must contain "XXXXXX" for mkstemp/_mktemp_s substitution.
- * On POSIX, files are created under /tmp/; on Windows, under the
- * directory returned by GetTempPathA. Returns NULL on failure. */
-FILE *compat_mkstemp_open(const char *basename_template,
+ *
+ * Tries to create the temp in the same directory as target_path (or
+ * the target directory itself when used for create / delete rebuilds)
+ * so the eventual rename is intra-filesystem and atomic. Falls back
+ * to the system temp dir if the target's directory is unwritable.
+ * target_path may be NULL to skip the same-dir attempt. Returns NULL
+ * on failure. */
+FILE *compat_mkstemp_open(const char *target_path,
+                          const char *basename_template,
                           char *out_path, size_t out_path_size);
 
 /* Returns the directory part of path. May mutate path in place
@@ -67,6 +73,15 @@ char *compat_strdup(const char *s);
  * to a separate code path. Used by the recursive-add path so symlinks
  * are detected explicitly rather than silently followed. */
 int compat_lstat(const char *path, struct stat *sb);
+
+/* Try to acquire an exclusive non-blocking lock on the open FILE*.
+ * POSIX: flock(LOCK_EX | LOCK_NB). Windows: _locking on byte 0. Lock
+ * is released when the FILE* is closed. Returns 0 on success, -1 if
+ * contended or unsupported. Used in writable opens to prevent two
+ * pakka invocations from corrupting a pak in parallel — multiple
+ * concurrent add/delete operations would silently clobber each
+ * other's directory rewrites. */
+int compat_try_exclusive_lock(FILE *fp);
 
 /* Open a write FILE* at dest_dir/rel_path, refusing to follow any
  * symlink (POSIX) or reparse point (Windows) along rel_path. Missing

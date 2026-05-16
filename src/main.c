@@ -34,7 +34,8 @@ int main(int argc, char *argv[]) {
     if (opts.mode == PAK_CREATE) {
         pak = create_pakfile(opts.pakfile);
     } else {
-        pak = open_pakfile(opts.pakfile);
+        int writable = (opts.mode == PAK_ADD || opts.mode == PAK_REMOVE);
+        pak = open_pakfile(opts.pakfile, writable);
     }
     
     switch (opts.mode) {
@@ -72,6 +73,11 @@ void listpakfiles(Pak_t *pak, int tree) {
 
 void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
     char *realdest = malloc(sizeof(char) * OS_PATH_MAX);
+    struct stat sb;
+
+    if (realdest == NULL) {
+        error_exit("Cannot allocate destination buffer");
+    }
 
     if (destination != NULL) {
         if (compat_realpath(destination, realdest) == NULL) {
@@ -81,6 +87,16 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
         if (compat_getcwd(realdest, OS_PATH_MAX) == NULL) {
             error_exit("Cannot get current working directory");
         }
+    }
+
+    /* `-C` must resolve to a real directory. Otherwise extract_files
+     * would happily run mkdir_r against a path like `/etc/passwd/sound`
+     * which fails partway through after side effects. */
+    if (stat(realdest, &sb) != 0) {
+        error_exit("Cannot stat destination '%s'", realdest);
+    }
+    if (! S_ISDIR(sb.st_mode)) {
+        error_exit("Destination '%s' is not a directory", realdest);
     }
 
     extract_files(pak, realdest, paths, path_count);
@@ -162,13 +178,27 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
         usage();
     }
 
-    if (! opts->pakfile) {
+    if (! opts->pakfile || opts->pakfile[0] == '\0') {
         fprintf(stderr, "You must specify a pakfile name with -f\n");
         usage();
     }
 
     if (opts->tree && opts->mode != PAK_LIST) {
         fprintf(stderr, "--tree may only be used with -l\n");
+        usage();
+    }
+
+    /* -a and -d require at least one path. The CLI's only "no path"
+     * modes are -l, -x (extracts everything), and -c (creates an
+     * empty pak — arguably surprising but historically allowed).
+     * Without this check, `pakka -df foo.pak` rewrites foo.pak through
+     * a temp file with no entries removed (different bytes, lost
+     * mode/owner/xattrs); `pakka -af foo.pak` is a no-op write. */
+    if ((opts->mode == PAK_ADD || opts->mode == PAK_REMOVE)
+        && opts->path_count == 0) {
+        fprintf(stderr,
+                "%s requires at least one path argument\n",
+                opts->mode == PAK_ADD ? "-a" : "-d");
         usage();
     }
 

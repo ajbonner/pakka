@@ -14,6 +14,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <sys/locking.h>
 
 char *compat_realpath(const char *path, char *resolved) {
     return _fullpath(resolved, path, _MAX_PATH);
@@ -23,9 +24,40 @@ char *compat_getcwd(char *buf, size_t size) {
     return _getcwd(buf, (int)size);
 }
 
-FILE *compat_mkstemp_open(const char *basename_template,
+/* Best-effort: try `<target_dir>\<template>`. Returns a FILE* on
+ * success or NULL on any failure (caller falls back). */
+static FILE *mkstemp_open_in_dir(const char *target_path,
+                                 const char *basename_template,
+                                 char *out_path, size_t out_path_size) {
+    char target_copy[PATH_MAX];
+    const char *dir;
+    int n;
+
+    if (target_path == NULL) return NULL;
+    if (strlen(target_path) >= sizeof(target_copy)) return NULL;
+    strcpy(target_copy, target_path);
+    dir = compat_dirname(target_copy);
+
+    n = snprintf(out_path, out_path_size, "%s\\%s", dir, basename_template);
+    if (n < 0 || (size_t)n >= out_path_size) return NULL;
+
+    if (_mktemp_s(out_path, out_path_size) != 0) return NULL;
+    return fopen(out_path, "wb");
+}
+
+FILE *compat_mkstemp_open(const char *target_path,
+                          const char *basename_template,
                           char *out_path, size_t out_path_size) {
-    DWORD len = GetTempPathA((DWORD)out_path_size, out_path);
+    FILE *fp;
+    DWORD len;
+
+    fp = mkstemp_open_in_dir(target_path, basename_template, out_path, out_path_size);
+    if (fp != NULL) return fp;
+
+    /* Fallback to GetTempPathA when same-dir creation failed (e.g.
+     * read-only target directory). The eventual rename may then hit
+     * cross-FS errors — same limitation as before this fix. */
+    len = GetTempPathA((DWORD)out_path_size, out_path);
     if (len == 0 || len + strlen(basename_template) + 1 > out_path_size) {
         return NULL;
     }
@@ -102,6 +134,17 @@ int compat_lstat(const char *path, struct stat *sb) {
     return stat(path, sb);
 }
 
+int compat_try_exclusive_lock(FILE *fp) {
+    /* _locking with _LK_NBLCK is exclusive + non-blocking. Lock the
+     * first byte from position 0; load_pakfile's first read happens
+     * right after open with the stream still at 0, so we don't need
+     * to seek-save/restore here. */
+    int fd = _fileno(fp);
+    if (fd < 0) return -1;
+    if (fseek(fp, 0L, SEEK_SET) != 0) return -1;
+    return _locking(fd, _LK_NBLCK, 1);
+}
+
 /* Helper: append "<sep>name" (or just "name" if path is empty/separator
  * already at end) to path, respecting capacity. Returns 0 on success,
  * -1 if it wouldn't fit. */
@@ -170,6 +213,7 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
 
 #include <fcntl.h>
 #include <errno.h>
+#include <sys/file.h>
 
 char *compat_realpath(const char *path, char *resolved) {
     return realpath(path, resolved);
@@ -179,11 +223,47 @@ char *compat_getcwd(char *buf, size_t size) {
     return getcwd(buf, size);
 }
 
-FILE *compat_mkstemp_open(const char *basename_template,
+/* Best-effort: try mkstemp in target_path's parent directory. NULL on
+ * any failure (caller falls back to the system temp dir). */
+static FILE *mkstemp_open_in_dir(const char *target_path,
+                                 const char *basename_template,
+                                 char *out_path, size_t out_path_size) {
+    char target_copy[PATH_MAX];
+    char *dir;
+    FILE *fp;
+    int n, fd;
+
+    if (target_path == NULL) return NULL;
+    if (strlen(target_path) >= sizeof(target_copy)) return NULL;
+    strcpy(target_copy, target_path);
+    dir = compat_dirname(target_copy);
+
+    n = snprintf(out_path, out_path_size, "%s/%s", dir, basename_template);
+    if (n < 0 || (size_t)n >= out_path_size) return NULL;
+
+    fd = mkstemp(out_path);
+    if (fd < 0) return NULL;
+    fp = fdopen(fd, "wb");
+    if (fp == NULL) {
+        close(fd);
+        unlink(out_path);
+        return NULL;
+    }
+    return fp;
+}
+
+FILE *compat_mkstemp_open(const char *target_path,
+                          const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
     int n, fd;
 
+    fp = mkstemp_open_in_dir(target_path, basename_template, out_path, out_path_size);
+    if (fp != NULL) return fp;
+
+    /* Fallback to /tmp. Keeps create / delete working on read-only
+     * destination directories, at the cost of a potentially cross-FS
+     * rename — same constraint as before this fix. */
     n = snprintf(out_path, out_path_size, "/tmp/%s", basename_template);
     if (n < 0 || (size_t)n >= out_path_size) {
         return NULL;
@@ -235,6 +315,15 @@ int compat_rename_noreplace(const char *src, const char *dst) {
 
 int compat_lstat(const char *path, struct stat *sb) {
     return lstat(path, sb);
+}
+
+int compat_try_exclusive_lock(FILE *fp) {
+    /* flock(2) is not strictly POSIX but is available on Linux, macOS,
+     * FreeBSD, OpenBSD, Alpine musl, and BSDs — every target in CI.
+     * LOCK_NB makes it fail fast on contention instead of blocking. */
+    int fd = fileno(fp);
+    if (fd < 0) return -1;
+    return flock(fd, LOCK_EX | LOCK_NB);
 }
 
 /* O_NOFOLLOW on the trailing component, mkdirat / openat for every
