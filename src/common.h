@@ -76,6 +76,12 @@ void error_exit_e(int saved_errno, const char *format, ...);
  * malicious pak shouldn't let it inject ANSI escapes that reflow a
  * user's terminal. */
 void fprint_sanitized(FILE *out, const char *s);
+
+/* Copy src into dst with the same sanitization, NUL-terminated, up
+ * to dstsz-1 bytes. Returns dst. Use to inject pak-derived names
+ * into error_exit format strings without leaking control bytes into
+ * the user's terminal. */
+char *sanitize_name(char *dst, size_t dstsz, const char *src);
 /* Open an existing pak. writable=0 opens "rb" (works on read-only
  * paks; required for list/extract), writable=1 opens "r+b" (required
  * for add/delete). */
