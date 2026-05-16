@@ -14,18 +14,18 @@ typedef struct opts_s {
     int path_count;
 } opts_t;
 
-char *name;
-static void listpakfiles(Pak_t *);
-static void extract(Pak_t *, char *, char **, int);
-static void usage();
-static void usage_banner();
-static void help();
-static int parseopts(int, char **, opts_t *);
-static void setmodetype(opts_t *, short);
+static char *name;
+static void listpakfiles(Pak_t *pak);
+static void extract(Pak_t *pak, char *destination, char **paths, int path_count);
+static void usage(void);
+static void usage_banner(void);
+static void help(void);
+static int parseopts(int argc, char **argv, opts_t *opts);
+static void setmodetype(opts_t *opts, short mode);
 
 int main(int argc, char *argv[]) {
     name = argv[0];
-    opts_t opts;
+    opts_t opts = {0};
     parseopts(argc, argv, &opts);
     Pak_t *pak;
     
@@ -72,12 +72,12 @@ void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
            error_exit("Cannot open destination path '%s'", destination);
         }
     } else {
-        if (getcwd(realdest, sizeof(realdest) * OS_PATH_MAX) == NULL) {
+        if (getcwd(realdest, OS_PATH_MAX) == NULL) {
             error_exit("Cannot get current working directory");
         }
     }
 
-    extract_files(pak, realdest);
+    extract_files(pak, realdest, paths, path_count);
     free(realdest);
 }
 
@@ -114,6 +114,8 @@ int parseopts(int argc, char* argv[], opts_t *opts) {
             case 'h':
                 help();
                 break;
+            default:
+                usage();
         }
     }
     
@@ -146,17 +148,17 @@ void setmodetype(opts_t *opt, short mode) {
     }
 }
 
-void usage_banner() {
+void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
     fprintf(stderr, "Usage: %s -h [-lxcad] -f [pak file] -C [destination path] [path(s)]\n", name);
 }
 
-void usage() {
+void usage(void) {
     usage_banner();
     exit(1);
 }
 
-void help() {
+void help(void) {
     usage_banner();
 
     fprintf(stderr, "\nOperation Modes:\n");

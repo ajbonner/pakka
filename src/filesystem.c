@@ -10,7 +10,6 @@ int mkdir_r(char *path) {
     char *curpos = path;
     int mode = 0777;
 
-    /* check if something already exists at path */
     if (stat(path, &sb) == 0) {
         if (S_ISDIR(sb.st_mode) == 0) {
             fprintf(stderr, "Could not create directory '%s': file exists but is not a directory\n", path);
@@ -51,11 +50,11 @@ int mkdir_r(char *path) {
 }
 
 int filesize(FILE *fd) {
-    int size;
+    long size;
 
     fseek(fd, 0L, SEEK_END);
     size = ftell(fd);
     rewind(fd);
 
-    return size;
+    return (int)size;
 }

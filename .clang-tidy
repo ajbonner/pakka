@@ -1,0 +1,43 @@
+# Curated check set for a small C99 codebase.
+#
+# Enabled categories:
+#   bugprone-*       — likely bugs and footguns
+#   portability-*    — cross-platform correctness
+#   cert-*           — CERT C secure-coding rules (noisier members disabled below)
+#   misc-use-internal-linkage    — flags globals that should be static
+#   misc-redundant-expression
+#   readability-named-parameter  — function prototypes should name params
+#   readability-redundant-*      — dead/redundant code
+#   readability-misleading-indentation
+#
+# Disabled:
+#   clang-analyzer-*  — covered separately by scan-build; produces false
+#                       positives here because error_exit() isn't marked noreturn
+#                       (we intentionally avoid the GCC/Clang attribute).
+#   bugprone-assignment-in-if-condition — `if ((x = ...) != NULL)` is idiomatic
+#   bugprone-narrowing-conversions      — false positive on unsigned/int division
+#   bugprone-easily-swappable-parameters — style nit
+#   bugprone-multi-level-implicit-pointer-conversion — `free(char**)` style
+#   bugprone-unsafe-functions, cert-msc24-c, cert-msc33-c — flags rewind/strcpy
+#   cert-err33-c — every fprintf would need `(void)` cast
+#
+Checks: >
+  bugprone-*,
+  portability-*,
+  cert-*,
+  misc-use-internal-linkage,
+  misc-redundant-expression,
+  readability-named-parameter,
+  readability-redundant-*,
+  readability-misleading-indentation,
+  -bugprone-assignment-in-if-condition,
+  -bugprone-easily-swappable-parameters,
+  -bugprone-multi-level-implicit-pointer-conversion,
+  -bugprone-narrowing-conversions,
+  -bugprone-unsafe-functions,
+  -cert-err33-c,
+  -cert-msc24-c,
+  -cert-msc33-c
+
+WarningsAsErrors: '*'
+HeaderFilterRegex: '.*\.h$'

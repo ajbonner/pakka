@@ -1,0 +1,145 @@
+name: test
+
+on:
+  push:
+    branches: [master]
+  pull_request:
+  workflow_dispatch:
+  schedule:
+    - cron: '0 7 * * 0'  # Sundays 07:00 UTC
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/master' }}
+
+permissions:
+  contents: read
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    env:
+      ACTIONLINT_VERSION: '1.7.12'
+      ACTIONLINT_SHA256: '8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install actionlint (pinned release + sha256-verified)
+        run: |
+          set -euo pipefail
+          curl -fsSL -o actionlint.tar.gz \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
+          tar xzf actionlint.tar.gz actionlint
+      - run: ./actionlint -color .github/workflows/test.yml
+      - uses: astral-sh/setup-uv@v8
+      - run: uvx zizmor==1.25.2 .github/workflows/test.yml
+      - name: Install clang-tidy
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang-tidy
+      - run: make lint
+
+  macos-intel-x86_64:
+    runs-on: macos-26-intel
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: brew install bats-core
+      - run: make test
+
+  macos-apple-silicon-arm64:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: brew install bats-core
+      - run: make test
+
+  linux-glibc-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl
+      - run: make test
+
+  linux-glibc-arm64:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl
+      - run: make test
+
+  linux-musl-x86_64:
+    runs-on: ubuntu-latest
+    container: alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11
+    steps:
+      - run: apk add --no-cache build-base make curl openssl bats bash git
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: make test
+
+  # 32-bit ABI build on a 64-bit kernel/libc via -m32. Not a true i386 OS,
+  # but exercises the 32-bit code path (size_t width, pointer width, etc.).
+  linux-glibc-amd64-m32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-multilib build-essential bats curl openssl
+      - run: make test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
+
+  freebsd-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.0'
+          usesh: true
+          prepare: pkg install -y gmake curl bats-core
+          run: gmake test
+
+  # 32-bit ABI build on a 64-bit FreeBSD kernel via -m32 + lib32 (ships in base).
+  # vmactions doesn't run a true i386 BSD guest.
+  freebsd-amd64-m32:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: vmactions/freebsd-vm@v1
+        with:
+          release: '15.0'
+          usesh: true
+          prepare: pkg install -y gmake curl bats-core
+          run: gmake test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
+
+  openbsd-amd64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: vmactions/openbsd-vm@v1
+        with:
+          release: '7.8'
+          prepare: pkg_add -I gmake curl bats
+          run: gmake test
