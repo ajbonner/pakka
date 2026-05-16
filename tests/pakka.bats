@@ -320,6 +320,141 @@ EOF
     echo "$output" | grep -q "Refusing to extract"
 }
 
+@test "open: pak with bad PACK magic is rejected" {
+    # Same shape as a valid pak but with the signature flipped. Without
+    # the memcmp("PACK") check, this would parse as an empty pak.
+    {
+        printf 'NOPE\014\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/badmagic.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/badmagic.pak"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "signature"
+}
+
+@test "open: pak with diroffset past EOF is rejected" {
+    # Header advertises diroffset=999, dirlength=0 in a 12-byte file.
+    # Pre-validator, this loaded as an "empty" pak silently.
+    {
+        printf 'PACK\347\003\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/bad_diroffset.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_diroffset.pak"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "directory"
+}
+
+@test "open: pak with dirlength wrapping past EOF is rejected" {
+    # diroffset=12, dirlength=0xFFFFFFC0 (multiple of 64, but way past EOF).
+    # Tests the overflow-safe bounds check.
+    {
+        printf 'PACK\014\000\000\000\300\377\377\377'
+    } > "$BATS_TEST_TMPDIR/bad_dirlength.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_dirlength.pak"
+    [ "$status" -ne 0 ]
+}
+
+@test "open: pak entry offset+length past EOF is rejected" {
+    # Header is valid (dir at 12, length 64), one entry with offset=12
+    # but length=999 in a 76-byte file. Without entry bounds validation,
+    # extract would malloc & fread bogus length and write garbage.
+    {
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        printf 'bogus'
+        dd if=/dev/zero bs=1 count=$((56 - 5)) 2>/dev/null
+        printf '\014\000\000\000\347\003\000\000'
+    } > "$BATS_TEST_TMPDIR/bad_entry.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_entry.pak"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "out of range"
+}
+
+@test "open: pak entry offset inside header is rejected" {
+    # Entry offset=4 lands inside the 12-byte header — nonsensical and
+    # used historically to obscure entry contents.
+    {
+        printf 'PACK\014\000\000\000\100\000\000\000'
+        printf 'header'
+        dd if=/dev/zero bs=1 count=$((56 - 6)) 2>/dev/null
+        printf '\004\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/inside_header.pak"
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/inside_header.pak"
+    [ "$status" -ne 0 ]
+}
+
+@test "add: rejects input path that would overflow 56-byte name field" {
+    # Pre-fix: strcpy(entry->filename, path) corrupted the heap. Now
+    # rejected with a clear error before the copy.
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    long_name=$(printf 'a%.0s' $(seq 1 70))
+    echo "x" > "$BATS_TEST_TMPDIR/$long_name"
+    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/$long_name"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "too long"
+}
+
+@test "add: zero-byte file adds and extracts cleanly" {
+    # Pre-fix: `while (fread(bytes, 0, 1, tfd))` infinite-looped on
+    # empty files. Now the size==0 branch skips read/write entirely.
+    cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
+    : > "$BATS_TEST_TMPDIR/empty.txt"
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak empty.txt) >/dev/null
+
+    "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | grep -q '^empty\.txt '
+
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" empty.txt >/dev/null
+    [ -f "$BATS_TEST_TMPDIR/out/empty.txt" ]
+    [ "$(wc -c < "$BATS_TEST_TMPDIR/out/empty.txt" | tr -d ' ')" -eq 0 ]
+}
+
+@test "add: preserves bytes when directory tail < byte tail (non-linear layout)" {
+    # Regression for the find_tail bug: id's pak0.pak has entries out of
+    # byte order, with the directory's last entry NOT at the file's byte
+    # tail. Old code seeked to tail->offset+tail->length and would
+    # overwrite live data sitting at higher offsets. The fix walks every
+    # entry and seeks to the true max(offset+length).
+    #
+    # Layout (LE):
+    #   bytes   0..11 : "PACK" + diroffset=17 + dirlength=128
+    #   bytes  12..16 : "hello" (afile payload)
+    #   bytes  17..80 : dir entry 0 = "bfile" (offset=145, length=5)
+    #   bytes  81..144: dir entry 1 = "afile" (offset=12,  length=5)
+    #   bytes 145..149: "world" (bfile payload)
+    #
+    # load_directory builds the list head→tail in directory order, so
+    # tail = afile (offset+length=17). Pre-fix add_file seeks to byte
+    # 17 and overwrites the directory plus bfile's payload at 145.
+    {
+        printf 'PACK\021\000\000\000\200\000\000\000'
+        printf 'hello'
+        # dir entry 0: bfile at offset 145
+        printf 'bfile'
+        dd if=/dev/zero bs=1 count=$((56 - 5)) 2>/dev/null
+        printf '\221\000\000\000\005\000\000\000'
+        # dir entry 1: afile at offset 12  (this is the dir-order tail)
+        printf 'afile'
+        dd if=/dev/zero bs=1 count=$((56 - 5)) 2>/dev/null
+        printf '\014\000\000\000\005\000\000\000'
+        printf 'world'
+    } > "$BATS_TEST_TMPDIR/non_linear.pak"
+
+    # Sanity: both entries extract correctly from the original.
+    mkdir -p "$BATS_TEST_TMPDIR/pre"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/non_linear.pak" -C "$BATS_TEST_TMPDIR/pre" >/dev/null
+    [ "$(cat "$BATS_TEST_TMPDIR/pre/afile")" = "hello" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/pre/bfile")" = "world" ]
+
+    cp "$BATS_TEST_TMPDIR/non_linear.pak" "$BATS_TEST_TMPDIR/work.pak"
+    echo "new content" > "$BATS_TEST_TMPDIR/cfile"
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak cfile) >/dev/null
+
+    # Both pre-existing payloads must survive; the new one must be there.
+    mkdir -p "$BATS_TEST_TMPDIR/post"
+    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/post" >/dev/null
+    [ "$(cat "$BATS_TEST_TMPDIR/post/afile")" = "hello" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/post/bfile")" = "world" ]
+    [ "$(cat "$BATS_TEST_TMPDIR/post/cfile")" = "new content" ]
+}
+
 @test "extract: legitimate '..' substring in name (foo..bar) still extracts" {
     # Sanity: only an exact ".." path component is unsafe. Substring
     # patterns like "foo..bar" or "..foo" must continue to work, or
