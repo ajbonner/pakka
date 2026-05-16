@@ -489,9 +489,12 @@ EOF
 }
 
 @test "add: refuses to bake unsafe entry name into pak" {
-    # Pakka's own bats fixture trees use simple relative names, so use
-    # `--` to push a leading `-` through getopt and a literal name that
-    # is_unsafe_extract_path will catch.
+    # Windows can't create a file literally named "CON" — the OS
+    # intercepts the open as a device reference and the printf below
+    # never produces a real file. Skip there; the POSIX run still
+    # exercises the create-time is_unsafe_extract_path check.
+    case "$PAKKA" in *.exe) skip "Windows reserves CON at the OS level" ;; esac
+
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     printf 'evil\n' > "$BATS_TEST_TMPDIR/CON"
     run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -af work.pak CON"

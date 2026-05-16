@@ -213,7 +213,6 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
 
 #include <fcntl.h>
 #include <errno.h>
-#include <sys/file.h>
 
 char *compat_realpath(const char *path, char *resolved) {
     return realpath(path, resolved);
@@ -318,12 +317,22 @@ int compat_lstat(const char *path, struct stat *sb) {
 }
 
 int compat_try_exclusive_lock(FILE *fp) {
-    /* flock(2) is not strictly POSIX but is available on Linux, macOS,
-     * FreeBSD, OpenBSD, Alpine musl, and BSDs — every target in CI.
-     * LOCK_NB makes it fail fast on contention instead of blocking. */
+    /* fcntl(F_SETLK) is POSIX-mandatory and visible under
+     * _XOPEN_SOURCE=700 on every CI target. flock(2) is BSD-derived
+     * and the BSDs hide it behind __BSD_VISIBLE, which is 0 in strict
+     * XPG7 mode — switching to fcntl avoids the platform-specific
+     * feature-test dance. F_SETLK is non-blocking: it fails with
+     * EACCES or EAGAIN if another process holds a conflicting lock.
+     * Lock is released when fd is closed. */
+    struct flock lock;
     int fd = fileno(fp);
     if (fd < 0) return -1;
-    return flock(fd, LOCK_EX | LOCK_NB);
+    lock.l_type   = F_WRLCK;
+    lock.l_whence = SEEK_SET;
+    lock.l_start  = 0;
+    lock.l_len    = 0;  /* 0 means "to EOF / whole file" */
+    lock.l_pid    = 0;
+    return fcntl(fd, F_SETLK, &lock);
 }
 
 /* O_NOFOLLOW on the trailing component, mkdirat / openat for every
