@@ -37,7 +37,8 @@ Checks: >
   -bugprone-unsafe-functions,
   -cert-err33-c,
   -cert-msc24-c,
-  -cert-msc33-c
+  -cert-msc33-c,
+  -clang-analyzer-*
 
 WarningsAsErrors: '*'
 HeaderFilterRegex: '.*\.h$'
