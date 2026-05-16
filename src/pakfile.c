@@ -125,13 +125,13 @@ void load_pakfile(Pak_t *pak) {
 void load_directory(Pak_t *pak) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
-    int i, entry_pos;
+    uint32_t i, entry_pos;
 
     if (pak->num_entries > 0) {
         for (i = 1; i <= pak->num_entries; i++) {
-            entry_pos = pak->diroffset + pak->dirlength 
+            entry_pos = pak->diroffset + pak->dirlength
                 - (i * PAKFILE_DIR_ENTRY_SIZE);
-            fseek(fp, entry_pos, SEEK_SET);
+            fseek(fp, (long)entry_pos, SEEK_SET);
 
             current = calloc(1, sizeof(Pakfileentry_t));
             if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
