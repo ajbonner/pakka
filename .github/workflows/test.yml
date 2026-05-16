@@ -210,7 +210,11 @@ jobs:
       - uses: ilammy/msvc-dev-cmd@v1
       - uses: msys2/setup-msys2@v2
         with:
-          update: true
+          # setup-msys2 caches its install dir by default (keyed on the
+          # install list). `update: false` keeps `pacman -Syu` from
+          # firing on every run — the windows-latest MSYS2 base already
+          # ships current versions of everything we need.
+          update: false
           install: >-
             bash
             coreutils
