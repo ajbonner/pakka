@@ -74,6 +74,14 @@ char *compat_strdup(const char *s);
  * are detected explicitly rather than silently followed. */
 int compat_lstat(const char *path, struct stat *sb);
 
+/* Returns 1 if path is a symlink (POSIX) or a reparse point /
+ * junction / mount point (Windows), else 0. Errors are reported as 0
+ * (caller's subsequent stat will surface the same problem with a
+ * better message). Used by the recursive-add path to reject indirections
+ * that would otherwise let an attacker-controlled tree pull files
+ * from outside the requested directory. */
+int compat_is_reparse_or_symlink(const char *path);
+
 /* Try to acquire an exclusive non-blocking lock on the open FILE*.
  * POSIX: flock(LOCK_EX | LOCK_NB). Windows: _locking on byte 0. Lock
  * is released when the FILE* is closed. Returns 0 on success, -1 if

@@ -116,6 +116,7 @@ Pak_t *create_pakfile(const char *pakpath) {
 int close_pakfile(Pak_t *pak) {
     Pakfileentry_t *e = pak->head;
     Pakfileentry_t *next;
+    int close_rc = 0;
 
     while (e != NULL) {
         next = e->next;
@@ -128,13 +129,23 @@ int close_pakfile(Pak_t *pak) {
     /* fclose BEFORE rename: CRT fopen on Windows does not request
      * FILE_SHARE_DELETE, so MoveFileEx would otherwise be blocked by
      * the still-open handle. delete_entries may have already closed
-     * fp on its own (it sets fp = NULL), so tolerate that. */
+     * fp on its own (it sets fp = NULL), so tolerate that.
+     *
+     * Capture the close return: when is_new=1, fp IS the temp pak
+     * about to be renamed into place, and buffered write errors
+     * (disk full, NFS, quota) surface here, not on fwrite. Renaming
+     * a half-flushed temp over a non-existent destination would
+     * leave a corrupt pak. */
     if (fp != NULL) {
-        fclose(fp);
+        close_rc = fclose(fp);
         fp = NULL;
     }
 
     if (is_new) {
+        if (close_rc != 0) {
+            error_exit("Error finalizing pak %s "
+                       "(disk full or I/O error)", new_pakpath);
+        }
         /* No-replace semantics: between create_pakfile's stat() check
          * and now another process may have dropped a file at the
          * destination. Atomically refuse to overwrite rather than
@@ -295,9 +306,17 @@ void list_files_tree(Pak_t *pak) {
 
 Paktreenode_t *create_tree_node(const char *name, int is_dir) {
     Paktreenode_t *node = calloc(1, sizeof(Paktreenode_t));
+    size_t name_len;
 
-    node->name = malloc(strlen(name) + 1);
-    strcpy(node->name, name);
+    if (node == NULL) {
+        error_exit("Cannot allocate tree node");
+    }
+    name_len = strlen(name);
+    node->name = malloc(name_len + 1);
+    if (node->name == NULL) {
+        error_exit("Cannot allocate tree node name");
+    }
+    memcpy(node->name, name, name_len + 1);
     node->is_dir = is_dir;
 
     return node;
@@ -396,9 +415,12 @@ void print_tree_children(Paktreenode_t *node, const char *prefix) {
         putchar('\n');
 
         if (current->is_dir) {
-            next_prefix = malloc(strlen(prefix) + strlen(prefix_suffix) + 1);
-            strcpy(next_prefix, prefix);
-            strcat(next_prefix, prefix_suffix);
+            size_t next_size = strlen(prefix) + strlen(prefix_suffix) + 1;
+            next_prefix = malloc(next_size);
+            if (next_prefix == NULL) {
+                error_exit("Cannot allocate tree prefix");
+            }
+            snprintf(next_prefix, next_size, "%s%s", prefix, prefix_suffix);
             print_tree_children(current, next_prefix);
             free(next_prefix);
         }
@@ -445,13 +467,17 @@ int add_files(Pak_t *pak, char **paths, int path_count) {
 int add_to_pak(Pak_t *pak, char* path) {
     struct stat sb;
 
-    /* lstat — not stat — so a symlink at the user-supplied path is
-     * detected as a symlink instead of silently dereferenced. Pakka
-     * has no --follow-symlinks flag yet; reject explicitly. */
+    /* Reject symlinks (POSIX) and reparse points / junctions (Windows)
+     * BEFORE the regular stat-based dispatch so a junction pointing
+     * outside the user's intended source tree can't pull data in. */
+    if (compat_is_reparse_or_symlink(path)) {
+        error_exit_e(0,
+            "Refusing to add symlink/reparse point %s "
+            "(use the target path directly)", path);
+    }
+
     if (compat_lstat(path, &sb) != 0) {
         error_exit("Cannot add %s", path);
-    } else if (S_ISLNK(sb.st_mode)) {
-        error_exit("Refusing to add symlink %s (use the target path directly)", path);
     } else if (S_ISREG(sb.st_mode)) {
         add_file(pak, path);
     } else if (S_ISDIR(sb.st_mode)) {
@@ -471,8 +497,6 @@ int add_file(Pak_t *pak, char *path) {
     Pakfileentry_t *entry;
     char *bytes;
     size_t path_len;
-
-    printf("Adding %s to pak\n", path);
 
     /* The on-disk filename field is PAKFILE_PATH_MAX bytes including its
      * NUL terminator, so the longest legal name is PAKFILE_PATH_MAX-1
@@ -500,6 +524,10 @@ int add_file(Pak_t *pak, char *path) {
     if (find_entry(pak, path) != NULL) {
         error_exit("Entry '%s' already exists in pak", path);
     }
+
+    /* All input is validated; print after so the diagnostic line
+     * doesn't appear for paths that we then reject. */
+    printf("Adding %s to pak\n", path);
 
     if (! (tfd = fopen(path, "rb"))) {
         error_exit("Cannot open %s", path);
@@ -611,14 +639,17 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
             error_exit_e(0, "Path too long: %s/%s", path, dirp->d_name);
         }
 
-        /* lstat per entry so a symlinked subdir doesn't escape the
-         * tree the user asked us to pack. Skipping is the safer
-         * default; loud-failing would break legitimate trees that
-         * incidentally contain symlinks. */
+        /* Check for symlinks (POSIX) and reparse points / junctions
+         * (Windows) per entry. Skipping is the safer default;
+         * loud-failing would break legitimate trees that incidentally
+         * contain a symlink. */
+        if (compat_is_reparse_or_symlink(tmp)) {
+            fprintf(stderr, "Skipping symlink/reparse point %s\n", tmp);
+            continue;
+        }
+
         if (compat_lstat(tmp, &sb) == 0) {
-            if (S_ISLNK(sb.st_mode)) {
-                fprintf(stderr, "Skipping symlink %s\n", tmp);
-            } else if (S_ISDIR(sb.st_mode)) {
+            if (S_ISDIR(sb.st_mode)) {
                 add_folder_r(pak, tmp, depth + 1);
             } else if (S_ISREG(sb.st_mode)) {
                 add_file(pak, tmp);
@@ -750,8 +781,14 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
 
         if (matched) {
             if (is_unsafe_extract_path(current->filename)) {
-                error_exit("Refusing to extract '%s': entry name would escape destination",
-                           current->filename);
+                /* The unsafe name is going into a user-visible error
+                 * message — strip control bytes so it can't reflow
+                 * the terminal. */
+                char safe[PAKFILE_PATH_BUF];
+                sanitize_name(safe, sizeof(safe), current->filename);
+                error_exit_e(0,
+                    "Refusing to extract '%s': entry name would escape destination",
+                    safe);
             }
             should_extract[idx] = 1;
         }
@@ -787,6 +824,9 @@ void delete_files(Pak_t *pak, char *paths[], int path_count) {
     Pakfileentry_t **to_delete;
 
     to_delete = calloc(sizeof(Pakfileentry_t *), path_count);
+    if (to_delete == NULL) {
+        error_exit("Cannot allocate delete-selection buffer");
+    }
 
     for (i = 0; i < path_count; i++) {
         if ((entry = find_entry(pak, paths[i])) != NULL) {
@@ -863,7 +903,14 @@ int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
     write_pak_directory(pak);
     fp = tempfp;
 
-    fclose(tfd);
+    /* Check fclose return: buffered writes are flushed here and a
+     * disk-full / NFS / quota failure first surfaces on close. If we
+     * ignored it, the eventual rename would replace the original pak
+     * with a truncated temp. */
+    if (fclose(tfd) != 0) {
+        error_exit("Error finalizing temp pak %s "
+                   "(disk full or I/O error)", tmp_pakpath);
+    }
 
     /* Close the original pak before the rename. On Windows the open
      * handle on cur_pakpath would block MoveFileEx; on POSIX this just
@@ -873,7 +920,10 @@ int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
     fp = NULL;
 
     if (compat_rename_replace(tmp_pakpath, cur_pakpath) != 0) {
-        error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
+        /* Pre-fix this used new_pakpath which is the create-mode
+         * destination — empty when we got here through delete. */
+        error_exit("Could not rename tmp pak %s to final pak %s",
+                   tmp_pakpath, cur_pakpath);
     }
 
     return 0;
@@ -989,9 +1039,14 @@ static int is_reserved_device_name(const char *seg, size_t seg_len) {
 
 /* Per-segment safety check. Centralizes everything we know about a
  * single path component:
- *  - empty: allowed (lets "foo//bar" through; the duplicate slash
- *    collapses harmlessly on disk).
- *  - exact "..": rejected (path-traversal escape).
+ *  - empty: rejected. Pre-fix these passed (turning "foo//bar" into
+ *    "foo/bar" on disk and aliasing the two names; "foo/" failed
+ *    midway through extract, defeating preflight). Rejecting also
+ *    means a trailing separator is now flagged at the validator
+ *    instead of mid-write.
+ *  - exact "." or "..": rejected. ".." is a directory escape;
+ *    pre-fix "." was a no-op normalization that aliased "./foo"
+ *    with "foo".
  *  - control bytes 0x01-0x1F and DEL: rejected (terminal injection
  *    and filesystem corner cases).
  *  - colon: rejected anywhere in the segment. On Windows this is the
@@ -1000,7 +1055,6 @@ static int is_reserved_device_name(const char *seg, size_t seg_len) {
  *  - trailing '.' or ' ': rejected. Windows silently strips both, so
  *    "foo." resolves to "foo" — pak entries must never depend on
  *    that normalization (treats "foo" and "foo." as the same file).
- *    The literal "." segment is allowed (no-op normalization).
  *  - Windows reserved device names (CON/NUL/COM1/...): rejected on
  *    every host because paks are portable.
  */
@@ -1008,7 +1062,8 @@ static int is_unsafe_segment(const char *seg, size_t seg_len) {
     size_t i;
     unsigned char c;
 
-    if (seg_len == 0) return 0;
+    if (seg_len == 0) return 1;
+    if (seg_len == 1 && seg[0] == '.') return 1;
     if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') return 1;
 
     for (i = 0; i < seg_len; i++) {
@@ -1017,10 +1072,7 @@ static int is_unsafe_segment(const char *seg, size_t seg_len) {
         if (c == ':') return 1;
     }
 
-    /* Trailing dot or space, except for the bare "." no-op segment. */
-    if (! (seg_len == 1 && seg[0] == '.')) {
-        if (seg[seg_len - 1] == '.' || seg[seg_len - 1] == ' ') return 1;
-    }
+    if (seg[seg_len - 1] == '.' || seg[seg_len - 1] == ' ') return 1;
 
     if (is_reserved_device_name(seg, seg_len)) return 1;
 
@@ -1190,7 +1242,9 @@ FILE *create_tmp_pakfile(void) {
         error_exit("Cannot create temp pak file");
     }
 
-    fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET);
+    if (fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
+        error_exit("Cannot seek in temp pak");
+    }
 
     return tfd;
 }

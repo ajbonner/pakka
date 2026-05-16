@@ -14,6 +14,7 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <fcntl.h>
 #include <sys/locking.h>
 
 char *compat_realpath(const char *path, char *resolved) {
@@ -24,48 +25,94 @@ char *compat_getcwd(char *buf, size_t size) {
     return _getcwd(buf, (int)size);
 }
 
-/* Best-effort: try `<target_dir>\<template>`. Returns a FILE* on
- * success or NULL on any failure (caller falls back). */
-static FILE *mkstemp_open_in_dir(const char *target_path,
-                                 const char *basename_template,
-                                 char *out_path, size_t out_path_size) {
+/* Convert an exclusive-open Win32 HANDLE to a binary write FILE*.
+ * Closing the FILE* via fclose tears down the handle as well. */
+static FILE *handle_to_wb_file(HANDLE h) {
+    int fd;
+    FILE *fp;
+    fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+    if (fd < 0) {
+        CloseHandle(h);
+        return NULL;
+    }
+    fp = _fdopen(fd, "wb");
+    if (fp == NULL) {
+        _close(fd);  /* also tears down the underlying HANDLE */
+        return NULL;
+    }
+    return fp;
+}
+
+/* Atomically create a temp file under template_dir using basename_template.
+ * _mktemp_s only picks a name (verified non-existent at that instant);
+ * the subsequent CreateFileA with CREATE_NEW is what closes the race:
+ * if a file appears in the gap (or a reparse point gets planted)
+ * CreateFileA fails with ERROR_FILE_EXISTS and we re-roll. */
+static FILE *mkstemp_open_at(const char *dir,
+                             const char *basename_template,
+                             char *out_path, size_t out_path_size) {
+    char template_save[MAX_PATH];
+    HANDLE h;
+    int n, retries;
+
+    n = snprintf(out_path, out_path_size, "%s\\%s", dir, basename_template);
+    if (n < 0 || (size_t)n >= out_path_size) return NULL;
+    if ((size_t)n >= sizeof(template_save)) return NULL;
+    strcpy(template_save, out_path);
+
+    for (retries = 8; retries > 0; retries--) {
+        strcpy(out_path, template_save);
+        if (_mktemp_s(out_path, out_path_size) != 0) return NULL;
+        h = CreateFileA(out_path, GENERIC_WRITE, 0, NULL,
+                        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h != INVALID_HANDLE_VALUE) {
+            FILE *fp = handle_to_wb_file(h);
+            if (fp == NULL) DeleteFileA(out_path);
+            return fp;
+        }
+        if (GetLastError() != ERROR_FILE_EXISTS
+            && GetLastError() != ERROR_ALREADY_EXISTS) {
+            return NULL;
+        }
+    }
+    return NULL;
+}
+
+/* Best-effort: try the target's parent directory first. */
+static FILE *mkstemp_open_near(const char *target_path,
+                               const char *basename_template,
+                               char *out_path, size_t out_path_size) {
     char target_copy[PATH_MAX];
     const char *dir;
-    int n;
 
     if (target_path == NULL) return NULL;
     if (strlen(target_path) >= sizeof(target_copy)) return NULL;
     strcpy(target_copy, target_path);
     dir = compat_dirname(target_copy);
-
-    n = snprintf(out_path, out_path_size, "%s\\%s", dir, basename_template);
-    if (n < 0 || (size_t)n >= out_path_size) return NULL;
-
-    if (_mktemp_s(out_path, out_path_size) != 0) return NULL;
-    return fopen(out_path, "wb");
+    return mkstemp_open_at(dir, basename_template, out_path, out_path_size);
 }
 
 FILE *compat_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
+    char tempdir[MAX_PATH];
     DWORD len;
 
-    fp = mkstemp_open_in_dir(target_path, basename_template, out_path, out_path_size);
+    fp = mkstemp_open_near(target_path, basename_template, out_path, out_path_size);
     if (fp != NULL) return fp;
 
     /* Fallback to GetTempPathA when same-dir creation failed (e.g.
      * read-only target directory). The eventual rename may then hit
      * cross-FS errors — same limitation as before this fix. */
-    len = GetTempPathA((DWORD)out_path_size, out_path);
-    if (len == 0 || len + strlen(basename_template) + 1 > out_path_size) {
-        return NULL;
+    len = GetTempPathA((DWORD)sizeof(tempdir), tempdir);
+    if (len == 0 || len >= sizeof(tempdir)) return NULL;
+    /* GetTempPathA appends a trailing backslash; strip it so the
+     * dir+template join in mkstemp_open_at produces a single sep. */
+    if (len > 0 && (tempdir[len - 1] == '\\' || tempdir[len - 1] == '/')) {
+        tempdir[len - 1] = '\0';
     }
-    strcat(out_path, basename_template);
-    if (_mktemp_s(out_path, out_path_size) != 0) {
-        return NULL;
-    }
-    return fopen(out_path, "wb");
+    return mkstemp_open_at(tempdir, basename_template, out_path, out_path_size);
 }
 
 char *compat_dirname(char *path) {
@@ -127,11 +174,16 @@ int compat_rename_noreplace(const char *src, const char *dst) {
 }
 
 int compat_lstat(const char *path, struct stat *sb) {
-    /* Windows has no POSIX symlinks. Reparse-point detection on the
-     * recursive-add path is out of scope here; junctions and bind-
-     * mounts inside a tree the user explicitly hands us are treated
-     * as legitimate content. */
+    /* Windows has no POSIX symlinks. The recursive-add path checks
+     * for reparse points via compat_is_reparse_or_symlink — keep
+     * compat_lstat as a thin stat() shim for the regular/dir test. */
     return stat(path, sb);
+}
+
+int compat_is_reparse_or_symlink(const char *path) {
+    DWORD attr = GetFileAttributesA(path);
+    if (attr == INVALID_FILE_ATTRIBUTES) return 0;
+    return (attr & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
 }
 
 int compat_try_exclusive_lock(FILE *fp) {
@@ -197,7 +249,19 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
                 if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return NULL;
                 if (!is_leaf && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
             } else if (!is_leaf) {
-                if (_mkdir(path) != 0) return NULL;
+                if (_mkdir(path) != 0) {
+                    /* Tolerate EEXIST so two extractors sharing a -C
+                     * destination can both create the same subdir
+                     * without spuriously aborting; re-check the
+                     * attributes after the race to make sure the
+                     * winner created a real directory rather than a
+                     * reparse point. */
+                    if (errno != EEXIST) return NULL;
+                    attr = GetFileAttributesA(path);
+                    if (attr == INVALID_FILE_ATTRIBUTES) return NULL;
+                    if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return NULL;
+                    if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
+                }
             }
 
             if (is_leaf) {
@@ -305,15 +369,23 @@ int compat_rename_noreplace(const char *src, const char *dst) {
         return -1;
     }
     if (unlink(src) != 0) {
-        /* dst is in place; the leftover temp on src is best-effort.
-         * Return success so the user-visible operation completed. */
-        return 0;
+        /* dst is in place, but src is still a live hardlink to the
+         * same inode. Reporting success would leave the caller with
+         * two mutable names for the same file. Treat as a failure so
+         * the caller surfaces an actionable error. */
+        return -1;
     }
     return 0;
 }
 
 int compat_lstat(const char *path, struct stat *sb) {
     return lstat(path, sb);
+}
+
+int compat_is_reparse_or_symlink(const char *path) {
+    struct stat sb;
+    if (lstat(path, &sb) != 0) return 0;
+    return S_ISLNK(sb.st_mode) ? 1 : 0;
 }
 
 int compat_try_exclusive_lock(FILE *fp) {
@@ -386,7 +458,12 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
             newfd = openat(dirfd, comp,
                            O_DIRECTORY | O_RDONLY | O_NOFOLLOW | O_CLOEXEC);
             if (newfd < 0 && errno == ENOENT) {
-                if (mkdirat(dirfd, comp, 0777) != 0) {
+                /* Tolerate EEXIST so two extractors sharing a -C
+                 * directory can both create the same subdir without
+                 * spuriously aborting. The subsequent openat with
+                 * O_NOFOLLOW still rejects the case where the racing
+                 * winner created a symlink instead of a dir. */
+                if (mkdirat(dirfd, comp, 0777) != 0 && errno != EEXIST) {
                     close(dirfd);
                     return NULL;
                 }
