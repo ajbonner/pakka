@@ -5,7 +5,9 @@ void debug_directory_entry(Pakfileentry_t *entry) {
 
     fprintf(stderr, "\n");
     fprintf(stderr, "Pak Directory Entry\n");
-    fprintf(stderr, "Filename: %s\n", entry->filename);
+    fprintf(stderr, "Filename: ");
+    fprint_sanitized(stderr, entry->filename);
+    fputc('\n', stderr);
     fprintf(stderr, "Position Offset: 0x%08" PRIx32 "\n", entry->offset);
     fprintf(stderr, "Length (bytes) %" PRIu32 "\n", entry->length);
     fprintf(stderr, "Next Sibling: %p\n", (void *)entry->next);

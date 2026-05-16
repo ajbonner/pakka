@@ -18,6 +18,7 @@ typedef struct Paktreenode_s {
 static int build_filename(char *dest, size_t dest_size,
                           const char *basedir, const char *filename);
 #define ADD_FOLDER_MAX_DEPTH 100
+#define PAK_TREE_MAX_DEPTH   100
 static int add_folder_r(Pak_t *pak, char *path, int depth);
 static Paktreenode_t *create_tree_node(const char *name, int is_dir);
 static void insert_tree_path(Paktreenode_t *root, const char *path,
@@ -47,12 +48,32 @@ static char new_pakpath[OS_PATH_MAX];
 static char tmp_pakpath[OS_PATH_MAX];
 static FILE *fp;
 
-Pak_t *open_pakfile(const char *pakpath) {
-    strcpy(cur_pakpath, pakpath);
-    Pak_t *pak = calloc(sizeof(Pak_t), 1);
+Pak_t *open_pakfile(const char *pakpath, int writable) {
+    Pak_t *pak;
+    size_t pakpath_len = strlen(pakpath);
 
-    if (! (fp = fopen(pakpath, "r+b"))) {
+    if (pakpath_len >= sizeof(cur_pakpath)) {
+        error_exit("Pak path too long: %s", pakpath);
+    }
+    memcpy(cur_pakpath, pakpath, pakpath_len + 1);
+
+    pak = calloc(sizeof(Pak_t), 1);
+    if (pak == NULL) {
+        error_exit("Cannot allocate Pak_t");
+    }
+
+    if (! (fp = fopen(pakpath, writable ? "r+b" : "rb"))) {
         error_exit("Cannot open %s", pakpath);
+    }
+
+    /* Hold an exclusive non-blocking lock for mutating opens. Two
+     * concurrent `pakka -af` invocations would otherwise both seek to
+     * the same byte-tail, write payloads on top of each other, and
+     * race the directory rewrite. The lock is released automatically
+     * when fp is closed in close_pakfile. */
+    if (writable && compat_try_exclusive_lock(fp) != 0) {
+        error_exit("Could not lock %s for writing "
+                   "(another pakka process may be modifying it)", pakpath);
     }
 
     load_pakfile(pak);
@@ -62,17 +83,28 @@ Pak_t *open_pakfile(const char *pakpath) {
 }
 
 Pak_t *create_pakfile(const char *pakpath) {
-    Pak_t *pak = calloc(sizeof(Pak_t), 1);
+    Pak_t *pak;
     struct stat sb;
+    size_t pakpath_len = strlen(pakpath);
+
+    if (pakpath_len >= sizeof(new_pakpath)) {
+        error_exit("Pak path too long: %s", pakpath);
+    }
+
+    pak = calloc(sizeof(Pak_t), 1);
+    if (pak == NULL) {
+        error_exit("Cannot allocate Pak_t");
+    }
 
     is_new = 1;
-    strcpy(new_pakpath, pakpath);
+    memcpy(new_pakpath, pakpath, pakpath_len + 1);
 
     if (stat(pakpath, &sb) == 0) {
         error_exit("File already exists at destination %s", pakpath);
     }
 
-    if (! (fp = compat_mkstemp_open("pakkaXXXXXX", tmp_pakpath, sizeof(tmp_pakpath)))) {
+    if (! (fp = compat_mkstemp_open(pakpath, "pakkaXXXXXX",
+                                    tmp_pakpath, sizeof(tmp_pakpath)))) {
         error_exit("Cannot create temp pak file");
     }
 
@@ -236,7 +268,8 @@ void list_files(Pak_t *pak) {
     }
 
     do {
-        printf("%s (%" PRIu32 " bytes)\n", current->filename, current->length);
+        fprint_sanitized(stdout, current->filename);
+        printf(" (%" PRIu32 " bytes)\n", current->length);
     } while ((current = current->next) != NULL);
 }
 
@@ -277,6 +310,7 @@ void insert_tree_path(Paktreenode_t *root, const char *path,
     char *next;
     Paktreenode_t *parent = root;
     Paktreenode_t *dir;
+    int depth = 0;
 
     if (path[0] == '\0') {
         return;
@@ -287,6 +321,14 @@ void insert_tree_path(Paktreenode_t *root, const char *path,
 
     while (component != NULL) {
         next = strtok(NULL, "/");
+
+        /* Cap nesting at the same limit add_folder uses. A pak with
+         * thousands of nested directory entries would stack-overflow
+         * print_tree_children below. */
+        if (depth >= PAK_TREE_MAX_DEPTH) {
+            error_exit("Pak directory nesting exceeds %d levels at '%s'",
+                       PAK_TREE_MAX_DEPTH, path);
+        }
 
         if (next == NULL) {
             insert_tree_child(parent, create_tree_node(component, 0));
@@ -299,6 +341,7 @@ void insert_tree_path(Paktreenode_t *root, const char *path,
                 (*dir_count)++;
             }
             parent = dir;
+            depth++;
         }
 
         component = next;
@@ -348,7 +391,9 @@ void print_tree_children(Paktreenode_t *node, const char *prefix) {
         branch        = current->next == NULL ? PAK_TREE_BRANCH_LAST : PAK_TREE_BRANCH_MID;
         prefix_suffix = current->next == NULL ? PAK_TREE_PREFIX_LAST : PAK_TREE_PREFIX_MID;
 
-        printf("%s%s%s\n", prefix, branch, current->name);
+        printf("%s%s", prefix, branch);
+        fprint_sanitized(stdout, current->name);
+        putchar('\n');
 
         if (current->is_dir) {
             next_prefix = malloc(strlen(prefix) + strlen(prefix_suffix) + 1);
@@ -439,6 +484,16 @@ int add_file(Pak_t *pak, char *path) {
                    path, path_len, PAKFILE_PATH_MAX - 1);
     }
 
+    /* Refuse to bake a name into the pak that pakka itself would refuse
+     * to extract: traversal sequences, drive prefixes, Windows reserved
+     * names, ADS colons, control bytes. Catches the case where the user
+     * passes an absolute path or `../foo` by mistake and otherwise
+     * produces a pak that's only extractable by tools that don't share
+     * pakka's hardening. */
+    if (is_unsafe_extract_path(path)) {
+        error_exit_e(0, "Refusing to add '%s': name is not safe to extract", path);
+    }
+
     /* Quake's pak format permits duplicate entry names, but find_entry
      * only ever returns the first match — every operation after a
      * duplicate add is ambiguous. Reject up front. */
@@ -496,12 +551,14 @@ int add_file(Pak_t *pak, char *path) {
         while (remaining > 0) {
             chunk = remaining > PAKFILE_COPY_CHUNK ? PAKFILE_COPY_CHUNK : remaining;
             if (fread(bytes, 1, chunk, tfd) != chunk) {
+                int err = errno;
                 free(bytes);
-                error_exit("Cannot read %s", path);
+                error_exit_e(err, "Cannot read %s", path);
             }
             if (fwrite(bytes, 1, chunk, fp) != chunk) {
+                int err = errno;
                 free(bytes);
-                error_exit("Could not add %s to pak", path);
+                error_exit_e(err, "Could not add %s to pak", path);
             }
             remaining -= chunk;
         }
@@ -551,7 +608,7 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
 
         if (build_filename(tmp, sizeof(tmp), path, dirp->d_name) != 0) {
             closedir(d);
-            error_exit("Path too long: %s/%s", path, dirp->d_name);
+            error_exit_e(0, "Path too long: %s/%s", path, dirp->d_name);
         }
 
         /* lstat per entry so a symlinked subdir doesn't escape the
@@ -567,8 +624,9 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
                 add_file(pak, tmp);
             }
         } else {
+            int stat_errno = errno;
             closedir(d);
-            error_exit("Couldn't stat %s", tmp);
+            error_exit_e(stat_errno, "Couldn't stat %s", tmp);
         }
     }
 
@@ -609,10 +667,14 @@ static void extract_one_entry(Pakfileentry_t *current, const char *dest_dir) {
                        current->length, current->filename);
         }
         if (fread(buffer, current->length, 1, fp) != 1) {
-            error_exit("Cannot read entry '%s' from pak", current->filename);
+            int err = errno;
+            free(buffer);
+            error_exit_e(err, "Cannot read entry '%s' from pak", current->filename);
         }
         if (fwrite(buffer, current->length, 1, tfd) != 1) {
-            error_exit("Cannot write entry '%s'", current->filename);
+            int err = errno;
+            free(buffer);
+            error_exit_e(err, "Cannot write entry '%s'", current->filename);
         }
         free(buffer);
     }
@@ -851,13 +913,15 @@ int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd) {
     }
 
     if (fread(buffer, entry->length, 1, ffd) != 1) {
+        int err = errno;
         free(buffer);
-        error_exit("Error reading entry '%s' from source pak", entry->filename);
+        error_exit_e(err, "Error reading entry '%s' from source pak", entry->filename);
     }
 
     if (fwrite(buffer, entry->length, 1, tfd) != 1) {
+        int err = errno;
         free(buffer);
-        error_exit("Error writing entry '%s' to dest pak", entry->filename);
+        error_exit_e(err, "Error writing entry '%s' to dest pak", entry->filename);
     }
 
     free(buffer);
@@ -1119,7 +1183,10 @@ void write_pak_directory(Pak_t *pak) {
 FILE *create_tmp_pakfile(void) {
     FILE *tfd;
 
-    if (! (tfd = compat_mkstemp_open("pakkaXXXXXX", tmp_pakpath, sizeof(tmp_pakpath)))) {
+    /* For delete-rebuild, the eventual rename is over cur_pakpath, so
+     * hint the temp location to its directory. */
+    if (! (tfd = compat_mkstemp_open(cur_pakpath, "pakkaXXXXXX",
+                                     tmp_pakpath, sizeof(tmp_pakpath)))) {
         error_exit("Cannot create temp pak file");
     }
 
