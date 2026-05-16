@@ -219,6 +219,7 @@ jobs:
             bash
             coreutils
             curl
+            diffutils
             git
             openssl
             tar
