@@ -15,7 +15,10 @@ typedef struct Paktreenode_s {
     struct Paktreenode_s *next;
 } Paktreenode_t;
 
-static void build_filename(char *basedir, char *filename, char *dest);
+static int build_filename(char *dest, size_t dest_size,
+                          const char *basedir, const char *filename);
+#define ADD_FOLDER_MAX_DEPTH 100
+static int add_folder_r(Pak_t *pak, char *path, int depth);
 static Paktreenode_t *create_tree_node(const char *name, int is_dir);
 static void insert_tree_path(Paktreenode_t *root, const char *path,
                              uint32_t *dir_count, uint32_t *file_count);
@@ -26,6 +29,7 @@ static void print_tree_summary(uint32_t dir_count, uint32_t file_count);
 static void free_tree(Paktreenode_t *node);
 static void load_pakfile(Pak_t *pak);
 static void load_directory(Pak_t *pak);
+static uint64_t compute_payload_end(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
 static void init_pak_header(Pak_t *pak);
 static void write_pak_directory(Pak_t *pak);
@@ -108,6 +112,20 @@ int close_pakfile(Pak_t *pak) {
 }
 
 void load_pakfile(Pak_t *pak) {
+    long size;
+
+    /* Capture the actual file size up front so every bounds check below
+     * compares against ground truth rather than self-reported header
+     * values. */
+    if (fseek(fp, 0L, SEEK_END) != 0) {
+        error_exit("Cannot seek pak file");
+    }
+    size = ftell(fp);
+    if (size < 0) {
+        error_exit("Cannot determine pak file size");
+    }
+    pak->file_size = (uint64_t)size;
+
     rewind(fp);
     if (fread(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
         || fread(&pak->diroffset, sizeof(uint32_t), 1, fp) != 1
@@ -115,40 +133,93 @@ void load_pakfile(Pak_t *pak) {
         error_exit("Cannot read pak header");
     }
 
+    if (memcmp(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN) != 0) {
+        error_exit("Not a pak file (bad signature)");
+    }
+
     if ((pak->dirlength % PAKFILE_DIR_ENTRY_SIZE) != 0) {
-        error_exit("Pak header is corrupt");
+        error_exit("Pak header is corrupt (dirlength not a multiple of %d)",
+                   PAKFILE_DIR_ENTRY_SIZE);
+    }
+
+    if (pak->diroffset < PAKFILE_HEADER_SIZE) {
+        error_exit("Pak header is corrupt (diroffset inside header)");
+    }
+
+    /* Guard the diroffset+dirlength sum against u32 wrap, then check it
+     * sits within the actual file. Compare via subtraction to avoid the
+     * overflow risk on the addition itself. */
+    if ((uint64_t)pak->dirlength > pak->file_size
+        || (uint64_t)pak->diroffset > pak->file_size - pak->dirlength) {
+        error_exit("Pak header is corrupt (directory extends past EOF)");
     }
 
     pak->num_entries = pak->dirlength / PAKFILE_DIR_ENTRY_SIZE;
+
+    if (pak->num_entries > PAKFILE_MAX_ENTRIES) {
+        error_exit("Pak has too many entries (%" PRIu32 ", max %u)",
+                   pak->num_entries, PAKFILE_MAX_ENTRIES);
+    }
 }
 
 void load_directory(Pak_t *pak) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
-    uint32_t i, entry_pos;
+    uint32_t i;
+    uint64_t entry_pos;
 
-    if (pak->num_entries > 0) {
-        for (i = 1; i <= pak->num_entries; i++) {
-            entry_pos = pak->diroffset + pak->dirlength
-                - (i * PAKFILE_DIR_ENTRY_SIZE);
-            fseek(fp, (long)entry_pos, SEEK_SET);
-
-            current = calloc(1, sizeof(Pakfileentry_t));
-            if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
-                || fread(&current->offset, sizeof(uint32_t), 1, fp) != 1
-                || fread(&current->length, sizeof(uint32_t), 1, fp) != 1) {
-                error_exit("Cannot read pak directory entry");
-            }
-
-            if (last != NULL) {
-                current->next = last;
-            }
-
-            last = current;
-        }
-        
-        pak->head = last;
+    if (pak->num_entries == 0) {
+        return;
     }
+
+    for (i = 1; i <= pak->num_entries; i++) {
+        /* Compute in 64-bit to avoid u32 wrap. load_pakfile has already
+         * validated diroffset+dirlength <= file_size and num_entries
+         * against the dirlength, so the subtraction can't underflow. */
+        entry_pos = (uint64_t)pak->diroffset + (uint64_t)pak->dirlength
+                    - (uint64_t)i * PAKFILE_DIR_ENTRY_SIZE;
+
+        if (fseek(fp, (long)entry_pos, SEEK_SET) != 0) {
+            error_exit("Cannot seek to pak directory entry %" PRIu32, i);
+        }
+
+        current = calloc(1, sizeof(Pakfileentry_t));
+        if (current == NULL) {
+            error_exit("Cannot allocate pak directory entry %" PRIu32, i);
+        }
+
+        if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
+            || fread(&current->offset, sizeof(uint32_t), 1, fp) != 1
+            || fread(&current->length, sizeof(uint32_t), 1, fp) != 1) {
+            error_exit("Cannot read pak directory entry %" PRIu32, i);
+        }
+
+        /* The on-disk filename is exactly PAKFILE_PATH_MAX bytes with no
+         * guaranteed NUL. The in-memory buffer is one byte larger so we
+         * can force termination before any strlen/strcmp/printf("%s")
+         * downstream overreads into the offset/length fields. */
+        current->filename[PAKFILE_PATH_MAX] = '\0';
+
+        /* Bounds-check the entry against the file we actually have on
+         * disk. Reject anything that points into the header or wraps
+         * past EOF. Subsequent extract/copy paths can then trust the
+         * stored offset+length without re-validating. */
+        if (current->offset < PAKFILE_HEADER_SIZE
+            || (uint64_t)current->length > pak->file_size
+            || (uint64_t)current->offset > pak->file_size - current->length) {
+            error_exit("Pak entry %" PRIu32 " bytes out of range "
+                       "(offset=%" PRIu32 ", length=%" PRIu32 ")",
+                       i, current->offset, current->length);
+        }
+
+        if (last != NULL) {
+            current->next = last;
+        }
+
+        last = current;
+    }
+
+    pak->head = last;
 }
 
 void list_files(Pak_t *pak) {
@@ -339,45 +410,86 @@ int add_to_pak(Pak_t *pak, char* path) {
 
 int add_file(Pak_t *pak, char *path) {
     FILE *tfd;
-    int size;
+    int64_t size;
+    uint64_t append_offset;
     Pakfileentry_t *tail;
     Pakfileentry_t *entry;
     char *bytes;
+    size_t path_len;
 
     printf("Adding %s to pak\n", path);
-    
+
+    /* The on-disk filename field is PAKFILE_PATH_MAX bytes including its
+     * NUL terminator, so the longest legal name is PAKFILE_PATH_MAX-1
+     * bytes. Reject before the strcpy that would otherwise overwrite
+     * entry->offset / length / next on the heap. */
+    path_len = strlen(path);
+    if (path_len >= PAKFILE_PATH_MAX) {
+        error_exit("Path '%s' too long for pak entry (%zu bytes, max %d)",
+                   path, path_len, PAKFILE_PATH_MAX - 1);
+    }
+
     if (! (tfd = fopen(path, "rb"))) {
         error_exit("Cannot open %s", path);
     }
 
-    entry = calloc(sizeof(Pakfileentry_t), 1);
+    size = filesize(tfd);
+    if (size < 0) {
+        error_exit("Cannot determine size of %s", path);
+    }
+    if ((uint64_t)size > UINT32_MAX) {
+        error_exit("File %s too large for pak format (%" PRId64
+                   " bytes, max %u)", path, size, UINT32_MAX);
+    }
 
+    entry = calloc(sizeof(Pakfileentry_t), 1);
+    if (entry == NULL) {
+        error_exit("Cannot allocate pak entry for %s", path);
+    }
+
+    /* Append at the highest byte-offset across all existing entries, not
+     * at the directory-order tail. Quake's pak0.pak has entries out of
+     * byte order and an orphan payload past the directory; trusting the
+     * directory-tail's offset+length would overwrite live data. */
     tail = find_tail(pak);
     if (tail == NULL) {
-        fseek(fp, PAKFILE_HEADER_SIZE, SEEK_SET);
+        append_offset = PAKFILE_HEADER_SIZE;
     } else {
-        fseek(fp, tail->offset + tail->length, SEEK_SET);
+        append_offset = compute_payload_end(pak);
     }
-    
-    size = filesize(tfd);
-    bytes = malloc(sizeof(char) * size);
-    while (fread(bytes, size, 1, tfd)) {
-        if (fwrite(bytes, size, 1, fp) != 1)  {
-            free(bytes);
-            error_exit("Could not add %s to pak\n", path);
+
+    if (append_offset > UINT32_MAX - (uint64_t)size) {
+        error_exit("Pak would exceed 4 GiB after adding %s", path);
+    }
+
+    if (fseek(fp, (long)append_offset, SEEK_SET) != 0) {
+        error_exit("Cannot seek to append point in pak");
+    }
+
+    if (size > 0) {
+        bytes = malloc((size_t)size);
+        if (bytes == NULL) {
+            error_exit("Cannot allocate %" PRId64 " bytes for %s", size, path);
         }
+        if (fread(bytes, (size_t)size, 1, tfd) != 1) {
+            free(bytes);
+            error_exit("Cannot read %s", path);
+        }
+        if (fwrite(bytes, (size_t)size, 1, fp) != 1) {
+            free(bytes);
+            error_exit("Could not add %s to pak", path);
+        }
+        free(bytes);
     }
-    free(bytes);
+
+    memcpy(entry->filename, path, path_len);
+    entry->filename[path_len] = '\0';
+    entry->length = (uint32_t)size;
+    entry->offset = (uint32_t)append_offset;
 
     if (tail == NULL) {
-        strcpy(entry->filename, path);
-        entry->length = size;
-        entry->offset = PAKFILE_HEADER_SIZE;
         pak->head = entry;
     } else {
-        strcpy(entry->filename, path);
-        entry->length = size;
-        entry->offset = tail->offset + tail->length;
         tail->next = entry;
     }
 
@@ -387,35 +499,48 @@ int add_file(Pak_t *pak, char *path) {
 }
 
 int add_folder(Pak_t *pak, char *path) {
+    return add_folder_r(pak, path, 0);
+}
+
+int add_folder_r(Pak_t *pak, char *path, int depth) {
     DIR *d;
     struct dirent *dirp;
     struct stat sb;
-    char tmp[255];
+    char tmp[OS_PATH_MAX];
+
+    if (depth >= ADD_FOLDER_MAX_DEPTH) {
+        error_exit("Directory nesting too deep at '%s' (max %d)",
+                   path, ADD_FOLDER_MAX_DEPTH);
+    }
 
     if (! (d = opendir(path))) {
         error_exit("Cannot open directory %s", path);
     }
 
     while ((dirp = readdir(d)) != NULL) {
-        tmp[0] = '\0';
         if (strcmp(dirp->d_name, "..") == 0
            || strcmp(dirp->d_name, ".") == 0) {
             continue;
         }
-        
-        build_filename(path, dirp->d_name, tmp);
-        
+
+        if (build_filename(tmp, sizeof(tmp), path, dirp->d_name) != 0) {
+            closedir(d);
+            error_exit("Path too long: %s/%s", path, dirp->d_name);
+        }
+
         if (stat(tmp, &sb) == 0) {
             if (S_ISDIR(sb.st_mode)) {
-                add_folder(pak, tmp);
+                add_folder_r(pak, tmp, depth + 1);
             } else if (S_ISREG(sb.st_mode)) {
                 add_file(pak, tmp);
             }
         } else {
+            closedir(d);
             error_exit("Couldn't stat %s", tmp);
         }
     }
 
+    closedir(d);
     return 0;
 }
 
@@ -462,9 +587,17 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
         }
 
         /* + 2 one for trailing null and the / we concat between basedir and pakfile path */
-        destfile = malloc(sizeof(char) * (strlen(dest) + strlen(current->filename) + 2));
-		*destfile = '\0';
-        build_filename(dest, current->filename, destfile);
+        {
+            size_t destfile_size = strlen(dest) + strlen(current->filename) + 2;
+            destfile = malloc(destfile_size);
+            if (destfile == NULL) {
+                error_exit("Cannot allocate destination path for '%s'",
+                           current->filename);
+            }
+            if (build_filename(destfile, destfile_size, dest, current->filename) != 0) {
+                error_exit("Destination path too long for '%s'", current->filename);
+            }
+        }
 
         /* POSIX dirname() may modify its argument and/or return a static buffer
          * that subsequent calls overwrite. Pass it a throwaway copy. */
@@ -478,21 +611,34 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
 
         printf("Writing %" PRIu32 " bytes to file %s\n", current->length, destfile);
 
-        fseek(fp, current->offset, SEEK_SET);
-        buffer = malloc(sizeof(unsigned char) * current->length);
-        fread(buffer, current->length, 1, fp);
-
         if (! (tfd = fopen(destfile, "wb"))) {
             error_exit("Cannot open %s for writing", destfile);
         }
 
-        if (fwrite(buffer, current->length, 1, tfd) != 1) {
-            error_exit("Cannot write to %s", destfile);
+        /* Skip the read/write dance for zero-length entries: malloc(0) is
+         * implementation-defined and fread/fwrite with size=0 has no
+         * meaningful semantics. Touching fopen still creates an empty
+         * file so the entry is materialized on disk. */
+        if (current->length > 0) {
+            if (fseek(fp, (long)current->offset, SEEK_SET) != 0) {
+                error_exit("Cannot seek to entry '%s' in pak", current->filename);
+            }
+            buffer = malloc(current->length);
+            if (buffer == NULL) {
+                error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
+                           current->length, current->filename);
+            }
+            if (fread(buffer, current->length, 1, fp) != 1) {
+                error_exit("Cannot read entry '%s' from pak", current->filename);
+            }
+            if (fwrite(buffer, current->length, 1, tfd) != 1) {
+                error_exit("Cannot write to %s", destfile);
+            }
+            free(buffer);
         }
 
         fclose(tfd);
-        free(buffer);
-		free(destfile);
+        free(destfile);
     } while ((current = current->next) != NULL);
 
     if (path_count > 0) {
@@ -605,18 +751,45 @@ int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
 
 int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd) {
     char *buffer;
-    buffer = calloc(entry->length, 1);
-    fseek(ffd, entry->offset, SEEK_SET);
+    long new_offset;
+    uint32_t src_offset = entry->offset;
 
-    if (fread(buffer, entry->length, 1, ffd) <= 0) {
-        free(buffer);
-        error_exit("Error reading from source pak\n");
+    /* Seek the source pak to the entry's existing offset BEFORE we
+     * overwrite entry->offset with the temp pak position. load_directory
+     * already validated src_offset + entry->length against file_size. */
+    if (fseek(ffd, (long)src_offset, SEEK_SET) != 0) {
+        error_exit("Cannot seek to source entry '%s'", entry->filename);
     }
-   
-    entry->offset = ftell(tfd);
-    if (fwrite(buffer, entry->length, 1, tfd) <= 0) {
+
+    new_offset = ftell(tfd);
+    if (new_offset < 0) {
+        error_exit("Cannot determine offset in temp pak");
+    }
+    /* The temp pak is built from scratch, so its offsets must fit u32.
+     * Cap explicitly to keep a corrupt rebuild from silently wrapping. */
+    if ((uint64_t)new_offset > UINT32_MAX) {
+        error_exit("Temp pak exceeds 4 GiB during rebuild");
+    }
+    entry->offset = (uint32_t)new_offset;
+
+    if (entry->length == 0) {
+        return 0;
+    }
+
+    buffer = malloc(entry->length);
+    if (buffer == NULL) {
+        error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
+                   entry->length, entry->filename);
+    }
+
+    if (fread(buffer, entry->length, 1, ffd) != 1) {
         free(buffer);
-        error_exit("Error writing to dest pak\n");
+        error_exit("Error reading entry '%s' from source pak", entry->filename);
+    }
+
+    if (fwrite(buffer, entry->length, 1, tfd) != 1) {
+        free(buffer);
+        error_exit("Error writing entry '%s' to dest pak", entry->filename);
     }
 
     free(buffer);
@@ -634,10 +807,17 @@ int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries) 
     return 0;
 }
 
-void build_filename(char *basedir, char *filename, char *dest) {
-    strcat(dest, basedir);
-    strcat(dest, "/");
-    strcat(dest, filename);
+/* Bounded "basedir/filename" join. Returns 0 on success, non-zero if the
+ * combined result wouldn't fit in dest_size (NUL included). Replaces the
+ * old strcat-into-fixed-buffer pattern that overflowed stack buffers on
+ * deep paths. */
+int build_filename(char *dest, size_t dest_size,
+                   const char *basedir, const char *filename) {
+    int n = snprintf(dest, dest_size, "%s/%s", basedir, filename);
+    if (n < 0 || (size_t)n >= dest_size) {
+        return -1;
+    }
+    return 0;
 }
 
 /* Validate a pak entry name before extracting. Pak format places no
@@ -702,10 +882,65 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
     return tail;
 }
 
+/* Walk every entry and return the highest offset+length seen — i.e. the
+ * byte one past the last live payload byte in the pak. Quake's original
+ * pak0.pak has entries in non-sequential byte order with an orphan payload
+ * past the directory, so the directory tail's offset+length is not safe
+ * as an append point. load_directory has already validated every entry
+ * against file_size, so the arithmetic here cannot overflow u32. */
+uint64_t compute_payload_end(Pak_t *pak) {
+    Pakfileentry_t *e;
+    uint64_t max_end = PAKFILE_HEADER_SIZE;
+    uint64_t end;
+
+    for (e = pak->head; e != NULL; e = e->next) {
+        end = (uint64_t)e->offset + (uint64_t)e->length;
+        if (end > max_end) {
+            max_end = end;
+        }
+    }
+
+    return max_end;
+}
+
 void init_pak_header(Pak_t *pak) {
     memcpy(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN);
     pak->diroffset = PAKFILE_HEADER_SIZE;
     pak->dirlength = 0;
+}
+
+/* Serialize one pak header to fp. Writes exactly PAKFILE_HEADER_SIZE
+ * bytes — the in-memory Pak_t struct has additional bookkeeping fields
+ * after dirlength that must not leak to disk. */
+static void write_pak_header(Pak_t *pak) {
+    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
+        || fwrite(&pak->diroffset, sizeof(uint32_t), 1, fp) != 1
+        || fwrite(&pak->dirlength, sizeof(uint32_t), 1, fp) != 1) {
+        error_exit("Cannot write pak header");
+    }
+}
+
+/* Serialize one directory entry: 56-byte filename field (NUL-padded if
+ * shorter) followed by two LE u32s. Written field-by-field instead of
+ * struct-as-bytes so the in-memory filename[] buffer can be a different
+ * size than the on-disk PAKFILE_PATH_MAX without breaking the format. */
+static void write_pak_entry(Pakfileentry_t *entry) {
+    char name_field[PAKFILE_PATH_MAX];
+    size_t len = strlen(entry->filename);
+
+    if (len > PAKFILE_PATH_MAX) {
+        len = PAKFILE_PATH_MAX;
+    }
+    memcpy(name_field, entry->filename, len);
+    if (len < PAKFILE_PATH_MAX) {
+        memset(name_field + len, 0, PAKFILE_PATH_MAX - len);
+    }
+
+    if (fwrite(name_field, PAKFILE_PATH_MAX, 1, fp) != 1
+        || fwrite(&entry->offset, sizeof(uint32_t), 1, fp) != 1
+        || fwrite(&entry->length, sizeof(uint32_t), 1, fp) != 1) {
+        error_exit("Cannot write new pak directory");
+    }
 }
 
 void write_pak_directory(Pak_t *pak) {
@@ -717,36 +952,36 @@ void write_pak_directory(Pak_t *pak) {
     if (current == NULL) {
         pak->diroffset = PAKFILE_HEADER_SIZE;
         pak->dirlength = 0;
-        fseek(fp, 0L, SEEK_SET);
-        if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) != 1) {
-            error_exit("Cannot write pak header");
+        if (fseek(fp, 0L, SEEK_SET) != 0) {
+            error_exit("Cannot seek to pak header");
         }
+        write_pak_header(pak);
         return;
     }
 
     tail = find_tail(pak);
     pak->diroffset = tail->offset + tail->length;
     pak->dirlength = 0;
-    fseek(fp, pak->diroffset, SEEK_SET);
+    if (fseek(fp, (long)pak->diroffset, SEEK_SET) != 0) {
+        error_exit("Cannot seek to pak directory");
+    }
 
     do {
-        if (fwrite(current, PAKFILE_DIR_ENTRY_SIZE, 1, fp) != 1) {
-            error_exit("Cannot write new pak directory");
-        }
+        write_pak_entry(current);
         pak->dirlength += PAKFILE_DIR_ENTRY_SIZE;
 #ifndef _DEBUG
         debug_directory_entry(current);
 #endif
     } while ((current = current->next) != NULL);
 
-    fseek(fp, 0L, SEEK_SET);
-        
+    if (fseek(fp, 0L, SEEK_SET) != 0) {
+        error_exit("Cannot seek to pak header");
+    }
+
 #ifndef _DEBUG
     debug_header(pak);
 #endif
-    if (fwrite(pak, PAKFILE_HEADER_SIZE, 1, fp) != 1) {
-        error_exit("Cannot write pak header");
-    }
+    write_pak_header(pak);
 }
 
 FILE *create_tmp_pakfile(void) {
