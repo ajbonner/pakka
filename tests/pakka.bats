@@ -94,28 +94,31 @@ setup_file() {
 }
 
 @test "delete: removing every entry leaves a valid empty pak" {
+    # Pak format constants — must match src/common.h.
+    local PAK_HEADER_SIZE=12
+    local PAK_SIG_LEN=4
+
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
 
     all_paths=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
     # shellcheck disable=SC2086  # intentional word-splitting for the path list
     "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
 
-    # File must still be exactly a valid empty PACK header (12 bytes).
-    [ "$(wc -c < "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')" -eq 12 ]
-    [ "$(head -c 4 "$BATS_TEST_TMPDIR/work.pak")" = "PACK" ]
+    [ "$(wc -c < "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')" -eq "$PAK_HEADER_SIZE" ]
+    # OpenBSD head(1) has no -c; dd is the portable byte-count read.
+    [ "$(dd if="$BATS_TEST_TMPDIR/work.pak" bs=1 count="$PAK_SIG_LEN" 2>/dev/null)" = "PACK" ]
 
-    # Directly check diroffset (bytes 4-7, LE u32) == 12. dirlength == 0 is
-    # implied by the file being exactly 12 bytes long (and confirmed via -lf).
-    diroffset=$(od -An -t u4 -N4 -j4 "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')
-    [ "$diroffset" -eq 12 ]
+    # diroffset (LE u32) sits immediately after the signature and must point
+    # to the end of the (empty) header. dirlength == 0 is implied by the
+    # file being exactly header-sized (and confirmed via -lf below).
+    diroffset=$(od -An -t u4 -N"$PAK_SIG_LEN" -j"$PAK_SIG_LEN" "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')
+    [ "$diroffset" -eq "$PAK_HEADER_SIZE" ]
 
     # Listing should succeed and report empty rather than crashing.
     run "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "Pak is empty"
 
-    # Belt and braces: extracting an empty pak should be a clean no-op
-    # (exit 0, no files written) and asking for any specific path must error.
     mkdir -p "$BATS_TEST_TMPDIR/empty_out"
     run "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/empty_out"
     [ "$status" -eq 0 ]

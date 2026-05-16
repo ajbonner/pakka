@@ -85,9 +85,9 @@ int close_pakfile(Pak_t *pak) {
 
 void load_pakfile(Pak_t *pak) {
     rewind(fp);
-    if (fread(pak->signature, 4, 1, fp) != 1
-        || fread(&pak->diroffset, 4, 1, fp) != 1
-        || fread(&pak->dirlength, 4, 1, fp) != 1) {
+    if (fread(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
+        || fread(&pak->diroffset, sizeof(uint32_t), 1, fp) != 1
+        || fread(&pak->dirlength, sizeof(uint32_t), 1, fp) != 1) {
         error_exit("Cannot read pak header");
     }
 
@@ -110,9 +110,9 @@ void load_directory(Pak_t *pak) {
             fseek(fp, entry_pos, SEEK_SET);
 
             current = calloc(1, sizeof(Pakfileentry_t));
-            if (fread(current->filename, 56, 1, fp) != 1
-                || fread(&current->offset, 4, 1, fp) != 1
-                || fread(&current->length, 4, 1, fp) != 1) {
+            if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
+                || fread(&current->offset, sizeof(uint32_t), 1, fp) != 1
+                || fread(&current->length, sizeof(uint32_t), 1, fp) != 1) {
                 error_exit("Cannot read pak directory entry");
             }
 
@@ -136,7 +136,7 @@ void list_files(Pak_t *pak) {
     }
 
     do {
-        printf("%s (%d bytes)\n", current->filename, current->length);
+        printf("%s (%" PRIu32 " bytes)\n", current->filename, current->length);
     } while ((current = current->next) != NULL);
 }
 
@@ -304,7 +304,7 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
         }
         free(destdir_copy);
 
-        printf("Writing %d bytes to file %s\n", current->length, destfile);
+        printf("Writing %" PRIu32 " bytes to file %s\n", current->length, destfile);
 
         fseek(fp, current->offset, SEEK_SET);
         buffer = malloc(sizeof(unsigned char) * current->length);
@@ -480,8 +480,8 @@ Pakfileentry_t *find_tail(Pak_t *pak) {
 }
 
 void init_pak_header(Pak_t *pak) {
-    strncpy(pak->signature, "PACK", 4);
-    pak->diroffset = 12;
+    memcpy(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN);
+    pak->diroffset = PAKFILE_HEADER_SIZE;
     pak->dirlength = 0;
 }
 

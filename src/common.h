@@ -1,5 +1,7 @@
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdint.h>
+#include <inttypes.h>
 #include <string.h>
 #include <unistd.h>
 #include <limits.h>
@@ -8,22 +10,23 @@
 
 #define OS_PATH_MAX PATH_MAX
 #define OS_NAME_MAX NAME_MAX
+#define PAKFILE_SIGNATURE_LEN 4
 #define PAKFILE_PATH_MAX 56
 #define PAKFILE_DIR_ENTRY_SIZE 64
-#define PAKFILE_HEADER_SIZE 12 
+#define PAKFILE_HEADER_SIZE 12
 
 typedef struct Pakfileentry_s {
     char filename[PAKFILE_PATH_MAX];
-    unsigned int offset;
-    unsigned int length;
+    uint32_t offset;
+    uint32_t length;
     struct Pakfileentry_s *next;
 } Pakfileentry_t;
 
 typedef struct {
-    char signature[4];
-    unsigned int diroffset;
-    unsigned int dirlength;
-    unsigned int num_entries;
+    char signature[PAKFILE_SIGNATURE_LEN];
+    uint32_t diroffset;
+    uint32_t dirlength;
+    uint32_t num_entries;
     Pakfileentry_t *head;
 } Pak_t;
 

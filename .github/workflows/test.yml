@@ -15,6 +15,10 @@ concurrency:
 permissions:
   contents: read
 
+# Cache key strategy: `hashFiles('Makefile')` evaluates only inside a
+# job/step (not workflow-level env), so it's inlined in every cache step.
+# Hashing the Makefile means any change to QUAKE_URL or QUAKE_SHA256
+# rolls the key; the tarball is OS-independent so all jobs share it.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -33,7 +37,7 @@ jobs:
           echo "${ACTIONLINT_SHA256}  actionlint.tar.gz" | sha256sum -c -
           tar xzf actionlint.tar.gz actionlint
       - run: ./actionlint -color .github/workflows/test.yml
-      - uses: astral-sh/setup-uv@v8
+      - uses: astral-sh/setup-uv@v8.1.0
       - run: uvx zizmor==1.25.2 .github/workflows/test.yml
       - name: Install clang-tidy
         run: |
@@ -47,6 +51,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: brew install bats-core
       - run: make test
 
@@ -56,6 +64,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: brew install bats-core
       - run: make test
 
@@ -65,6 +77,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bats curl openssl
@@ -76,6 +92,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bats curl openssl
@@ -89,6 +109,10 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: make test
 
   # 32-bit ABI build on a 64-bit kernel/libc via -m32. Not a true i386 OS,
@@ -99,21 +123,32 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y gcc-multilib build-essential bats curl openssl
       - run: make test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
+  # Host cache survives into the VM: vmactions/*-vm rsyncs the workspace
+  # before running, so build/test/quakesw.tar.gz comes with it.
   freebsd-amd64:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - uses: vmactions/freebsd-vm@v1
         with:
           release: '15.0'
           usesh: true
+          sync: rsync
           prepare: pkg install -y gmake curl bats-core
           run: gmake test
 
@@ -125,10 +160,15 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - uses: vmactions/freebsd-vm@v1
         with:
           release: '15.0'
           usesh: true
+          sync: rsync
           prepare: pkg install -y gmake curl bats-core
           run: gmake test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
@@ -138,8 +178,13 @@ jobs:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
       - uses: vmactions/openbsd-vm@v1
         with:
           release: '7.8'
+          sync: rsync
           prepare: pkg_add -I gmake curl bats
           run: gmake test
