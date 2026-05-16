@@ -3,9 +3,8 @@
 #include <stdint.h>
 #include <inttypes.h>
 #include <string.h>
-#include <unistd.h>
-#include <limits.h>
 
+#include "compat.h"
 #include "filesystem.h"
 
 #define OS_PATH_MAX PATH_MAX
