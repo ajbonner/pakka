@@ -213,12 +213,18 @@ jobs:
           update: true
           install: >-
             bash
-            bats
             coreutils
             curl
+            git
             openssl
             tar
             make
+      # MSYS2 has no bats package; install from upstream. /usr/local/bin
+      # is on the default MSYS2 PATH so no extra wiring needed.
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          /tmp/bats-core/install.sh /usr/local
       # CMake/Ninja are preinstalled on the windows-latest image but live
       # outside the MSYS2 environment; expose them via a cmd shell that
       # has both MSVC and the runner PATH set up.
