@@ -5,7 +5,10 @@ MINOR=0
 BUILD_DATE="\"$(shell date +'%b %d, %Y')\""
 VERSION="\"$(MAJOR).$(MINOR)\""
 TARGET=pakka
-CPPFLAGS = -D_POSIX_C_SOURCE=200809L -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+# _XOPEN_SOURCE=700 (POSIX.1-2008 + XSI) — needed for realpath():
+# glibc gates it on __USE_XOPEN_EXTENDED, musl on _XOPEN_SOURCE, neither
+# on _POSIX_C_SOURCE.
+CPPFLAGS = -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 CC=cc $(CPPFLAGS)
 CFLAGS=-g -Wall --std=c99 --pedantic
 
@@ -24,7 +27,7 @@ PAK0=$(TEST_DIR)/pak0.pak
 
 CLANG_TIDY ?= clang-tidy
 
-.PHONY: all clean test test-clean distclean lint
+.PHONY: all clean test test-clean distclean lint verify-tarball
 
 all: $(TARGET)
 
@@ -52,16 +55,18 @@ $(OBJ_DIR) $(TEST_DIR):
 $(QUAKE_TARBALL): | $(TEST_DIR)
 	@echo "==> Downloading Quake shareware ($(QUAKE_URL))"
 	@curl -fsSL -o $(QUAKE_TARBALL) $(QUAKE_URL)
-	@echo "==> Verifying SHA256"
+
+# Phony so the SHA check runs every build, including cache-restore hits
+# where $(QUAKE_TARBALL) is already on disk and would otherwise be skipped.
+verify-tarball: $(QUAKE_TARBALL)
 	@actual=`openssl dgst -sha256 $(QUAKE_TARBALL) | awk '{print $$NF}'`; \
 	if [ "$$actual" != "$(QUAKE_SHA256)" ]; then \
-		echo "  FAIL: expected $(QUAKE_SHA256), got $$actual"; \
+		echo "==> SHA256 mismatch: expected $(QUAKE_SHA256), got $$actual"; \
 		rm -f $(QUAKE_TARBALL); \
 		exit 1; \
 	fi
-	@echo "  OK"
 
-$(PAK0): $(QUAKE_TARBALL)
+$(PAK0): verify-tarball
 	@cd $(TEST_DIR) && tar xzf quakesw.tar.gz
 	@cp $(TEST_DIR)/id1/pak0.pak $(PAK0)
 
