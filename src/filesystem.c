@@ -26,7 +26,7 @@ int mkdir_r(char *path) {
     while ((curpos = strchr(curpos, '/'))) {
         *curpos = '\0';
         if (stat(path, &sb) != 0) {
-            if (mkdir(path, mode)) {
+            if (compat_mkdir(path, mode)) {
                 fprintf(stderr, "Could not create directory '%s': %s\n", path, strerror(errno));
                 return -1;
             }
@@ -41,7 +41,7 @@ int mkdir_r(char *path) {
         }
     }
 
-    if (mkdir(path, mode)) {
+    if (compat_mkdir(path, mode)) {
         fprintf(stderr, "Could not create directory '%s': %s\n", path, strerror(errno));
         return -1;
     }

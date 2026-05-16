@@ -2,8 +2,8 @@
 #include <string.h>
 #include <stdlib.h>
 #include <errno.h>
-#include <libgen.h>
-#include <sys/stat.h>
+
+#include "compat.h"
 
 int file_exists(const char *dirname);
 int mkdir_r(char *path);

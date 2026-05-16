@@ -38,6 +38,12 @@ jobs:
           tar xzf actionlint.tar.gz actionlint
       - run: ./actionlint -color .github/workflows/test.yml
       - uses: astral-sh/setup-uv@v8.1.0
+        with:
+          # Pakka is not a Python project; the default cache glob hunts
+          # for requirements.txt / pyproject.toml and warns that the
+          # cache will never invalidate. We only use uv to run zizmor
+          # once — caching buys nothing.
+          enable-cache: false
       - run: uvx zizmor==1.25.2 .github/workflows/test.yml
       - name: Install clang-tidy
         run: |
@@ -190,3 +196,71 @@ jobs:
           sync: rsync
           prepare: pkg_add -I gmake curl bats
           run: gmake test
+
+  # Windows / MSVC build. Uses CMake to drive cl.exe (the Unix Makefile
+  # doesn't apply here) and MSYS2 to provide bash + bats for running
+  # the existing test suite against the resulting pakka.exe.
+  windows-msvc-x86_64:
+    # windows-latest is being redirected to this label by mid-June 2026
+    # per the runner banner; pinning explicitly avoids the noise.
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      # Fork of ilammy/msvc-dev-cmd that's actively maintained and
+      # runs on Node 24 (ilammy's v1.13.0 is still on Node 20).
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        with:
+          # setup-msys2 caches its install dir by default (keyed on the
+          # install list). `update: false` keeps `pacman -Syu` from
+          # firing on every run — the windows-latest MSYS2 base already
+          # ships current versions of everything we need.
+          update: false
+          install: >-
+            bash
+            coreutils
+            curl
+            diffutils
+            git
+            openssl
+            tar
+            make
+      # MSYS2 has no bats package; install from upstream. /usr/local/bin
+      # is on the default MSYS2 PATH so no extra wiring needed.
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          /tmp/bats-core/install.sh /usr/local
+      # CMake/Ninja are preinstalled on the windows-latest image but live
+      # outside the MSYS2 environment; expose them via a cmd shell that
+      # has both MSVC and the runner PATH set up.
+      - name: Configure (CMake / Ninja / MSVC)
+        shell: pwsh
+        run: cmake -B build/cmake -G Ninja .
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/cmake
+      - name: Fetch + verify Quake fixture
+        run: make fixture
+      - name: Run bats tests against pakka.exe
+        # Resolve PAKKA to an MSYS2-style absolute path: relative paths
+        # can break inside bats's setup_file (bats may chdir into a temp
+        # dir before invoking it), and $GITHUB_WORKSPACE is Windows-shape
+        # which trips MSYS2 bash path resolution. $PWD inside this step
+        # is already the MSYS2 form of the workspace.
+        run: |
+          ls -la build/cmake/ || true
+          test -x build/cmake/pakka.exe
+          export PAKKA="$PWD/build/cmake/pakka.exe"
+          bats tests/
