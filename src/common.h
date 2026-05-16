@@ -41,8 +41,45 @@ typedef struct {
     Pakfileentry_t *head;
 } Pak_t;
 
+/* C99-compatible compile-time check via typedef'd array of length 1 or
+ * -1. Used to guard the constants the on-disk format depends on; if a
+ * future change accidentally edits a constant without updating peers
+ * (PAKFILE_HEADER_SIZE != signature + diroffset + dirlength bytes,
+ * say) the build fails here rather than silently producing corrupt
+ * paks. */
+#define PAKKA_STATIC_ASSERT(cond, name) \
+    typedef char pakka_assert_##name[(cond) ? 1 : -1]
+
+PAKKA_STATIC_ASSERT(
+    PAKFILE_HEADER_SIZE == PAKFILE_SIGNATURE_LEN + 2 * (int)sizeof(uint32_t),
+    header_size_matches_fields);
+PAKKA_STATIC_ASSERT(
+    PAKFILE_DIR_ENTRY_SIZE == PAKFILE_PATH_MAX + 2 * (int)sizeof(uint32_t),
+    dir_entry_size_matches_fields);
+PAKKA_STATIC_ASSERT(
+    PAKFILE_PATH_BUF == PAKFILE_PATH_MAX + 1,
+    path_buf_has_nul_guard);
+
 void error_exit(const char *format, ...);
-Pak_t *open_pakfile(const char *pakpath);
+/* As error_exit, but uses an explicitly captured errno instead of the
+ * current global. Use this from any call site where a library call
+ * (free/closedir/fclose/snprintf, etc.) may run between the failing
+ * operation and the error_exit call — those intermediates can reset
+ * errno and produce a misleading strerror in the message. Pass 0 to
+ * suppress the strerror suffix entirely. */
+void error_exit_e(int saved_errno, const char *format, ...);
+
+/* Write s to out with any control byte (0x00-0x1F or 0x7F) replaced
+ * by '?'. Defense in depth for the list/tree/debug printers: pak entry
+ * names are 56 bytes of attacker-controlled data, and even though
+ * extract refuses to materialize control bytes on disk, listing a
+ * malicious pak shouldn't let it inject ANSI escapes that reflow a
+ * user's terminal. */
+void fprint_sanitized(FILE *out, const char *s);
+/* Open an existing pak. writable=0 opens "rb" (works on read-only
+ * paks; required for list/extract), writable=1 opens "r+b" (required
+ * for add/delete). */
+Pak_t *open_pakfile(const char *pakpath, int writable);
 Pak_t *create_pakfile(const char *pakpath);
 int close_pakfile(Pak_t *pak);
 void list_files(Pak_t *pak);
