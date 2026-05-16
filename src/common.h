@@ -21,6 +21,9 @@
 /* Sanity cap on directory entry count. id's pak0.pak has 339 entries;
  * a million is generous and prevents calloc-loop DoS on crafted headers. */
 #define PAKFILE_MAX_ENTRIES 1048576u
+/* Buffer size for streaming file copies during add. Bounds peak RSS at
+ * 64 KiB regardless of input file size. */
+#define PAKFILE_COPY_CHUNK 65536u
 
 typedef struct Pakfileentry_s {
     char filename[PAKFILE_PATH_BUF];

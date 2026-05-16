@@ -103,8 +103,13 @@ int close_pakfile(Pak_t *pak) {
     }
 
     if (is_new) {
-        if (compat_rename_replace(tmp_pakpath, new_pakpath) != 0) {
-            error_exit("Could not rename tmp pak %s to final pak %s", tmp_pakpath, new_pakpath);
+        /* No-replace semantics: between create_pakfile's stat() check
+         * and now another process may have dropped a file at the
+         * destination. Atomically refuse to overwrite rather than
+         * silently clobbering. */
+        if (compat_rename_noreplace(tmp_pakpath, new_pakpath) != 0) {
+            error_exit("Could not create pak %s (destination may already exist)",
+                       new_pakpath);
         }
     }
 
@@ -395,8 +400,13 @@ int add_files(Pak_t *pak, char **paths, int path_count) {
 int add_to_pak(Pak_t *pak, char* path) {
     struct stat sb;
 
-    if (stat(path, &sb) != 0) {
+    /* lstat — not stat — so a symlink at the user-supplied path is
+     * detected as a symlink instead of silently dereferenced. Pakka
+     * has no --follow-symlinks flag yet; reject explicitly. */
+    if (compat_lstat(path, &sb) != 0) {
         error_exit("Cannot add %s", path);
+    } else if (S_ISLNK(sb.st_mode)) {
+        error_exit("Refusing to add symlink %s (use the target path directly)", path);
     } else if (S_ISREG(sb.st_mode)) {
         add_file(pak, path);
     } else if (S_ISDIR(sb.st_mode)) {
@@ -427,6 +437,13 @@ int add_file(Pak_t *pak, char *path) {
     if (path_len >= PAKFILE_PATH_MAX) {
         error_exit("Path '%s' too long for pak entry (%zu bytes, max %d)",
                    path, path_len, PAKFILE_PATH_MAX - 1);
+    }
+
+    /* Quake's pak format permits duplicate entry names, but find_entry
+     * only ever returns the first match — every operation after a
+     * duplicate add is ambiguous. Reject up front. */
+    if (find_entry(pak, path) != NULL) {
+        error_exit("Entry '%s' already exists in pak", path);
     }
 
     if (! (tfd = fopen(path, "rb"))) {
@@ -467,17 +484,26 @@ int add_file(Pak_t *pak, char *path) {
     }
 
     if (size > 0) {
-        bytes = malloc((size_t)size);
+        /* Stream in fixed-size chunks. Avoids a malloc that scales with
+         * file size — large entries used to fail on 32-bit hosts and
+         * burn peak RSS proportional to the payload on 64-bit hosts. */
+        size_t remaining = (size_t)size;
+        size_t chunk;
+        bytes = malloc(PAKFILE_COPY_CHUNK);
         if (bytes == NULL) {
-            error_exit("Cannot allocate %" PRId64 " bytes for %s", size, path);
+            error_exit("Cannot allocate copy buffer for %s", path);
         }
-        if (fread(bytes, (size_t)size, 1, tfd) != 1) {
-            free(bytes);
-            error_exit("Cannot read %s", path);
-        }
-        if (fwrite(bytes, (size_t)size, 1, fp) != 1) {
-            free(bytes);
-            error_exit("Could not add %s to pak", path);
+        while (remaining > 0) {
+            chunk = remaining > PAKFILE_COPY_CHUNK ? PAKFILE_COPY_CHUNK : remaining;
+            if (fread(bytes, 1, chunk, tfd) != chunk) {
+                free(bytes);
+                error_exit("Cannot read %s", path);
+            }
+            if (fwrite(bytes, 1, chunk, fp) != chunk) {
+                free(bytes);
+                error_exit("Could not add %s to pak", path);
+            }
+            remaining -= chunk;
         }
         free(bytes);
     }
@@ -528,8 +554,14 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
             error_exit("Path too long: %s/%s", path, dirp->d_name);
         }
 
-        if (stat(tmp, &sb) == 0) {
-            if (S_ISDIR(sb.st_mode)) {
+        /* lstat per entry so a symlinked subdir doesn't escape the
+         * tree the user asked us to pack. Skipping is the safer
+         * default; loud-failing would break legitimate trees that
+         * incidentally contain symlinks. */
+        if (compat_lstat(tmp, &sb) == 0) {
+            if (S_ISLNK(sb.st_mode)) {
+                fprintf(stderr, "Skipping symlink %s\n", tmp);
+            } else if (S_ISDIR(sb.st_mode)) {
                 add_folder_r(pak, tmp, depth + 1);
             } else if (S_ISREG(sb.st_mode)) {
                 add_file(pak, tmp);
@@ -544,16 +576,74 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
     return 0;
 }
 
-void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
-    char *destfile, *destdir, *destdir_copy;
+/* Write a single pak entry's payload under dest_dir. The compat
+ * helper does the path join, creates missing directories, and refuses
+ * to follow any existing symlink/reparse point under dest_dir — so
+ * an attacker who plants `models -> /tmp/outside` in dest_dir can't
+ * redirect the write. Caller has already validated current->filename
+ * for path-traversal characters. */
+static void extract_one_entry(Pakfileentry_t *current, const char *dest_dir) {
     unsigned char *buffer;
     FILE *tfd;
-    int i, matched;
+
+    printf("Writing %" PRIu32 " bytes to %s/%s\n",
+           current->length, dest_dir, current->filename);
+
+    tfd = compat_open_extract_target(dest_dir, current->filename);
+    if (tfd == NULL) {
+        error_exit("Cannot open %s/%s for writing "
+                   "(symlink in path or filesystem error)",
+                   dest_dir, current->filename);
+    }
+
+    /* Zero-length entries: skip the I/O entirely (malloc(0) and fread/
+     * fwrite with size 0 are implementation-defined). The open above
+     * still materializes the empty file on disk. */
+    if (current->length > 0) {
+        if (fseek(fp, (long)current->offset, SEEK_SET) != 0) {
+            error_exit("Cannot seek to entry '%s' in pak", current->filename);
+        }
+        buffer = malloc(current->length);
+        if (buffer == NULL) {
+            error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
+                       current->length, current->filename);
+        }
+        if (fread(buffer, current->length, 1, fp) != 1) {
+            error_exit("Cannot read entry '%s' from pak", current->filename);
+        }
+        if (fwrite(buffer, current->length, 1, tfd) != 1) {
+            error_exit("Cannot write entry '%s'", current->filename);
+        }
+        free(buffer);
+    }
+
+    fclose(tfd);
+}
+
+/*
+ * Two-pass extract:
+ *
+ *   Pass 1 (preflight): walk every entry, match against requested
+ *   paths, run is_unsafe_extract_path on the selected ones, verify
+ *   every requested path is found in the pak. No filesystem side
+ *   effects. error_exit anywhere here leaves the destination dir
+ *   untouched.
+ *
+ *   Pass 2 (write): walk the same entries, extract the ones flagged
+ *   by pass 1.
+ *
+ * Pre-fix the validation was interleaved with writes, so a pak with
+ * "safe/a" followed by "../etc/passwd" would write safe/a to disk
+ * before bailing on the traversal entry.
+ */
+void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
+    Pakfileentry_t *current;
     int *path_matched = NULL;
+    int *should_extract = NULL;
+    uint32_t idx;
+    int i, matched;
 
-    Pakfileentry_t *current = pak->head;
-
-    if (current == NULL) {
+    if (pak->head == NULL) {
         if (path_count > 0) {
             error_exit("Pak is empty; cannot extract %s", paths[0]);
         }
@@ -561,85 +651,50 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
         return;
     }
 
+    if (pak->num_entries > 0) {
+        should_extract = calloc(pak->num_entries, sizeof(int));
+        if (should_extract == NULL) {
+            error_exit("Cannot allocate extract preflight buffer");
+        }
+    }
     if (path_count > 0) {
         path_matched = calloc(path_count, sizeof(int));
+        if (path_matched == NULL) {
+            error_exit("Cannot allocate path-match buffer");
+        }
     }
 
-    do {
-        if (path_count > 0) {
+    /* Pass 1: preflight. */
+    idx = 0;
+    for (current = pak->head; current != NULL; current = current->next) {
+        if (idx >= pak->num_entries) {
+            error_exit("Pak directory linked list longer than num_entries");
+        }
+
+        if (path_count == 0) {
+            matched = 1;
+        } else {
             matched = 0;
-            /* Don't break on first match: a duplicate argument like
-             * `pakka -xf foo default.cfg default.cfg` needs both
-             * path_matched[] entries set, or the final completeness
-             * check spuriously errors on the duplicate. */
+            /* Don't break on first match: `pakka -xf foo a a` must
+             * mark both path_matched[] entries or the coverage check
+             * below spuriously errors on the duplicate. */
             for (i = 0; i < path_count; i++) {
                 if (strcmp(current->filename, paths[i]) == 0) {
                     matched = 1;
                     path_matched[i] = 1;
                 }
             }
-            if (! matched) continue;
         }
 
-        if (is_unsafe_extract_path(current->filename)) {
-            error_exit("Refusing to extract '%s': entry name would escape destination",
-                       current->filename);
-        }
-
-        /* + 2 one for trailing null and the / we concat between basedir and pakfile path */
-        {
-            size_t destfile_size = strlen(dest) + strlen(current->filename) + 2;
-            destfile = malloc(destfile_size);
-            if (destfile == NULL) {
-                error_exit("Cannot allocate destination path for '%s'",
+        if (matched) {
+            if (is_unsafe_extract_path(current->filename)) {
+                error_exit("Refusing to extract '%s': entry name would escape destination",
                            current->filename);
             }
-            if (build_filename(destfile, destfile_size, dest, current->filename) != 0) {
-                error_exit("Destination path too long for '%s'", current->filename);
-            }
+            should_extract[idx] = 1;
         }
-
-        /* POSIX dirname() may modify its argument and/or return a static buffer
-         * that subsequent calls overwrite. Pass it a throwaway copy. */
-        destdir_copy = compat_strdup(destfile);
-        destdir = compat_dirname(destdir_copy);
-
-        if (! (file_exists(destdir)) && (mkdir_r(destdir) != 0)) {
-            error_exit("Cannot create directory %s", destdir);
-        }
-        free(destdir_copy);
-
-        printf("Writing %" PRIu32 " bytes to file %s\n", current->length, destfile);
-
-        if (! (tfd = fopen(destfile, "wb"))) {
-            error_exit("Cannot open %s for writing", destfile);
-        }
-
-        /* Skip the read/write dance for zero-length entries: malloc(0) is
-         * implementation-defined and fread/fwrite with size=0 has no
-         * meaningful semantics. Touching fopen still creates an empty
-         * file so the entry is materialized on disk. */
-        if (current->length > 0) {
-            if (fseek(fp, (long)current->offset, SEEK_SET) != 0) {
-                error_exit("Cannot seek to entry '%s' in pak", current->filename);
-            }
-            buffer = malloc(current->length);
-            if (buffer == NULL) {
-                error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
-                           current->length, current->filename);
-            }
-            if (fread(buffer, current->length, 1, fp) != 1) {
-                error_exit("Cannot read entry '%s' from pak", current->filename);
-            }
-            if (fwrite(buffer, current->length, 1, tfd) != 1) {
-                error_exit("Cannot write to %s", destfile);
-            }
-            free(buffer);
-        }
-
-        fclose(tfd);
-        free(destfile);
-    } while ((current = current->next) != NULL);
+        idx++;
+    }
 
     if (path_count > 0) {
         for (i = 0; i < path_count; i++) {
@@ -647,8 +702,21 @@ void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
                 error_exit("Cannot find %s in pak file", paths[i]);
             }
         }
-        free(path_matched);
     }
+
+    /* Pass 2: write. compat_open_extract_target performs the dest_dir +
+     * rel_path join internally with per-component symlink rejection,
+     * so we don't precompute a flat destfile string. */
+    idx = 0;
+    for (current = pak->head; current != NULL; current = current->next) {
+        if (should_extract[idx]) {
+            extract_one_entry(current, dest);
+        }
+        idx++;
+    }
+
+    free(should_extract);
+    free(path_matched);
 }
 
 void delete_files(Pak_t *pak, char *paths[], int path_count) {
@@ -820,15 +888,89 @@ int build_filename(char *dest, size_t dest_size,
     return 0;
 }
 
+/* Windows reserved device names. Matched against the segment's base
+ * (everything before the first '.') case-insensitively, regardless of
+ * extension: "CON.txt" is still the console. COM0/LPT0 are accepted by
+ * recent Windows versions; include them for safety. */
+static const struct { const char *name; size_t len; } win_reserved_names[] = {
+    {"CON", 3}, {"PRN", 3}, {"AUX", 3}, {"NUL", 3},
+    {"COM0", 4}, {"COM1", 4}, {"COM2", 4}, {"COM3", 4}, {"COM4", 4},
+    {"COM5", 4}, {"COM6", 4}, {"COM7", 4}, {"COM8", 4}, {"COM9", 4},
+    {"LPT0", 4}, {"LPT1", 4}, {"LPT2", 4}, {"LPT3", 4}, {"LPT4", 4},
+    {"LPT5", 4}, {"LPT6", 4}, {"LPT7", 4}, {"LPT8", 4}, {"LPT9", 4}
+};
+
+static int is_reserved_device_name(const char *seg, size_t seg_len) {
+    size_t base_len, i, j;
+    char a, b;
+
+    /* Match the name up to the first '.' so "CON.txt" still hits "CON". */
+    base_len = 0;
+    while (base_len < seg_len && seg[base_len] != '.') {
+        base_len++;
+    }
+
+    for (i = 0; i < sizeof(win_reserved_names) / sizeof(win_reserved_names[0]); i++) {
+        if (win_reserved_names[i].len != base_len) continue;
+        for (j = 0; j < base_len; j++) {
+            a = seg[j];
+            b = win_reserved_names[i].name[j];
+            if (a >= 'a' && a <= 'z') a = (char)(a - 32);
+            if (a != b) break;
+        }
+        if (j == base_len) return 1;
+    }
+    return 0;
+}
+
+/* Per-segment safety check. Centralizes everything we know about a
+ * single path component:
+ *  - empty: allowed (lets "foo//bar" through; the duplicate slash
+ *    collapses harmlessly on disk).
+ *  - exact "..": rejected (path-traversal escape).
+ *  - control bytes 0x01-0x1F and DEL: rejected (terminal injection
+ *    and filesystem corner cases).
+ *  - colon: rejected anywhere in the segment. On Windows this is the
+ *    ADS (alternate data stream) separator; subsumes the old drive-
+ *    letter check at position 1.
+ *  - trailing '.' or ' ': rejected. Windows silently strips both, so
+ *    "foo." resolves to "foo" — pak entries must never depend on
+ *    that normalization (treats "foo" and "foo." as the same file).
+ *    The literal "." segment is allowed (no-op normalization).
+ *  - Windows reserved device names (CON/NUL/COM1/...): rejected on
+ *    every host because paks are portable.
+ */
+static int is_unsafe_segment(const char *seg, size_t seg_len) {
+    size_t i;
+    unsigned char c;
+
+    if (seg_len == 0) return 0;
+    if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') return 1;
+
+    for (i = 0; i < seg_len; i++) {
+        c = (unsigned char)seg[i];
+        if (c < 0x20 || c == 0x7F) return 1;
+        if (c == ':') return 1;
+    }
+
+    /* Trailing dot or space, except for the bare "." no-op segment. */
+    if (! (seg_len == 1 && seg[0] == '.')) {
+        if (seg[seg_len - 1] == '.' || seg[seg_len - 1] == ' ') return 1;
+    }
+
+    if (is_reserved_device_name(seg, seg_len)) return 1;
+
+    return 0;
+}
+
 /* Validate a pak entry name before extracting. Pak format places no
  * constraints on entry names beyond a 56-byte upper bound, so a malicious
- * pak can name an entry "../../etc/passwd" or "C:\windows\foo" and silently
- * write outside the -C destination on extract. Both POSIX and Windows
- * targets are checked here, because pak archives are portable and a pak
- * crafted on Windows could be unpacked on POSIX (or vice versa). */
+ * pak can name an entry "../../etc/passwd", "C:\windows\foo", "CON",
+ * "foo:stream", or "trailing." and corrupt or redirect the extract.
+ * Both POSIX and Windows shapes are checked here because pak archives
+ * are portable. */
 static int is_unsafe_extract_path(const char *path) {
     const char *p, *seg;
-    size_t seg_len;
 
     if (path == NULL || *path == '\0') {
         return 1;
@@ -838,20 +980,10 @@ static int is_unsafe_extract_path(const char *path) {
         return 1;
     }
 
-    /* Drive-letter prefix ("X:..."): on Windows, fopen honors this and
-     * would route the write to a different drive's CWD or root. Reject
-     * unconditionally — pak entries should never carry one. */
-    if (path[1] == ':') {
-        return 1;
-    }
-
-    /* Walk slash- or backslash-separated segments. Only an exact ".."
-     * segment is rejected; "..foo" or "foo.." are legal characters. */
     seg = path;
     for (p = path; ; p++) {
         if (*p == '/' || *p == '\\' || *p == '\0') {
-            seg_len = (size_t)(p - seg);
-            if (seg_len == 2 && seg[0] == '.' && seg[1] == '.') {
+            if (is_unsafe_segment(seg, (size_t)(p - seg))) {
                 return 1;
             }
             if (*p == '\0') {
