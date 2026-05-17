@@ -190,16 +190,22 @@ this.
   verifies via two images in `dev/legacy/ci/` (Sarge-derived + custom make
   3.79.1, and an RH9-rootfs image built from SHA-pinned vault RPMs); the QEMU
   probe in `dev/legacy/rh9/` remains the authoritative real-hardware verifier.
-- Deferred legacy targets (not yet in CI, intentionally): the historical
-  default-toolchain BSDs (FreeBSD 4.11, OpenBSD 3.3, NetBSD 1.6 sparc/macppc)
-  all ship gcc 2.95, which is below the documented C99 floor. Adding them
-  means either installing gcc 3.x in each guest from period-correct
-  ports/pkgsrc (brittle, since those archives have rotated), or lowering the
-  floor to gcc 2.95 (effectively a C90 migration). They also predate
-  `openat`/`mkdirat` in their respective libcs (FreeBSD 8.0, OpenBSD 5.0,
-  NetBSD 6.0), so `PAKKA_LEGACY_EXTRACT` would need to recognize old BSD
-  version macros, not just `__GLIBC_PREREQ(2,4)`. Each target is QEMU-disk-
-  image infrastructure on the scale of `dev/legacy/rh9/`; add them one by one
-  if the demand justifies the cost. Alpha is also skipped: it is little-endian
-  in every shipped configuration (FreeBSD/NetBSD/Linux), so it adds no
-  byte-order coverage beyond what `linux-glibc-s390x-be` already gives.
+- Legacy non-x86 BE BSD probe: `dev/legacy/netbsd-sparc/` ships the
+  infrastructure for a NetBSD 3.0/sparc build probe (gcc 3.3, BSD libc,
+  big-endian, SPARC strict-alignment). `qemu-system-sparc -M SS-5` boots the
+  miniroot cleanly; `sysinst` runs interactively (no scripted-install
+  equivalent in NetBSD 3.0). The probe is a manual real-hardware-equivalent
+  verifier — the same role `dev/legacy/rh9/` plays for Red Hat. NetBSD 3.0 is
+  the oldest release that stays above the gcc 3.0+ floor (1.6 ships gcc 2.95;
+  2.0 was the first with gcc 3.3 as default).
+- Other deferred legacy targets (not yet in tree): default-toolchain FreeBSD
+  4.11 / OpenBSD 3.3 / NetBSD 1.6 all ship gcc 2.95 (below floor). Adding any
+  of them needs either installing gcc 3.x in the guest (brittle) or lowering
+  the floor to gcc 2.95 (effectively a C90 migration). They also predate
+  `openat`/`mkdirat` in their libcs (FreeBSD 8.0, OpenBSD 5.0, NetBSD 6.0),
+  so `PAKKA_LEGACY_EXTRACT` would need to recognize BSD version macros, not
+  just `__GLIBC_PREREQ(2,4)`. Alpha is skipped: it is little-endian in every
+  shipped configuration (FreeBSD/NetBSD/Linux), so it adds no byte-order
+  coverage beyond `linux-glibc-s390x-be`. Solaris/SPARC and IRIX/MIPS are
+  Quake-era-authentic but blocked by Sun licensing on install media and
+  immature emulator support respectively (see `dev/legacy/quake-era-targets.md`).

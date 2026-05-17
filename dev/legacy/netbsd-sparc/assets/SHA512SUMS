@@ -1,0 +1,11 @@
+# NetBSD 3.0 sparc install media + binary sets, sourced from
+#   https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-3.0/sparc/
+# These sums are the public SHA512 values published by The NetBSD
+# Foundation alongside each release tree; the fetch scripts in
+# ../scripts/ verify against this file.
+356e5b25876323f3e3f7eba4255ab750d125017c68304f6eca4bf30ecec3441dc0833d8c2d700605b94c1734aff1abed1fcff0b527fc6908beb5448fc352095c  installation/miniroot/miniroot.fs.gz
+452772462382bfbf15b7ca9c6b5e7137afd58f8bf2c2142912c82805b2dd95974829027e4b3785be9c9292cea3fc6b5779f7f73f81b350f856127346756dad68  binary/sets/base.tgz
+ebc63869de8e4cd489238909112ee4b629af3775ab979d8cda38c08ea0a25abd129294641be96cf2e879c95dbd760cb235ddcacff30816f2ca4ce79a79b0dd27  binary/sets/comp.tgz
+f817966a6c7da5ab67b3cc8cc57c60b1629936ee6ec2b6bdda7c76414a7c0c1a2210a1d6f68598d2e5b020c28376cfd35cb8c8b6f93e52042cc66c5e437949bc  binary/sets/etc.tgz
+9c4a1de7b338bce54693644b3e44e72a00ea06c9d516afc7467b6454ab862e3175bf26a0a4e4df57152003f860af4fbaf9f87f2df711464834e84b64d1ad2d5b  binary/sets/text.tgz
+1c0f5aa6b4ba4ce12ee112b2eb12fd13539e74a76ef83d46b83747b46831343d366704aeb6db64df9d447e58a5e938b7fcf479c59ef033a7a81287c1709aed97  binary/sets/kern-GENERIC.tgz
