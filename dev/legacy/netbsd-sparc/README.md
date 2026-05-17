@@ -29,12 +29,43 @@ floor.
   KEX/cipher overrides documented in `run-build.sh`)
 * `make` build + symlink-safe extract smoke: verified — see
   `results/2026-05-17-netbsd-sparc-build.log`
+* Per-push CI coverage via the `legacy-netbsd-sparc` job in
+  `.github/workflows/test.yml`: verified. The job downloads a
+  pre-built disk image from the
+  [`legacy-netbsd-sparc-disk-v1`](https://github.com/ajbonner/pakka/releases/tag/legacy-netbsd-sparc-disk-v1)
+  GitHub release (144 MB compressed qcow2, SHA-256 pinned in the
+  workflow), boots `qemu-system-sparc -M SS-5` on ubuntu-latest, and
+  runs the same build + smoke. ~10 min wall-clock — sparc TCG is the
+  slowest job in the matrix.
 
 The build smoke catches a pre-openat libc regression class: pakka's
 `compat.c` swaps to the `fchdir` + `O_NOFOLLOW` legacy extract path
 when the libc lacks `openat`. Before that path was BSD-gated, NetBSD
 3.0 failed compile on `O_CLOEXEC` and `openat`. The fix shipped in the
 same commit that captured this probe (see git log for details).
+
+## CI artifact regeneration
+
+The pre-built disk image is intentionally pinned by SHA in the
+workflow so a guest update is an explicit, reviewable event. To
+regenerate:
+
+1. Run `scripts/install-vm.sh` to produce a fresh installed qcow2 in
+   `$PAKKA_NBSD_WORKDIR`. Follow the inline sysinst hints to enable
+   sshd persistently and set the root password to `pakka`.
+2. After the guest reboots into the installed system (`run-vm.sh`),
+   SSH in and build GNU Make 3.81 from upstream source — NetBSD 3.0/
+   sparc has no usable pkgsrc binary archive past 7.0:
+   ```
+   ftp -V -4 -o /tmp/make.tgz http://ftp.gnu.org/gnu/make/make-3.81.tar.gz
+   cd /tmp && tar xzf make.tgz && cd make-3.81
+   ./configure --prefix=/usr/local --without-guile && make && make install
+   ```
+3. Halt the guest cleanly: `ssh root@... '/sbin/halt -p'`.
+4. Compress: `qemu-img convert -O qcow2 -c netbsd-sparc.qcow2 disk.qcow2`.
+5. Re-upload with a bumped release tag (e.g.
+   `legacy-netbsd-sparc-disk-v2`) and update both the `DISK_URL` and
+   `DISK_SHA256` in `.github/workflows/test.yml`.
 
 ## Contents
 

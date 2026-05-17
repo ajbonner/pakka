@@ -366,10 +366,7 @@ jobs:
       - name: Install qemu-system-sparc + sshpass
         run: |
           sudo apt-get update
-          # netcat-openbsd guarantees `nc -z`; ubuntu-latest already
-          # has it but pin explicitly so a runner image change doesn't
-          # silently break the readiness probe.
-          sudo apt-get install -y qemu-system-sparc sshpass netcat-openbsd
+          sudo apt-get install -y qemu-system-sparc sshpass
       - name: Download + verify NetBSD 3.0/sparc disk snapshot
         env:
           DISK_URL: https://github.com/ajbonner/pakka/releases/download/legacy-netbsd-sparc-disk-v1/pakka-legacy-netbsd-sparc-disk-v1.qcow2
