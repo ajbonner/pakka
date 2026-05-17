@@ -1,59 +1,36 @@
 #!/bin/sh
-# Fetch the NetBSD 3.0 sparc install miniroot + binary sets the
-# install needs to bootstrap a usable build environment for pakka.
-# Verifies every download against ../assets/SHA512SUMS.
+# Fetch the NetBSD 3.0 sparc install ISO from the archive mirror,
+# verify SHA-512, and stage it for install-vm.sh.
 #
 # Mirror note: archive.netbsd.org gates binary downloads behind a
 # `?key=NetBSD` query parameter ("trivial botcatcher"). We pass it on
-# every fetch so curl doesn't bounce off the 402 response.
+# every fetch so curl doesn't bounce off the 402 response. Set
+# PAKKA_NBSD_KEY="" to drop the parameter if the upstream scheme
+# changes.
 set -eu
 
 SCRIPT_DIR=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)
 WORKDIR=${PAKKA_NBSD_WORKDIR:-/private/tmp/pakka-netbsd-sparc}
-MIRROR=${PAKKA_NBSD_MIRROR:-https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-3.0/sparc}
+MIRROR=${PAKKA_NBSD_MIRROR:-https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-3.0}
 KEY=${PAKKA_NBSD_KEY:-NetBSD}
 
-mkdir -p "$WORKDIR/installation/miniroot" "$WORKDIR/binary/sets"
+mkdir -p "$WORKDIR/iso"
 
-# Files to fetch: relative paths under the sparc/ tree.
-files="
-installation/miniroot/miniroot.fs.gz
-binary/sets/base.tgz
-binary/sets/comp.tgz
-binary/sets/etc.tgz
-binary/sets/text.tgz
-binary/sets/kern-GENERIC.tgz
-"
-
-# Empty PAKKA_NBSD_KEY omits the query parameter entirely so the
-# script keeps working if archive.netbsd.org drops the bot-catcher.
 if [ -n "$KEY" ]; then
     Q="?key=$KEY"
 else
     Q=""
 fi
 
-for path in $files; do
-    out="$WORKDIR/$path"
-    if [ -f "$out" ]; then
-        echo "==> Already have $path"
-        continue
-    fi
-    echo "==> Fetching $path"
-    curl -fsSL -o "$out" "$MIRROR/$path$Q"
-done
-
-echo "==> Verifying SHA512s against assets/SHA512SUMS"
-(
-    cd "$WORKDIR"
-    shasum -a 512 -c "$SCRIPT_DIR/../assets/SHA512SUMS"
-)
-
-# Pre-extract the miniroot for the install boot. NetBSD's installer
-# treats this as the boot disk: qemu-system-sparc reads it as raw and
-# OpenBIOS hands control to NetBSD's secondary boot inside it.
-if [ ! -f "$WORKDIR/installation/miniroot/miniroot.fs" ]; then
-    gunzip -k "$WORKDIR/installation/miniroot/miniroot.fs.gz"
+ISO_PATH="iso/sparccd-3.0.iso"
+if [ -f "$WORKDIR/$ISO_PATH" ]; then
+    echo "==> Already have $ISO_PATH"
+else
+    echo "==> Fetching $ISO_PATH (~155 MB)"
+    curl -fsSL -o "$WORKDIR/$ISO_PATH" "$MIRROR/$ISO_PATH$Q"
 fi
+
+echo "==> Verifying SHA-512 against assets/SHA512SUMS"
+( cd "$WORKDIR" && shasum -a 512 -c "$SCRIPT_DIR/../assets/SHA512SUMS" )
 
 echo "==> Ready in $WORKDIR"
