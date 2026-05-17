@@ -1,11 +1,19 @@
 /* On macOS, the Makefile's -D_XOPEN_SOURCE=700 (needed for realpath()
  * on glibc) suppresses non-XPG7 declarations, including O_NOFOLLOW
  * and openat()/mkdirat() in fcntl.h. Re-enable the Darwin extensions
- * so the symlink-safe extract path below compiles. Linux/BSD don't
- * need this — they expose openat under _XOPEN_SOURCE=700 already. */
+ * so the symlink-safe extract path below compiles. */
 #ifdef __APPLE__
 /* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
 #define _DARWIN_C_SOURCE
+#endif
+/* NetBSD <fcntl.h> hides O_DIRECTORY and O_NOFOLLOW under XPG7 alone
+ * (they entered POSIX in 2008 but NetBSD's headers gate them on
+ * _NETBSD_SOURCE or _POSIX_C_SOURCE >= 200809L). Both modern NetBSD
+ * (with openat) and legacy NetBSD (taking the fchdir fallback) need
+ * the flags visible. The dev/legacy/netbsd-sparc/ probe surfaced this. */
+#ifdef __NetBSD__
+/* NOLINTNEXTLINE(bugprone-reserved-identifier,cert-dcl37-c,cert-dcl51-cpp) */
+#define _NETBSD_SOURCE
 #endif
 
 #include "compat.h"
@@ -291,15 +299,47 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
 #  endif
 #endif
 
-/* glibc < 2.4 lacks openat/mkdirat. The legacy extract path emulates
- * openat descent with fchdir + open(O_NOFOLLOW); one whole-impl gate
- * instead of per-symbol probes. */
+/* NetBSD 3.0 has O_NOFOLLOW but no O_DIRECTORY at all (it landed in
+ * NetBSD 4.0). Treat its absence as 0 and rely on the subsequent
+ * fchdir returning ENOTDIR for non-directory opens — one syscall later
+ * than O_DIRECTORY's atomic check, but functionally equivalent for the
+ * single-threaded legacy fallback. O_NOFOLLOW is non-optional; if a
+ * platform lacks it, the symlink-rejection guarantee disappears and
+ * we should fail at compile time rather than degrade silently. */
+#ifndef O_DIRECTORY
+#  define O_DIRECTORY 0
+#endif
+
+/* Pick the fchdir + O_NOFOLLOW legacy extract path when the libc
+ * predates openat/mkdirat: glibc < 2.4 (2006), NetBSD < 6.0 (2012),
+ * FreeBSD < 8.0 (2009), OpenBSD < 5.0 (2011). One whole-impl gate
+ * instead of per-symbol probes. The NetBSD 3.0/sparc probe in
+ * dev/legacy/netbsd-sparc/ is what surfaced the original BSD-only
+ * miss here. */
 #if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
 #  if !__GLIBC_PREREQ(2, 4)
 #    define PAKKA_LEGACY_EXTRACT 1
 #  endif
 #elif defined(__GLIBC__) && defined(__GLIBC_MINOR__)
 #  if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 4)
+#    define PAKKA_LEGACY_EXTRACT 1
+#  endif
+#endif
+#if defined(__NetBSD__)
+#  include <sys/param.h>
+#  if !defined(__NetBSD_Version__) || __NetBSD_Version__ < 600000000
+#    define PAKKA_LEGACY_EXTRACT 1
+#  endif
+#endif
+#if defined(__FreeBSD__)
+#  include <sys/param.h>
+#  if !defined(__FreeBSD_version) || __FreeBSD_version < 800000
+#    define PAKKA_LEGACY_EXTRACT 1
+#  endif
+#endif
+#if defined(__OpenBSD__)
+#  include <sys/param.h>
+#  if !defined(OpenBSD) || OpenBSD < 201111  /* 5.0 = 2011-11 */
 #    define PAKKA_LEGACY_EXTRACT 1
 #  endif
 #endif
