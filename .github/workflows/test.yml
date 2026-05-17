@@ -264,3 +264,50 @@ jobs:
           test -x build/cmake/pakka.exe
           export PAKKA="$PWD/build/cmake/pakka.exe"
           bats tests/
+
+  # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
+  # GNU make 3.79.1 built from source. Catches order-only-prereq
+  # regressions (Sarge ships make 3.80; the custom build overrides
+  # it) and post-2006 POSIX dependencies before they reach the QEMU
+  # RH9 probe. linux/386 because the base image is 32-bit i386 only;
+  # GHA's ubuntu-latest kernel has CONFIG_IA32_EMULATION=y so i386
+  # binaries run without QEMU.
+  legacy-glibc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build legacy image (Sarge + make 3.79.1)
+        run: |
+          docker build --platform linux/386 \
+            -t pakka-legacy-glibc \
+            -f dev/legacy/ci/Dockerfile \
+            dev/legacy/ci/
+      - name: Build pakka under glibc 2.3.2 / gcc 3.3 / GNU make 3.79.1
+        run: |
+          docker run --rm --platform linux/386 \
+            -v "$PWD:/src:ro" \
+            pakka-legacy-glibc
+
+  # Same floor, but with the literal RH9 toolchain (glibc 2.3.2-11.9,
+  # gcc 3.2.2-5, GNU make 3.79.1-17) assembled from SHA-pinned vault
+  # RPMs. If legacy.redhat.com goes dark this job fails fast; the
+  # authoritative fallback is the QEMU probe in dev/legacy/rh9/.
+  legacy-rh9:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Build RH9 rootfs image
+        run: |
+          docker build --platform linux/386 \
+            -t pakka-legacy-rh9 \
+            -f dev/legacy/ci/Dockerfile.rh9 \
+            dev/legacy/ci/
+      - name: Build pakka under literal RH9 toolchain
+        run: |
+          docker run --rm --platform linux/386 \
+            -v "$PWD:/src:ro" \
+            pakka-legacy-rh9

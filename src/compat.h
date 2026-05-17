@@ -96,9 +96,19 @@ int compat_try_exclusive_lock(FILE *fp);
  * intermediate directories are created. dest_dir itself MAY be a
  * symlink — the user supplied it and any indirection there is
  * intentional. Returns NULL on failure (symlink blocked, mkdir or
- * open error). On POSIX this is built on openat(2)/mkdirat(2) with
- * O_NOFOLLOW so the check is atomic with the open; on Windows it
- * uses GetFileAttributesA + CreateFile with a short TOCTOU window. */
+ * open error).
+ *
+ * Three implementations:
+ *   - Modern POSIX (default): openat(2)/mkdirat(2) with O_NOFOLLOW on
+ *     every descent so symlink refusal is atomic with the open.
+ *   - Legacy POSIX (glibc < 2.4, gate `PAKKA_LEGACY_EXTRACT` in
+ *     src/compat.c): fchdir-based emulation. open(O_NOFOLLOW |
+ *     O_DIRECTORY) for each intermediate then fchdir into it;
+ *     open(O_NOFOLLOW) on the leaf. Symlink refusal is still atomic
+ *     per-step; the modern and legacy paths share the same
+ *     mkdir→reopen window on missing intermediates and nothing more.
+ *   - Windows: GetFileAttributesA + CreateFile with a short TOCTOU
+ *     window. */
 FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path);
 
 /* Rename src→dst, replacing dst if it exists. Returns 0 on success

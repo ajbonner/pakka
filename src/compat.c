@@ -278,6 +278,32 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
 #include <fcntl.h>
 #include <errno.h>
 
+/* glibc 2.3 doesn't expose these under _XOPEN_SOURCE=700 (POSIX-2008
+ * hadn't standardized them yet), but they've been Linux kernel ABI
+ * since 2.1.126. Block must sit after #include <fcntl.h> so the
+ * system header can't shadow our fallback. */
+#ifdef __linux__
+#  ifndef O_DIRECTORY
+#    define O_DIRECTORY 0200000
+#  endif
+#  ifndef O_NOFOLLOW
+#    define O_NOFOLLOW  0400000
+#  endif
+#endif
+
+/* glibc < 2.4 lacks openat/mkdirat. The legacy extract path emulates
+ * openat descent with fchdir + open(O_NOFOLLOW); one whole-impl gate
+ * instead of per-symbol probes. */
+#if defined(__GLIBC__) && defined(__GLIBC_PREREQ)
+#  if !__GLIBC_PREREQ(2, 4)
+#    define PAKKA_LEGACY_EXTRACT 1
+#  endif
+#elif defined(__GLIBC__) && defined(__GLIBC_MINOR__)
+#  if __GLIBC__ < 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ < 4)
+#    define PAKKA_LEGACY_EXTRACT 1
+#  endif
+#endif
+
 char *compat_realpath(const char *path, char *resolved) {
     return realpath(path, resolved);
 }
@@ -407,6 +433,7 @@ int compat_try_exclusive_lock(FILE *fp) {
     return fcntl(fd, F_SETLK, &lock);
 }
 
+#ifndef PAKKA_LEGACY_EXTRACT
 /* O_NOFOLLOW on the trailing component, mkdirat / openat for every
  * step under dest_dir. Each descent re-opens the new dir relative to
  * the previous fd, so even if an attacker swaps a component for a
@@ -477,5 +504,89 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
         }
     }
 }
+#else
+/* Pre-glibc-2.4 fallback for compat_open_extract_target. fchdir into
+ * each opened intermediate so we never name a path that could be
+ * raced under us; O_NOFOLLOW makes each step's symlink refusal atomic
+ * with the open. The mkdir→reopen window on missing intermediates is
+ * the same one the modern openat path has between mkdirat and the
+ * next openat(O_NOFOLLOW) — no honest safety regression.
+ *
+ * Cwd mutation is safe because pakka is single-threaded; we still
+ * have to restore via fchdir(saved_cwd) on every return path or the
+ * caller's next syscall would resolve against the wrong directory. */
+FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+    int dest_fd, saved_cwd, dir_fd, leaf_fd;
+    const char *p, *seg;
+    size_t seg_len;
+    char comp[NAME_MAX + 1];
+    int is_leaf;
+    FILE *fp = NULL;
+
+    if (dest_dir == NULL || rel_path == NULL) return NULL;
+
+    /* dest_dir may legitimately be a symlink (user-supplied -C);
+     * protection starts on rel_path, not here. */
+    dest_fd = open(dest_dir, O_RDONLY | O_DIRECTORY);
+    if (dest_fd < 0) return NULL;
+    saved_cwd = open(".", O_RDONLY | O_DIRECTORY);
+    if (saved_cwd < 0) { close(dest_fd); return NULL; }
+    if (fchdir(dest_fd) != 0) {
+        close(dest_fd);
+        close(saved_cwd);
+        return NULL;
+    }
+    close(dest_fd);
+
+    seg = rel_path;
+    for (p = rel_path; ; p++) {
+        if (*p == '/' || *p == '\\' || *p == '\0') {
+            seg_len = (size_t)(p - seg);
+            is_leaf = (*p == '\0');
+            if (seg_len == 0) {
+                if (is_leaf) goto out;
+                seg = p + 1;
+                continue;
+            }
+            if (seg_len >= sizeof(comp)) goto out;
+            memcpy(comp, seg, seg_len);
+            comp[seg_len] = '\0';
+
+            if (is_leaf) {
+                leaf_fd = open(comp,
+                               O_WRONLY | O_CREAT | O_TRUNC | O_NOFOLLOW,
+                               0666);
+                if (leaf_fd < 0) goto out;
+                fp = fdopen(leaf_fd, "wb");
+                if (fp == NULL) close(leaf_fd);
+                goto out;
+            }
+
+            dir_fd = open(comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            if (dir_fd < 0 && errno == ENOENT) {
+                if (mkdir(comp, 0777) != 0 && errno != EEXIST) goto out;
+                dir_fd = open(comp, O_RDONLY | O_DIRECTORY | O_NOFOLLOW);
+            }
+            if (dir_fd < 0) goto out;
+            if (fchdir(dir_fd) != 0) {
+                close(dir_fd);
+                goto out;
+            }
+            close(dir_fd);
+            seg = p + 1;
+        }
+    }
+out:
+    /* If the cwd restore fails, returning a successful fp would leave
+     * the caller's process cwd pointing inside dest_dir — treat as
+     * failure rather than silently corrupting later path resolution. */
+    if (fchdir(saved_cwd) != 0 && fp != NULL) {
+        fclose(fp);
+        fp = NULL;
+    }
+    close(saved_cwd);
+    return fp;
+}
+#endif
 
 #endif
