@@ -118,24 +118,50 @@ invoke as `make CLANG_TIDY=$(brew --prefix llvm)/bin/clang-tidy lint`. On Linux:
 `apt install clang-tidy`.
 
 ## Supported Platforms
-The code aims to be POSIX-portable across Linux, BSD, and macOS — little-endian,
-32 or 64 bit. CI verifies builds and the full bats suite on:
+The code aims to be POSIX-portable across Linux, BSD, and macOS, both
+endiannesses, both word sizes. The on-disk pak format is canonically
+little-endian; reads and writes go through `read_u32_le` / `write_u32_le`
+helpers so the same binary works on big-endian hosts.
 
-| OS | Architecture | libc / toolchain |
-|---|---|---|
-| macOS 26 | Intel x86_64 | Apple clang |
-| macOS 26 | Apple Silicon arm64 | Apple clang |
-| Ubuntu latest | x86_64 | glibc / gcc |
-| Ubuntu 24.04 | arm64 | glibc / gcc |
-| Alpine 3.23 | x86_64 | musl / gcc |
-| Ubuntu latest | x86_64 (`-m32`) | glibc / gcc (32-bit ABI) |
-| FreeBSD 15.0 | amd64 | clang |
-| FreeBSD 15.0 | amd64 (`-m32`) | clang (32-bit ABI) |
-| OpenBSD 7.8 | amd64 | clang |
-| Windows Server 2025 (VS 2026) | x86_64 | MSVC cl.exe + CMake/Ninja |
+CI coverage currently includes:
+
+| OS | Architecture | libc / toolchain | Coverage |
+|---|---|---|---|
+| macOS 26 | Intel x86_64 | Apple clang | full bats |
+| macOS 26 | Apple Silicon arm64 | Apple clang | full bats |
+| Ubuntu latest | x86_64 | glibc / gcc | full bats |
+| Ubuntu 24.04 | arm64 | glibc / gcc | full bats |
+| Alpine 3.23 | x86_64 | musl / gcc | full bats |
+| Ubuntu latest | x86_64 (`-m32`) | glibc / gcc (32-bit ABI) | full bats |
+| Debian bookworm-slim (Docker / QEMU) | s390x | glibc / gcc, **big-endian** | full bats |
+| FreeBSD 15.0 | amd64 | clang | full bats |
+| FreeBSD 15.0 | amd64 (`-m32`) | clang (32-bit ABI) | full bats |
+| OpenBSD 7.8 | amd64 | clang | full bats |
+| Windows Server 2025 (VS 2026) | x86_64 | MSVC cl.exe + CMake/Ninja | full bats |
+| Debian Sarge-derived (Docker) | i386 | glibc 2.3.2 / gcc 3.3 / GNU make **3.79.1** | build + symlink-safe extract smoke |
+| Red Hat Linux 9 rootfs (Docker) | i386 | glibc 2.3.2 / gcc 3.2.2 / GNU make 3.79.1 | build + symlink-safe extract smoke |
+| NetBSD 3.0 (QEMU) | sparc | BSD libc / gcc 3.3 / GNU make 3.81, **big-endian** | build + symlink-safe extract smoke |
 
 The `-m32` jobs build 32-bit binaries on a 64-bit kernel/libc — they exercise
 the 32-bit code path but aren't a true i386 OS.
+
+The s390x and NetBSD/sparc jobs run under QEMU emulation on x86_64
+runners. They are the slowest jobs in the matrix but exist deliberately:
+s390x catches byte-order regressions in any new code that touches the
+on-disk format, and NetBSD/sparc is the only job that exercises the
+pre-openat (`PAKKA_LEGACY_EXTRACT`) BSD code path. Modern BSDs in the
+matrix all take the `openat`/`mkdirat` path.
+
+The legacy smoke jobs run `make` + a banner + symlink-safe extract
+smoke (not the full bats suite — bash 2.05b / minimal userland on
+the older guests). The Debian Sarge and Red Hat Linux 9 jobs keep
+pakka's **Linux legacy floor** intact: gcc 3.0+ (first FSF release with
+adequate C99 support), glibc 2.2.5+, GNU make 3.79.1+, Linux kernel
+2.4+. Concrete distros that meet that floor with default packages
+include Red Hat Linux 8.0 (Sept 2002), Red Hat Linux 9 (March 2003),
+and Debian 3.1 Sarge (June 2005). The NetBSD/sparc job is a separate
+class — BSD libc + big-endian SPARC + the pre-openat BSD branch of
+`PAKKA_LEGACY_EXTRACT` (NetBSD < 6.0, FreeBSD < 8.0, OpenBSD < 5.0).
 
 The Windows job builds `pakka.exe` via CMake/MSVC and runs the bats suite
 through MSYS2 bash. POSIX builds remain Makefile-driven; CMake is the
