@@ -1,0 +1,26 @@
+# SHA-256s for the closed RPM set Dockerfile.rh9 extracts into the
+# /rh9-rootfs scratch image. Sourced from legacy.redhat.com's Shrike
+# i386 binary tree:
+#   https://legacy.redhat.com/pub/redhat/linux/9/en/os/i386/RedHat/RPMS/
+#
+# Format: `<sha256>  <filename>` — sha256sum -c compatible. New
+# packages: add the line, rebuild the image, and the Stage 1 chroot
+# smoke check (bash --version && gcc --version && make --version) will
+# tell you if the closure is still complete.
+9357efa6c6aa50c3f81150fe5ada56feb55ec9639c9afafa19d459e7b5693234  filesystem-2.2.1-3.i386.rpm
+bea5370d55332e5cd4bd41b7e3d291ec3becacb4b14feb003ab4353f7e2ebd4f  setup-2.5.25-1.noarch.rpm
+2a356018716099d6f0dd68cd30ec83e651546a8973a32ddd1353e328cc8154e2  glibc-2.3.2-11.9.i386.rpm
+a1048691bc51d4e7c7b23c9eac18d8cd2b19596995f717c553386706e8edd877  glibc-common-2.3.2-11.9.i386.rpm
+7f4ae6094a05d464ba7fb8bf9455fc02582cf25ec35a8c3cbb08245587cfe42c  glibc-devel-2.3.2-11.9.i386.rpm
+3a8b42f837d366a686dc057dc994ce63a301f2dbe5927e6e622e064bb9827005  glibc-kernheaders-2.4-8.10.i386.rpm
+cd0ddaee8fd1bcab47d61847812444c2ac414e05637cb27564ebc4846e60165c  libgcc-3.2.2-5.i386.rpm
+422b9aabc90244db5ef9d7b19851752ecd35d0a0bda79b402673919fc2cf1568  gcc-3.2.2-5.i386.rpm
+884e7d2fc85242d6202044816113d98b22a44c9eebe1d79144469b561b9d1d6c  cpp-3.2.2-5.i386.rpm
+acf00969eb97f12effe5bbf03f014b00666204e8b4652e7eaef4a32427ba85fc  binutils-2.13.90.0.18-9.i386.rpm
+5f187e20ae2a4043a9f4b471fe8d29372753b7ac0f69bf9d663d53c139900d57  make-3.79.1-17.i386.rpm
+69e3fa0d246d17d391e101cd0d81a926b93be80d233b52130ef145c9ecde261b  bash-2.05b-20.i386.rpm
+5d34ded73125337df092ce5573f06ad818f0cd44aa7292f1c214f05c196c2df7  coreutils-4.5.3-19.i386.rpm
+68c18aada849a9c9aabb97f6c2f27639dc7a3883bdeb4d80779777f335b00c75  libtermcap-2.0.8-35.i386.rpm
+18f65e1711e9cbd39a10bbb589acc7d95df17f1cecb20d45cde65ebcd95ab34e  grep-2.5.1-7.i386.rpm
+ca7db5ec16e1039150c21762c3deca85994096586c4e89f6323b6e68795e12bd  pcre-3.9-10.i386.rpm
+91891dcfe67f809f8c82cbae4919749b671b3fc1e9d0cb233834a9bc6298436e  mktemp-1.5-18.i386.rpm

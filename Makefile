@@ -47,13 +47,14 @@ lint:
 $(TARGET): $(OBJECTS)
 	$(CC) $(CFLAGS) -o $(TARGET) $^
 
-$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c | $(OBJ_DIR)
+$(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
+	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
 
-$(OBJ_DIR) $(TEST_DIR):
-	@mkdir -p $@
-
-$(QUAKE_TARBALL): | $(TEST_DIR)
+# Order-only prereqs (`|`) arrived in GNU make 3.80; 3.79.1 errors on
+# them, so we keep the directory creation inline.
+$(QUAKE_TARBALL):
+	@mkdir -p $(TEST_DIR)
 	@echo "==> Downloading Quake shareware ($(QUAKE_URL))"
 	@curl -fsSL -o $(QUAKE_TARBALL) $(QUAKE_URL)
 
