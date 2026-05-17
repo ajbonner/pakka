@@ -82,6 +82,13 @@ void fprint_sanitized(FILE *out, const char *s);
  * into error_exit format strings without leaking control bytes into
  * the user's terminal. */
 char *sanitize_name(char *dst, size_t dstsz, const char *src);
+
+/* The pak header diroffset/dirlength and entry offset/length fields
+ * are stored little-endian on disk. Use these to read/write them so
+ * the code is correct on big-endian hosts (s390x, sparc, ppc).
+ * Return 0 on success, -1 on I/O failure (errno set by stdio). */
+int read_u32_le(FILE *fp, uint32_t *out);
+int write_u32_le(FILE *fp, uint32_t value);
 /* Open an existing pak. writable=0 opens "rb" (works on read-only
  * paks; required for list/extract), writable=1 opens "r+b" (required
  * for add/delete). */

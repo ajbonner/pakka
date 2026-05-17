@@ -48,9 +48,11 @@ go through `make test`; the Windows job builds via CMake + Ninja + `cl.exe` and
 runs bats through MSYS2 bash (`update: false` on `setup-msys2` to keep its cache
 hot; `bats-core` is cloned from upstream because MSYS2 has no package; `PAKKA`
 is exported as an MSYS2-style absolute path because bats's `setup_file` can
-`chdir`). Keep new code POSIX-portable, little-endian, 32-or-64-bit safe, and do
-not add direct `<unistd.h>`, `<dirent.h>`, `realpath`, or `getopt` calls without
-going through `src/compat.h`.
+`chdir`). Keep new code POSIX-portable and 32-or-64-bit safe, route on-disk u32
+reads/writes through `read_u32_le`/`write_u32_le` (the file format is LE
+regardless of host endianness), and do not add direct `<unistd.h>`,
+`<dirent.h>`, `realpath`, or `getopt` calls without going through
+`src/compat.h`.
 
 ## Architecture
 
@@ -66,6 +68,13 @@ filename + u32 offset + u32 length. The directory can sit anywhere in the file;
 id's `pak0.pak` famously has it mid-file with a 410,616-byte orphan `progs.dat`
 in a hole left by an in-place recompile. Do not write code that assumes
 directory order equals byte layout order.
+
+Every on-disk u32 (`diroffset`, `dirlength`, per-entry `offset`/`length`) is
+stored **little-endian regardless of host byte order**. New code that touches
+the on-disk format must go through `read_u32_le` / `write_u32_le` in
+`src/common.h`, never a raw `fread`/`fwrite` of a `uint32_t`. The
+`linux-glibc-s390x-be` CI job runs the bats suite under big-endian s390x via
+QEMU and exists to catch byte-order regressions in this code path.
 
 ### Module Map
 
@@ -181,3 +190,16 @@ this.
   verifies via two images in `dev/legacy/ci/` (Sarge-derived + custom make
   3.79.1, and an RH9-rootfs image built from SHA-pinned vault RPMs); the QEMU
   probe in `dev/legacy/rh9/` remains the authoritative real-hardware verifier.
+- Deferred legacy targets (not yet in CI, intentionally): the historical
+  default-toolchain BSDs (FreeBSD 4.11, OpenBSD 3.3, NetBSD 1.6 sparc/macppc)
+  all ship gcc 2.95, which is below the documented C99 floor. Adding them
+  means either installing gcc 3.x in each guest from period-correct
+  ports/pkgsrc (brittle, since those archives have rotated), or lowering the
+  floor to gcc 2.95 (effectively a C90 migration). They also predate
+  `openat`/`mkdirat` in their respective libcs (FreeBSD 8.0, OpenBSD 5.0,
+  NetBSD 6.0), so `PAKKA_LEGACY_EXTRACT` would need to recognize old BSD
+  version macros, not just `__GLIBC_PREREQ(2,4)`. Each target is QEMU-disk-
+  image infrastructure on the scale of `dev/legacy/rh9/`; add them one by one
+  if the demand justifies the cost. Alpha is also skipped: it is little-endian
+  in every shipped configuration (FreeBSD/NetBSD/Linux), so it adds no
+  byte-order coverage beyond what `linux-glibc-s390x-be` already gives.
