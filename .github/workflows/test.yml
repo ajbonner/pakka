@@ -107,6 +107,43 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl
       - run: make test
 
+  # Big-endian correctness canary. s390x is the cheapest BE target: a
+  # binfmt-registered QEMU emulation runs Debian's official s390x
+  # image directly, no custom image to maintain. Exists to catch any
+  # regression in read_u32_le / write_u32_le or any new code that
+  # touches the on-disk format with a raw fread/fwrite.
+  linux-glibc-s390x-be:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      - uses: docker/setup-qemu-action@v4
+        with:
+          platforms: s390x
+      - name: Build + test under s390x (big-endian)
+        run: |
+          docker run --rm --platform linux/s390x \
+            -v "$PWD:/src:ro" \
+            debian:bookworm-slim \
+            bash -c '
+              set -e
+              apt-get update >/dev/null
+              apt-get install -y --no-install-recommends \
+                build-essential bats curl openssl ca-certificates >/dev/null
+              cp -a /src/. /work
+              cd /work
+              rm -f pakka
+              rm -rf build/obj
+              echo "host: $(uname -m)"
+              make
+              make test
+            '
+
   linux-musl-x86_64:
     runs-on: ubuntu-latest
     container: alpine:3.23@sha256:5b10f432ef3da1b8d4c7eb6c487f2f5a8f096bc91145e68878dd4a5019afde11

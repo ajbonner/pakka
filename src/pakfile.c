@@ -176,8 +176,8 @@ void load_pakfile(Pak_t *pak) {
 
     rewind(fp);
     if (fread(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
-        || fread(&pak->diroffset, sizeof(uint32_t), 1, fp) != 1
-        || fread(&pak->dirlength, sizeof(uint32_t), 1, fp) != 1) {
+        || read_u32_le(fp, &pak->diroffset) != 0
+        || read_u32_le(fp, &pak->dirlength) != 0) {
         error_exit("Cannot read pak header");
     }
 
@@ -237,8 +237,8 @@ void load_directory(Pak_t *pak) {
         }
 
         if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
-            || fread(&current->offset, sizeof(uint32_t), 1, fp) != 1
-            || fread(&current->length, sizeof(uint32_t), 1, fp) != 1) {
+            || read_u32_le(fp, &current->offset) != 0
+            || read_u32_le(fp, &current->length) != 0) {
             error_exit("Cannot read pak directory entry %" PRIu32, i);
         }
 
@@ -1162,8 +1162,8 @@ void init_pak_header(Pak_t *pak) {
  * after dirlength that must not leak to disk. */
 static void write_pak_header(Pak_t *pak) {
     if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
-        || fwrite(&pak->diroffset, sizeof(uint32_t), 1, fp) != 1
-        || fwrite(&pak->dirlength, sizeof(uint32_t), 1, fp) != 1) {
+        || write_u32_le(fp, pak->diroffset) != 0
+        || write_u32_le(fp, pak->dirlength) != 0) {
         error_exit("Cannot write pak header");
     }
 }
@@ -1185,8 +1185,8 @@ static void write_pak_entry(Pakfileentry_t *entry) {
     }
 
     if (fwrite(name_field, PAKFILE_PATH_MAX, 1, fp) != 1
-        || fwrite(&entry->offset, sizeof(uint32_t), 1, fp) != 1
-        || fwrite(&entry->length, sizeof(uint32_t), 1, fp) != 1) {
+        || write_u32_le(fp, entry->offset) != 0
+        || write_u32_le(fp, entry->length) != 0) {
         error_exit("Cannot write new pak directory");
     }
 }

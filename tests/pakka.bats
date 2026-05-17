@@ -134,7 +134,11 @@ setup_file() {
     # diroffset (LE u32) sits immediately after the signature and must point
     # to the end of the (empty) header. dirlength == 0 is implied by the
     # file being exactly header-sized (and confirmed via -lf below).
-    diroffset=$(od -An -t u4 -N"$PAK_SIG_LEN" -j"$PAK_SIG_LEN" "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')
+    # Read as four unsigned bytes and reassemble LE -> decimal so the
+    # check is correct on big-endian hosts (s390x); `od -t u4` uses
+    # native byte order and would mis-decode on BE.
+    set -- $(od -An -tu1 -N"$PAK_SIG_LEN" -j"$PAK_SIG_LEN" "$BATS_TEST_TMPDIR/work.pak")
+    diroffset=$(( $1 + ($2 << 8) + ($3 << 16) + ($4 << 24) ))
     [ "$diroffset" -eq "$PAK_HEADER_SIZE" ]
 
     # Listing should succeed and report empty rather than crashing.
