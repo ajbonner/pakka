@@ -1,0 +1,62 @@
+# Literal Red Hat Linux 9 userland (Shrike, March 2003) assembled from
+# SHA-pinned vault RPMs. The final image is FROM scratch + COPY of the
+# extracted rootfs, so glibc 2.3.2, gcc 3.2.2, and GNU make 3.79.1 are
+# the *actual* binaries — no Debian-flavored proxy.
+#
+# rpm2cpio bypasses RPM dependency resolution, so the manifest in
+# rh9-rpms.sha256 must be a complete closure for "build pakka". A
+# Stage 1 chroot smoke check verifies bash + gcc + make can load,
+# which catches missing transitive shared libs without waiting for
+# the build to fail.
+
+FROM debian:bookworm-slim AS rootfs-builder
+
+ARG RH9_MIRROR=https://legacy.redhat.com/pub/redhat/linux/9/en/os/i386/RedHat/RPMS
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        ca-certificates wget cpio rpm2cpio file \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /work
+COPY rh9-rpms.sha256 .
+
+# Fetch every RPM the manifest lists, verify SHA-256, then extract
+# each into /rh9-rootfs via rpm2cpio | cpio. cpio's -d creates
+# missing parents; -m preserves mtime so reproducible builds stay
+# stable.
+RUN mkdir -p /rh9-rootfs \
+    && mkdir -p rpms \
+    && awk '/^[^#]/ { print $2 }' rh9-rpms.sha256 | while read rpm; do \
+         wget -q "$RH9_MIRROR/$rpm" -O "rpms/$rpm" || exit 1; \
+       done \
+    && (cd rpms && sha256sum -c ../rh9-rpms.sha256) \
+    && for rpm in rpms/*.rpm; do \
+         rpm2cpio "$rpm" | (cd /rh9-rootfs && cpio -idm --quiet); \
+       done \
+    && rm -rf rpms
+
+# Sanity: the dynamic loader must exist, and every binary build.sh
+# invokes must load inside the chroot. Failures here mean the manifest
+# is missing a transitive shared lib — easier to diagnose at image-
+# build time than during a CI build step.
+RUN test -e /rh9-rootfs/lib/ld-linux.so.2 \
+    && chroot /rh9-rootfs /bin/bash --version > /dev/null \
+    && chroot /rh9-rootfs /usr/bin/gcc --version > /dev/null \
+    && chroot /rh9-rootfs /usr/bin/make --version > /dev/null \
+    && chroot /rh9-rootfs /bin/grep --version > /dev/null \
+    && chroot /rh9-rootfs /bin/mktemp -d /tmp/sanity.XXXXXX > /dev/null
+
+# Sarge is 32-bit i386 only; the same constraint applies here since
+# RH9 ships i386 binaries. arm64 hosts will run this under QEMU.
+FROM --platform=linux/386 scratch
+COPY --from=rootfs-builder /rh9-rootfs /
+
+# RH9's /etc/passwd doesn't include the build user we'll run as; docker
+# run will use uid 0 by default which exists. PATH defaults are baked
+# into bash but ENTRYPOINT bypasses login shells, so re-export.
+ENV PATH=/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin
+ENV LD_LIBRARY_PATH=/usr/lib:/lib
+
+WORKDIR /src
+ENTRYPOINT ["/bin/bash", "/src/dev/legacy/ci/build.sh"]
