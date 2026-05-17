@@ -63,6 +63,18 @@ Substring matches like `foo..bar` or `..png` remain legal — only an exact
 Both POSIX and Windows traversal forms are checked regardless of host OS,
 since pak archives are portable.
 
+## Known Limitations
+
+* **Files between 2 GiB and 4 GiB on 32-bit POSIX and Windows MSVC.**
+  pakka uses `fseek`/`ftell` (return type `long`), which is 32-bit on
+  these targets. The pak format caps offsets at 4 GiB (`u32`), so the
+  affected range is 2 GiB to 4 GiB. Behavior is a clean error from the
+  bounds validator (rather than silent corruption); 64-bit Linux,
+  macOS, and BSD have a 64-bit `long` and aren't affected. Lifting
+  the limit would mean migrating to `fseeko`/`ftello` (POSIX) and
+  `_fseeki64`/`_ftelli64` (MSVC), plus `-D_FILE_OFFSET_BITS=64` in
+  `CPPFLAGS` for 32-bit Linux.
+
 ## Testing
 The repo includes an integration test suite that downloads id's shareware Quake
 `pak0.pak` (with a pinned SHA256) and exercises pakka against it: round-trip,
