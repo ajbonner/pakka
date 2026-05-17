@@ -27,8 +27,10 @@ mkdir -p "$WORKDIR/http"
     -czf "$WORKDIR/http/pakka-src.tar.gz" .)
 
 # NetBSD 3.0's sshd offers only legacy algorithms; modern OpenSSH
-# clients need explicit overrides to negotiate them.
-SSH_OPTS="-p $SSH_PORT \
+# clients need explicit overrides to negotiate them. Use `-o Port=`
+# instead of `-p`/`-P` so the same option list works for both ssh
+# (`-p`) and scp (`-P`).
+SSH_OPTS="-o Port=$SSH_PORT \
   -o StrictHostKeyChecking=no \
   -o UserKnownHostsFile=$WORKDIR/known_hosts \
   -o HostKeyAlgorithms=+ssh-rsa \

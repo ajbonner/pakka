@@ -400,6 +400,8 @@ jobs:
               if [ "$rc" -ne 0 ]; then
                   echo '=== qemu.log tail (job failed) ==='
                   tail -50 "$QEMU_LOG" || true
+                  echo '=== console.log tail (kernel/userland) ==='
+                  tail -80 "$RUNNER_TEMP/console.log" 2>/dev/null || true
               fi
               if [ -n "${QPID:-}" ] && kill -0 "$QPID" 2>/dev/null; then
                   # Wrap halt in `timeout` so a hung remote shell
@@ -425,11 +427,17 @@ jobs:
           }
           trap cleanup EXIT INT TERM
 
+          # SS-5 has a built-in lance NIC; -nic attaches the user-mode
+          # backend to it. Older `-net nic,model=lance / -net user,...`
+          # split form is deprecated and prints `type is NULL` on
+          # ubuntu-latest's qemu 8.x. Capture the serial console to a
+          # dedicated file so the cleanup trap can tail it on failure;
+          # -display none alone leaves serial unattached.
           qemu-system-sparc \
             -M SS-5 -m 256 \
             -drive file="$RUNNER_TEMP/netbsd-sparc.qcow2",format=qcow2,if=scsi,bus=0,unit=0,media=disk \
-            -net nic,model=lance \
-            -net user,hostfwd=tcp::10022-:22 \
+            -nic user,model=lance,hostfwd=tcp::10022-:22 \
+            -serial "file:$RUNNER_TEMP/console.log" \
             -display none -no-reboot \
             >"$QEMU_LOG" 2>&1 &
           QPID=$!
