@@ -348,3 +348,129 @@ jobs:
           docker run --rm --platform linux/386 \
             -v "$PWD:/src:ro" \
             pakka-legacy-rh9
+
+  # Build pakka on a literal NetBSD 3.0/sparc guest under QEMU. The
+  # disk image is a one-time sysinst install + GNU make 3.81 bootstrap,
+  # snapshotted and uploaded as a GitHub release artifact. This is the
+  # only CI job that actually exercises the BSD-version arm of
+  # PAKKA_LEGACY_EXTRACT (modern BSDs in the matrix all have openat).
+  # Sparc emulation runs ~10x slower than native, so this job is the
+  # slowest in the matrix (~10 min).
+  legacy-netbsd-sparc:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - name: Install qemu-system-sparc + sshpass
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y qemu-system-sparc sshpass
+      - name: Download + verify NetBSD 3.0/sparc disk snapshot
+        env:
+          DISK_URL: https://github.com/ajbonner/pakka/releases/download/legacy-netbsd-sparc-disk-v1/pakka-legacy-netbsd-sparc-disk-v1.qcow2
+          DISK_SHA256: 890aa5a003efa3ce7b8ed61487bf29f46c60d720bbb9062677e62b22934295c4
+        run: |
+          # Stage everything in runner.temp so the disk doesn't end up
+          # bundled into pakka-src.tar.gz (run-build.sh tars `.` from
+          # the checkout).
+          curl -fsSL -o "$RUNNER_TEMP/netbsd-sparc.qcow2" "$DISK_URL"
+          echo "$DISK_SHA256  $RUNNER_TEMP/netbsd-sparc.qcow2" \
+            | sha256sum -c -
+      - name: Boot guest + drive build over SSH
+        env:
+          PAKKA_NBSD_WORKDIR: ${{ runner.temp }}
+          PAKKA_NBSD_SSH_PORT: '10022'
+          PAKKA_NBSD_ROOT_PASSWORD: pakka
+        run: |
+          set -euo pipefail
+
+          QEMU_LOG="$RUNNER_TEMP/qemu.log"
+
+          # Cleanup trap: dump the qemu console if anything failed,
+          # attempt a clean halt if SSH is still reachable, finally
+          # kill QEMU. Keeps a hung build from burning the full
+          # timeout-minutes budget silently.
+          cleanup() {
+              rc=$?
+              if [ "$rc" -ne 0 ]; then
+                  echo '=== qemu.log tail (job failed) ==='
+                  tail -50 "$QEMU_LOG" || true
+                  echo '=== console.log tail (kernel/userland) ==='
+                  tail -80 "$RUNNER_TEMP/console.log" 2>/dev/null || true
+              fi
+              if [ -n "${QPID:-}" ] && kill -0 "$QPID" 2>/dev/null; then
+                  # Wrap halt in `timeout` so a hung remote shell
+                  # can't stall the cleanup; ConnectTimeout only
+                  # bounds SSH connection setup, not the remote
+                  # command.
+                  timeout 15 sshpass -p "$PAKKA_NBSD_ROOT_PASSWORD" ssh \
+                    -p "$PAKKA_NBSD_SSH_PORT" \
+                    -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                    -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+                    -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+                    -o Ciphers=+aes128-cbc -o MACs=+hmac-sha1 \
+                    -o ConnectTimeout=5 \
+                    root@127.0.0.1 '/sbin/halt -p' 2>/dev/null || true
+                  for _ in $(seq 1 6); do
+                      kill -0 "$QPID" 2>/dev/null || break
+                      sleep 5
+                  done
+                  kill -9 "$QPID" 2>/dev/null || true
+                  wait "$QPID" 2>/dev/null || true
+              fi
+              exit "$rc"
+          }
+          trap cleanup EXIT INT TERM
+
+          # SS-5 has a built-in lance NIC; -nic attaches the user-mode
+          # backend to it. Older `-net nic,model=lance / -net user,...`
+          # split form is deprecated and prints `type is NULL` on
+          # ubuntu-latest's qemu 8.x. Capture the serial console to a
+          # dedicated file so the cleanup trap can tail it on failure;
+          # -display none alone leaves serial unattached.
+          qemu-system-sparc \
+            -M SS-5 -m 256 \
+            -drive file="$RUNNER_TEMP/netbsd-sparc.qcow2",format=qcow2,if=scsi,bus=0,unit=0,media=disk \
+            -nic user,model=lance,hostfwd=tcp::10022-:22 \
+            -serial "file:$RUNNER_TEMP/console.log" \
+            -display none -no-reboot \
+            >"$QEMU_LOG" 2>&1 &
+          QPID=$!
+          echo "qemu pid=$QPID"
+
+          # Poll for SSH readiness — first boot under emulation takes
+          # 1-3 min on a sparc TCG translation. QEMU's user-mode net
+          # opens the host listener INSTANTLY (before the guest is
+          # up), so `nc -z` is unreliable here; do a real SSH
+          # handshake probe instead.
+          ssh_probe() {
+              timeout 8 sshpass -p "$PAKKA_NBSD_ROOT_PASSWORD" ssh \
+                -p "$PAKKA_NBSD_SSH_PORT" \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+                -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+                -o Ciphers=+aes128-cbc -o MACs=+hmac-sha1 \
+                -o ConnectTimeout=5 \
+                root@127.0.0.1 'true' >/dev/null 2>&1
+          }
+          ssh_ready=0
+          for _ in $(seq 1 120); do
+              if ! kill -0 "$QPID" 2>/dev/null; then
+                  echo "qemu died before SSH came up"
+                  exit 1
+              fi
+              if ssh_probe; then
+                  ssh_ready=1
+                  break
+              fi
+              sleep 5
+          done
+          if [ "$ssh_ready" -ne 1 ]; then
+              echo "SSH did not come up within 10 minutes"
+              exit 1
+          fi
+
+          export PAKKA_NBSD_WORKDIR PAKKA_NBSD_SSH_PORT PAKKA_NBSD_ROOT_PASSWORD
+          dev/legacy/netbsd-sparc/scripts/run-build.sh

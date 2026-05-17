@@ -1,0 +1,6 @@
+# NetBSD 3.0 sparc install ISO, sourced from
+#   https://archive.netbsd.org/pub/NetBSD-archive/NetBSD-3.0/iso/
+# This is the canonical bootable install media. The miniroot.fs and
+# bootfs/ images live in the same archive but aren't usable from QEMU
+# without a boot disk — see README.md for the rationale.
+ee461adbace9b9edca4d61c6c19d1065dacc749b0cb7c4fc2f9926aa95635c6e64bc4b07051ba65b93ab170048c6672b5a2e1f1667f19e87c47f3a3f24e89269  iso/sparccd-3.0.iso

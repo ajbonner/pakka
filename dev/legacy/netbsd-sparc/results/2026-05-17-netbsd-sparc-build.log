@@ -1,0 +1,38 @@
+== system ==
+NetBSD pakka-netbsd-sparc 3.0 NetBSD 3.0 (GENERIC) #0: Mon Dec 19 04:01:27 UTC 2005  builds@b3.netbsd.org:/home/builds/ab/netbsd-3-0-RELEASE/sparc/200512182024Z-obj/home/builds/ab/netbsd-3-0-RELEASE/src/sys/arch/sparc/compile/GENERIC sparc
+NetBSD 3.0/sparc
+
+Copyright (c) 1996, 1997, 1998, 1999, 2000, 2001, 2002, 2003, 2004, 2005
+
+== toolchain ==
+gcc (GCC) 3.3.3 (NetBSD nb3 20040520)
+GNU Make 3.81
+
+== build ==
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/common.c -o build/obj/common.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/compat.c -o build/obj/compat.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/debug.c -o build/obj/debug.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/filesystem.c -o build/obj/filesystem.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/main.c -o build/obj/main.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -c src/pakfile.c -o build/obj/pakfile.o
+cc -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME="\"Pakka\"" -DVERSION="\"1.1.0\"" -DBUILD_DATE="\"May 17, 2026\"" -g -Wall --std=c99 --pedantic -o pakka build/obj/common.o build/obj/compat.o build/obj/debug.o build/obj/filesystem.o build/obj/main.o build/obj/pakfile.o
+
+== smoke: banner ==
+banner-OK
+
+== smoke: symlink-safe extract ==
+Writing 0 bytes to /tmp/scratch/out/models/x
+symlink-rejected-OK
+no-escape-OK
+
+== smoke: happy extract ==
+Writing 0 bytes to /tmp/scratch/out2/models/x
+happy-OK
+
+== file ==
+./pakka: ELF 32-bit MSB executable, SPARC, version 1 (SYSV), for NetBSD 3.0, dynamically linked (uses shared libs), not stripped
+
+== ldd ==
+./pakka:
+	-lc.12 => /usr/lib/libsparc_v8.so.0
+	-lc.12 => /usr/lib/libc.so.12
