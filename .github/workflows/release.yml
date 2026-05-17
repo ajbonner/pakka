@@ -1,0 +1,88 @@
+name: release
+
+on:
+  push:
+    tags:
+      - 'v*.*.*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing tag to publish (e.g. v1.2.0)'
+        required: true
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          # On workflow_dispatch, check out the requested tag instead
+          # of the dispatch branch — otherwise the Makefile/CMakeLists
+          # sanity check below runs against the wrong tree.
+          ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
+      - name: Determine tag
+        id: tag
+        env:
+          INPUT_TAG: ${{ github.event.inputs.tag }}
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          if [ -n "$INPUT_TAG" ]; then
+              tag="$INPUT_TAG"
+          else
+              tag="${REF##*/}"
+          fi
+          # Glob is too loose — `v[0-9]*.[0-9]*.[0-9]*` would accept
+          # `v1.2.3-rc1` and similar. Use a strict regex.
+          if ! printf '%s\n' "$tag" | grep -Eq '^v[0-9]+\.[0-9]+\.[0-9]+$'; then
+              echo "tag '$tag' is not strictly vX.Y.Z" >&2
+              exit 1
+          fi
+          echo "tag=$tag" >> "$GITHUB_OUTPUT"
+      - name: Verify Makefile and CMakeLists.txt versions match the tag
+        env:
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          set -euo pipefail
+          version="${TAG#v}"
+          make_version=$(awk -F= '
+              /^MAJOR=/{ maj=$2 }
+              /^MINOR=/{ min=$2 }
+              /^PATCH=/{ p=$2 }
+              END { printf "%s.%s.%s", maj, min, p }
+          ' Makefile)
+          cmake_version=$(awk '
+              /project\(pakka VERSION/ {
+                  for (i=1; i<=NF; i++) if ($i == "VERSION") { print $(i+1); exit }
+              }
+          ' CMakeLists.txt)
+          if [ "$make_version" != "$version" ]; then
+              echo "Makefile version is $make_version, tag is $version" >&2
+              exit 1
+          fi
+          if [ "$cmake_version" != "$version" ]; then
+              echo "CMakeLists.txt version is $cmake_version, tag is $version" >&2
+              exit 1
+          fi
+          echo "Makefile and CMakeLists.txt both at $version — matches $TAG"
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.tag.outputs.tag }}
+        run: |
+          # GitHub auto-attaches Source code (zip) and Source code (tar.gz)
+          # archives to every release; they are produced by `git archive`
+          # against the tag and live at /archive/refs/tags/$TAG.{zip,tar.gz}.
+          # --generate-notes derives a changelog from commits since the
+          # previous release tag. --verify-tag ensures the tag actually
+          # exists in the repo (fails fast if release.yml was triggered
+          # by a workflow_dispatch with a non-existent tag).
+          gh release create "$TAG" \
+              --title "Pakka $TAG" \
+              --generate-notes \
+              --verify-tag

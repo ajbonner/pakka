@@ -6,7 +6,7 @@
 # and src/win/ but nothing else.
 
 cmake_minimum_required(VERSION 3.15)
-project(pakka VERSION 1.1.0 LANGUAGES C)
+project(pakka VERSION 1.2.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
