@@ -444,27 +444,36 @@ jobs:
           echo "qemu pid=$QPID"
 
           # Poll for SSH readiness — first boot under emulation takes
-          # 1-3 min. Bail explicitly on timeout (don't fall through
-          # silently to a confusing scp failure) or qemu death.
+          # 1-3 min on a sparc TCG translation. QEMU's user-mode net
+          # opens the host listener INSTANTLY (before the guest is
+          # up), so `nc -z` is unreliable here; do a real SSH
+          # handshake probe instead.
+          ssh_probe() {
+              timeout 8 sshpass -p "$PAKKA_NBSD_ROOT_PASSWORD" ssh \
+                -p "$PAKKA_NBSD_SSH_PORT" \
+                -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null \
+                -o HostKeyAlgorithms=+ssh-rsa -o PubkeyAcceptedAlgorithms=+ssh-rsa \
+                -o KexAlgorithms=+diffie-hellman-group14-sha1 \
+                -o Ciphers=+aes128-cbc -o MACs=+hmac-sha1 \
+                -o ConnectTimeout=5 \
+                root@127.0.0.1 'true' >/dev/null 2>&1
+          }
           ssh_ready=0
-          for _ in $(seq 1 60); do
+          for _ in $(seq 1 120); do
               if ! kill -0 "$QPID" 2>/dev/null; then
                   echo "qemu died before SSH came up"
                   exit 1
               fi
-              if nc -z 127.0.0.1 10022 2>/dev/null; then
+              if ssh_probe; then
                   ssh_ready=1
                   break
               fi
               sleep 5
           done
           if [ "$ssh_ready" -ne 1 ]; then
-              echo "SSH did not come up within 5 minutes"
+              echo "SSH did not come up within 10 minutes"
               exit 1
           fi
-          # Port is open but sshd handshake may still be initializing;
-          # one extra pause smooths over the race.
-          sleep 5
 
           export PAKKA_NBSD_WORKDIR PAKKA_NBSD_SSH_PORT PAKKA_NBSD_ROOT_PASSWORD
           dev/legacy/netbsd-sparc/scripts/run-build.sh
