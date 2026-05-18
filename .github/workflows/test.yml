@@ -299,7 +299,10 @@ jobs:
         run: |
           ls -la build/cmake/ || true
           test -x build/cmake/pakka.exe
+          test -x build/cmake/c_api_test.exe
           export PAKKA="$PWD/build/cmake/pakka.exe"
+          export C_API_TEST="$PWD/build/cmake/c_api_test.exe"
+          export PAK0="$PWD/build/test/pak0.pak"
           bats tests/
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus

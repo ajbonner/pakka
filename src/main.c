@@ -1,10 +1,76 @@
+/* CLI for libpakka. libpakka.a never prints and never calls exit; this
+ * TU is where pakka_status_t + pakka_error_t get translated into
+ * stderr lines and a non-zero exit. pakka_die / pakka_die_e /
+ * pakka_fprint_sanitized / pakka_sanitize_name are file-static
+ * helpers — they keep the pakka_ prefix so they read consistently
+ * with the library API at call sites but are not part of libpakka.a. */
+
+#include <stdarg.h>
+
 #include "common.h"
+#include "pakka.h"
+
+static void emit_and_exit(int saved_errno, const char *format, va_list args) {
+    char msg[1000];
+    vsnprintf(msg, sizeof(msg), format, args);
+    if (saved_errno != 0) {
+        fprintf(stderr, "%s: %s\n", msg, strerror(saved_errno));
+    } else {
+        fprintf(stderr, "%s\n", msg);
+    }
+    exit(1);
+}
+
+static void pakka_die(const char *format, ...) {
+    int saved_errno = errno;
+    va_list args;
+    va_start(args, format);
+    emit_and_exit(saved_errno, format, args);
+    va_end(args);
+}
+
+static void pakka_die_e(int saved_errno, const char *format, ...) {
+    va_list args;
+    va_start(args, format);
+    emit_and_exit(saved_errno, format, args);
+    va_end(args);
+}
+
+static void pakka_fprint_sanitized(FILE *out, const char *s) {
+    unsigned char c;
+    while ((c = (unsigned char)*s++) != '\0') {
+        fputc((c < 0x20 || c == 0x7F) ? '?' : c, out);
+    }
+}
+
+static char *pakka_sanitize_name(char *dst, size_t dstsz, const char *src) {
+    size_t i = 0;
+    unsigned char c;
+    if (dstsz == 0) return dst;
+    while ((c = (unsigned char)*src++) != '\0' && i + 1 < dstsz) {
+        dst[i++] = (c < 0x20 || c == 0x7F) ? '?' : (char)c;
+    }
+    dst[i] = '\0';
+    return dst;
+}
 
 #define PAK_EXTRACT 1
 #define PAK_CREATE  2
 #define PAK_ADD     4
 #define PAK_REMOVE  8
 #define PAK_LIST    16
+#define PAK_VERIFY  32
+
+#define ADD_FOLDER_MAX_DEPTH 100
+#define PAK_TREE_MAX_DEPTH   100
+
+/* UTF-8 box-drawing for --tree output. Octal escapes so the source
+ * file's encoding doesn't affect the emitted bytes. */
+#define PAK_TREE_ROOT         "."
+#define PAK_TREE_BRANCH_MID   "\342\224\234\342\224\200\342\224\200 "
+#define PAK_TREE_BRANCH_LAST  "\342\224\224\342\224\200\342\224\200 "
+#define PAK_TREE_PREFIX_MID   "\342\224\202   "
+#define PAK_TREE_PREFIX_LAST  "    "
 
 typedef struct opts_s {
     short mode;
@@ -13,243 +79,901 @@ typedef struct opts_s {
     char **paths;
     int path_count;
     int tree;
+    /* --as <entry_name> <source_path> pairs. Parallel arrays so a
+     * caller can pass any number of --as occurrences alongside plain
+     * paths. Only valid with PAK_ADD / PAK_CREATE. */
+    char **aliased_entries;
+    char **aliased_sources;
+    int aliased_count;
 } opts_t;
 
-static char *name;
-static void listpakfiles(Pak_t *pak, int tree);
-static void extract(Pak_t *pak, char *destination, char **paths, int path_count);
+typedef struct treenode_s {
+    char *name;
+    int is_dir;
+    struct treenode_s *children;
+    struct treenode_s *next;
+} treenode_t;
+
+static char *g_argv0;
+
 static void usage(void);
 static void usage_banner(void);
 static void help(void);
-static int strip_long_options(int argc, char **argv, opts_t *opts);
 static int parseopts(int argc, char **argv, opts_t *opts);
+static int strip_long_options(int argc, char **argv, opts_t *opts);
 static void setmodetype(opts_t *opts, short mode);
 
+static void fail_from_err(const pakka_error_t *err);
+static int build_filename(char *dest, size_t dest_size,
+                          const char *basedir, const char *filename);
+
+static void op_list(pakka_archive_t *pak);
+static void op_list_tree(pakka_archive_t *pak);
+static void op_extract(pakka_archive_t *pak, char *destination,
+                       char **paths, int path_count);
+static void op_add(pakka_archive_t *pak, char **paths, int path_count,
+                   char **aliased_entries, char **aliased_sources,
+                   int aliased_count);
+static void op_remove(pakka_archive_t *pak, char **paths, int path_count);
+static void op_verify(pakka_archive_t *pak);
+static void cli_add_path(pakka_archive_t *pak, char *path);
+static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth);
+
+/* Tree-print helpers live here because libpakka.a contains no printf
+ * calls. The CLI builds the tree in memory from pakka_entry_at()
+ * results and renders it with the box-drawing chars defined above. */
+static treenode_t *create_tree_node(const char *name, int is_dir);
+static void insert_tree_path(treenode_t *root, const char *path,
+                             uint32_t *dir_count, uint32_t *file_count);
+static treenode_t *find_tree_dir(treenode_t *parent, const char *name);
+static void insert_tree_child(treenode_t *parent, treenode_t *node);
+static void print_tree_children(treenode_t *node, const char *prefix);
+static void print_tree_summary(uint32_t dir_count, uint32_t file_count);
+static void free_tree(treenode_t *node);
+
 int main(int argc, char *argv[]) {
-    name = argv[0];
     opts_t opts = {0};
+    pakka_archive_t *pak;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    g_argv0 = argv[0];
     parseopts(argc, argv, &opts);
-    Pak_t *pak;
-    
+
     if (opts.mode == PAK_CREATE) {
-        pak = create_pakfile(opts.pakfile);
+        s = pakka_create(opts.pakfile, PAKKA_FORMAT_PAK,
+                         PAKKA_CREATE_DEFAULT, &pak, &err);
     } else {
-        int writable = (opts.mode == PAK_ADD || opts.mode == PAK_REMOVE);
-        pak = open_pakfile(opts.pakfile, writable);
+        pakka_open_mode_t mode =
+            (opts.mode == PAK_ADD || opts.mode == PAK_REMOVE)
+              ? PAKKA_OPEN_READ_WRITE
+              : PAKKA_OPEN_READ;
+        s = pakka_open(opts.pakfile, mode, &pak, &err);
     }
-    
+    if (s != PAKKA_OK) {
+        fail_from_err(&err);
+    }
+
     switch (opts.mode) {
         case PAK_LIST:
-            listpakfiles(pak, opts.tree);
+            if (opts.tree) {
+                op_list_tree(pak);
+            } else {
+                op_list(pak);
+            }
             break;
         case PAK_EXTRACT:
-            extract(pak, opts.destination, opts.paths, opts.path_count);
+            op_extract(pak, opts.destination, opts.paths, opts.path_count);
             break;
         case PAK_ADD:
         case PAK_CREATE:
-            add_files(pak, opts.paths, opts.path_count);
+            op_add(pak, opts.paths, opts.path_count,
+                   opts.aliased_entries, opts.aliased_sources,
+                   opts.aliased_count);
             break;
         case PAK_REMOVE:
-            delete_files(pak, opts.paths, opts.path_count);
+            op_remove(pak, opts.paths, opts.path_count);
+            break;
+        case PAK_VERIFY:
+            op_verify(pak);
             break;
         default:
             fprintf(stderr, "Unknown operation mode selected\n");
             exit(1);
     }
 
-    close_pakfile(pak);
+    s = pakka_close(pak, &err);
+    if (s != PAKKA_OK) {
+        fail_from_err(&err);
+    }
     free(opts.paths);
+    free(opts.aliased_entries);
+    free(opts.aliased_sources);
 
     return 0;
 }
 
-void listpakfiles(Pak_t *pak, int tree) {
-    if (tree) {
-        list_files_tree(pak);
+static void fail_from_err(const pakka_error_t *err) {
+    if (err->domain == PAKKA_ERR_DOMAIN_ERRNO) {
+        pakka_die_e((int)err->system_code, "%s", err->message);
     } else {
-        list_files(pak);
+        pakka_die_e(0, "%s", err->message);
     }
 }
 
-void extract(Pak_t *pak, char *destination, char **paths, int path_count) {
-    char *realdest = malloc(sizeof(char) * OS_PATH_MAX);
-    struct stat sb;
+/*
+ * List operation. Iterates entries in directory order and prints
+ * "<name> (<length> bytes)\n" for each. Empty archive prints
+ * "Pak is empty\n".
+ */
+static void op_list(pakka_archive_t *pak) {
+    size_t count = pakka_entry_count(pak);
+    size_t i;
+    const pakka_entry_t *entry;
+    pakka_status_t s;
 
-    if (realdest == NULL) {
-        error_exit("Cannot allocate destination buffer");
+    if (count == 0) {
+        printf("Pak is empty\n");
+        return;
     }
 
+    for (i = 0; i < count; i++) {
+        s = pakka_entry_at(pak, i, &entry);
+        if (s != PAKKA_OK) {
+            pakka_die_e(0, "Cannot read entry %zu", i);
+        }
+        pakka_fprint_sanitized(stdout, pakka_entry_name(entry));
+        printf(" (%" PRIu64 " bytes)\n", pakka_entry_size(entry));
+    }
+}
+
+/*
+ * --tree list. Builds an in-memory directory tree from entry names
+ * (slash-separated path components), then prints with UTF-8 box
+ * drawing chars.
+ */
+static void op_list_tree(pakka_archive_t *pak) {
+    size_t count = pakka_entry_count(pak);
+    size_t i;
+    const pakka_entry_t *entry;
+    pakka_status_t s;
+    treenode_t *root = create_tree_node(PAK_TREE_ROOT, 1);
+    uint32_t dir_count = 0;
+    uint32_t file_count = 0;
+
+    printf("%s\n", PAK_TREE_ROOT);
+
+    for (i = 0; i < count; i++) {
+        s = pakka_entry_at(pak, i, &entry);
+        if (s != PAKKA_OK) {
+            pakka_die_e(0, "Cannot read entry %zu", i);
+        }
+        insert_tree_path(root, pakka_entry_name(entry),
+                         &dir_count, &file_count);
+    }
+    if (count > 0) {
+        print_tree_children(root, "");
+    }
+
+    print_tree_summary(dir_count, file_count);
+    free_tree(root);
+}
+
+static treenode_t *create_tree_node(const char *name, int is_dir) {
+    treenode_t *node = calloc(1, sizeof(treenode_t));
+    size_t name_len;
+
+    if (node == NULL) {
+        pakka_die("Cannot allocate tree node");
+    }
+    name_len = strlen(name);
+    node->name = malloc(name_len + 1);
+    if (node->name == NULL) {
+        pakka_die("Cannot allocate tree node name");
+    }
+    memcpy(node->name, name, name_len + 1);
+    node->is_dir = is_dir;
+
+    return node;
+}
+
+static void insert_tree_path(treenode_t *root, const char *path,
+                             uint32_t *dir_count, uint32_t *file_count) {
+    char *path_copy;
+    char *component;
+    char *next;
+    treenode_t *parent = root;
+    treenode_t *dir;
+    int depth = 0;
+
+    if (path[0] == '\0') {
+        return;
+    }
+
+    path_copy = pakka_compat_strdup(path);
+    if (path_copy == NULL) {
+        pakka_die("Cannot allocate tree-path copy");
+    }
+    component = strtok(path_copy, "/");
+
+    while (component != NULL) {
+        next = strtok(NULL, "/");
+
+        if (depth >= PAK_TREE_MAX_DEPTH) {
+            pakka_die("Pak directory nesting exceeds %d levels at '%s'",
+                       PAK_TREE_MAX_DEPTH, path);
+        }
+
+        if (next == NULL) {
+            insert_tree_child(parent, create_tree_node(component, 0));
+            (*file_count)++;
+        } else {
+            dir = find_tree_dir(parent, component);
+            if (dir == NULL) {
+                dir = create_tree_node(component, 1);
+                insert_tree_child(parent, dir);
+                (*dir_count)++;
+            }
+            parent = dir;
+            depth++;
+        }
+
+        component = next;
+    }
+
+    free(path_copy);
+}
+
+static treenode_t *find_tree_dir(treenode_t *parent, const char *name) {
+    treenode_t *current = parent->children;
+    while (current != NULL) {
+        if (current->is_dir && strcmp(current->name, name) == 0) {
+            return current;
+        }
+        current = current->next;
+    }
+    return NULL;
+}
+
+static void insert_tree_child(treenode_t *parent, treenode_t *node) {
+    treenode_t *current = parent->children;
+    treenode_t *previous = NULL;
+    while (current != NULL && strcmp(current->name, node->name) <= 0) {
+        previous = current;
+        current = current->next;
+    }
+    if (previous == NULL) {
+        node->next = parent->children;
+        parent->children = node;
+    } else {
+        node->next = previous->next;
+        previous->next = node;
+    }
+}
+
+static void print_tree_children(treenode_t *node, const char *prefix) {
+    treenode_t *current = node->children;
+    char *next_prefix;
+    const char *branch;
+    const char *prefix_suffix;
+    size_t prefix_len;
+
+    while (current != NULL) {
+        branch        = current->next == NULL ? PAK_TREE_BRANCH_LAST : PAK_TREE_BRANCH_MID;
+        prefix_suffix = current->next == NULL ? PAK_TREE_PREFIX_LAST : PAK_TREE_PREFIX_MID;
+
+        printf("%s%s", prefix, branch);
+        pakka_fprint_sanitized(stdout, current->name);
+        printf("\n");
+
+        if (current->is_dir) {
+            prefix_len = strlen(prefix) + strlen(prefix_suffix);
+            next_prefix = malloc(prefix_len + 1);
+            if (next_prefix == NULL) {
+                pakka_die("Cannot allocate tree prefix");
+            }
+            memcpy(next_prefix, prefix, strlen(prefix));
+            memcpy(next_prefix + strlen(prefix), prefix_suffix,
+                   strlen(prefix_suffix) + 1);
+            print_tree_children(current, next_prefix);
+            free(next_prefix);
+        }
+
+        current = current->next;
+    }
+}
+
+static void print_tree_summary(uint32_t dir_count, uint32_t file_count) {
+    printf("\n%" PRIu32 " director%s, %" PRIu32 " file%s\n",
+           dir_count, dir_count == 1 ? "y" : "ies",
+           file_count, file_count == 1 ? "" : "s");
+}
+
+static void free_tree(treenode_t *node) {
+    treenode_t *current;
+    treenode_t *next;
+
+    if (node == NULL) {
+        return;
+    }
+    current = node->children;
+    while (current != NULL) {
+        next = current->next;
+        free_tree(current);
+        current = next;
+    }
+    free(node->name);
+    free(node);
+}
+
+/*
+ * Extract operation. Two-pass so the whole pak is rejected before any
+ * disk write if anything dangerous is selected:
+ *   1a) match requested paths against entries
+ *   1b) reject the whole pak if any selected entry has an unsafe name
+ *       (traversal, drive prefix, control bytes, Windows reserved)
+ *   1c) reject the whole pak if selected entries collide after
+ *       portable-union normalization (case fold, slash/backslash,
+ *       trailing dot/space)
+ *   2)  stream each selected entry via pakka_open_entry /
+ *       pakka_reader_read into pakka_compat_open_extract_target
+ */
+static int name_ptr_cmp_main(const void *a, const void *b) {
+    const char *const *aa = (const char *const *)a;
+    const char *const *bb = (const char *const *)b;
+    return strcmp(*aa, *bb);
+}
+
+static void op_extract(pakka_archive_t *pak, char *destination,
+                       char **paths, int path_count) {
+    char *realdest;
+    struct stat sb;
+    size_t count = pakka_entry_count(pak);
+    int *should_extract = NULL;
+    int *path_matched = NULL;
+    char **norms = NULL;
+    int i;
+    size_t idx;
+    const pakka_entry_t *entry;
+    pakka_error_t err;
+    pakka_status_t s;
+    uint32_t selected = 0;
+    uint32_t k;
+
+    realdest = malloc(OS_PATH_MAX);
+    if (realdest == NULL) {
+        pakka_die("Cannot allocate destination buffer");
+    }
     if (destination != NULL) {
-        if (compat_realpath(destination, realdest) == NULL) {
-           error_exit("Cannot open destination path '%s'", destination);
+        if (pakka_compat_realpath(destination, realdest) == NULL) {
+            pakka_die("Cannot open destination path '%s'", destination);
         }
     } else {
-        if (compat_getcwd(realdest, OS_PATH_MAX) == NULL) {
-            error_exit("Cannot get current working directory");
+        if (pakka_compat_getcwd(realdest, OS_PATH_MAX) == NULL) {
+            pakka_die("Cannot get current working directory");
+        }
+    }
+    if (stat(realdest, &sb) != 0) {
+        pakka_die("Cannot stat destination '%s'", realdest);
+    }
+    if (!S_ISDIR(sb.st_mode)) {
+        pakka_die("Destination '%s' is not a directory", realdest);
+    }
+
+    if (count == 0) {
+        if (path_count > 0) {
+            pakka_die("Pak is empty; cannot extract %s", paths[0]);
+        }
+        printf("Pak is empty\n");
+        free(realdest);
+        return;
+    }
+
+    should_extract = calloc(count, sizeof(int));
+    if (should_extract == NULL) {
+        pakka_die("Cannot allocate extract preflight buffer");
+    }
+    if (path_count > 0) {
+        path_matched = calloc(path_count, sizeof(int));
+        if (path_matched == NULL) {
+            pakka_die("Cannot allocate path-match buffer");
         }
     }
 
-    /* `-C` must resolve to a real directory. Otherwise extract_files
-     * would happily run mkdir_r against a path like `/etc/passwd/sound`
-     * which fails partway through after side effects. */
-    if (stat(realdest, &sb) != 0) {
-        error_exit("Cannot stat destination '%s'", realdest);
+    /* Pass 1a + 1b: path-match + unsafe-name reject. */
+    for (idx = 0; idx < count; idx++) {
+        int matched;
+        const char *name;
+        s = pakka_entry_at(pak, idx, &entry);
+        if (s != PAKKA_OK) {
+            pakka_die_e(0, "Cannot read entry %zu", idx);
+        }
+        name = pakka_entry_name(entry);
+
+        if (path_count == 0) {
+            matched = 1;
+        } else {
+            matched = 0;
+            for (i = 0; i < path_count; i++) {
+                if (strcmp(name, paths[i]) == 0) {
+                    matched = 1;
+                    path_matched[i] = 1;
+                }
+            }
+        }
+
+        if (matched) {
+            if (pakka_unsafe_entry_name(name)) {
+                char safe[PAKFILE_PATH_BUF];
+                pakka_sanitize_name(safe, sizeof(safe), name);
+                pakka_die_e(0,
+                    "Refusing to extract '%s': entry name would escape destination",
+                    safe);
+            }
+            should_extract[idx] = 1;
+            selected++;
+        }
     }
-    if (! S_ISDIR(sb.st_mode)) {
-        error_exit("Destination '%s' is not a directory", realdest);
+    if (path_count > 0) {
+        for (i = 0; i < path_count; i++) {
+            if (!path_matched[i]) {
+                pakka_die("Cannot find %s in pak file", paths[i]);
+            }
+        }
     }
 
-    extract_files(pak, realdest, paths, path_count);
+    /* Pass 1c: normalized-collision reject. */
+    if (selected > 1) {
+        norms = calloc(selected, sizeof(char *));
+        if (norms == NULL) {
+            pakka_die("Cannot allocate collision-check buffer");
+        }
+        k = 0;
+        for (idx = 0; idx < count; idx++) {
+            if (should_extract[idx]) {
+                size_t name_len;
+                s = pakka_entry_at(pak, idx, &entry);
+                if (s != PAKKA_OK) {
+                    pakka_die_e(0, "Cannot read entry %zu", idx);
+                }
+                name_len = strlen(pakka_entry_name(entry));
+                norms[k] = malloc(name_len + 1);
+                if (norms[k] == NULL) {
+                    pakka_die("Cannot allocate normalized name buffer");
+                }
+                pakka_normalize_entry_name(pakka_entry_name(entry),
+                                           norms[k], name_len + 1);
+                k++;
+            }
+        }
+        qsort(norms, selected, sizeof(char *), name_ptr_cmp_main);
+        for (k = 1; k < selected; k++) {
+            if (strcmp(norms[k - 1], norms[k]) == 0) {
+                char safe[PAKFILE_PATH_BUF];
+                pakka_sanitize_name(safe, sizeof(safe), norms[k]);
+                pakka_die_e(0,
+                    "Refusing to extract: entries collide after "
+                    "normalization on '%s'", safe);
+            }
+        }
+        for (k = 0; k < selected; k++) {
+            free(norms[k]);
+        }
+        free(norms);
+    }
+
+    /* Pass 2: write. */
+    for (idx = 0; idx < count; idx++) {
+        pakka_reader_t *reader;
+        FILE *tfd;
+        unsigned char buf[PAKFILE_COPY_CHUNK];
+        size_t nread;
+        const char *name;
+        uint64_t size;
+
+        if (!should_extract[idx]) continue;
+
+        s = pakka_entry_at(pak, idx, &entry);
+        if (s != PAKKA_OK) {
+            pakka_die_e(0, "Cannot read entry %zu", idx);
+        }
+        name = pakka_entry_name(entry);
+        size = pakka_entry_size(entry);
+
+        printf("Writing %" PRIu64 " bytes to %s/%s\n", size, realdest, name);
+
+        tfd = pakka_compat_open_extract_target(realdest, name);
+        if (tfd == NULL) {
+            pakka_die("Cannot open %s/%s for writing "
+                       "(symlink in path or filesystem error)",
+                       realdest, name);
+        }
+
+        if (size > 0) {
+            s = pakka_open_entry(pak, name, &reader, &err);
+            if (s != PAKKA_OK) {
+                fclose(tfd);
+                fail_from_err(&err);
+            }
+            for (;;) {
+                s = pakka_reader_read(reader, buf, sizeof(buf), &nread, &err);
+                if (s != PAKKA_OK) {
+                    pakka_reader_close(reader);
+                    fclose(tfd);
+                    fail_from_err(&err);
+                }
+                if (nread == 0) break;
+                if (fwrite(buf, 1, nread, tfd) != nread) {
+                    int werr = errno;
+                    pakka_reader_close(reader);
+                    fclose(tfd);
+                    pakka_die_e(werr, "Cannot write entry '%s'", name);
+                }
+            }
+            pakka_reader_close(reader);
+        }
+
+        if (fclose(tfd) != 0) {
+            /* Buffered disk-full / NFS / quota failures first surface
+             * here, not on the final fwrite — leaving them unchecked
+             * lets a truncated extraction look successful. */
+            int close_errno = errno;
+            pakka_die_e(close_errno, "Cannot finalize %s/%s", realdest, name);
+        }
+    }
+
+    free(should_extract);
+    free(path_matched);
     free(realdest);
 }
 
-/* Pull long options ("--tree") out of argv before POSIX getopt() runs.
- * Honors "--" as end-of-options so a literal path named "--tree" can be
- * passed through unchanged. */
-int strip_long_options(int argc, char **argv, opts_t *opts) {
+/*
+ * Add operation. Each path is either a regular file (call pakka_add_file
+ * with path as both source and entry name) or a directory (recurse,
+ * skipping symlinks and adding each contained regular file).
+ */
+static void op_add(pakka_archive_t *pak, char **paths, int path_count,
+                   char **aliased_entries, char **aliased_sources,
+                   int aliased_count) {
+    pakka_error_t err;
+    pakka_status_t s;
+    int i;
+
+    for (i = 0; i < path_count; i++) {
+        cli_add_path(pak, paths[i]);
+    }
+
+    /* --as pairs add a single entry per pair with explicit aliasing.
+     * No directory recursion or symlink-skipping like cli_add_path
+     * does — the source path is treated as a regular-file source by
+     * pakka_add_file, which still runs the same is_reparse_or_symlink
+     * and S_ISREG checks. */
+    for (i = 0; i < aliased_count; i++) {
+        printf("Adding %s to pak as %s\n",
+               aliased_sources[i], aliased_entries[i]);
+        s = pakka_add_file(pak, aliased_sources[i],
+                           aliased_entries[i], &err);
+        if (s != PAKKA_OK) {
+            fail_from_err(&err);
+        }
+    }
+
+    s = pakka_commit(pak, &err);
+    if (s != PAKKA_OK) {
+        fail_from_err(&err);
+    }
+}
+
+static void cli_add_path(pakka_archive_t *pak, char *path) {
+    struct stat sb;
+
+    if (pakka_compat_is_reparse_or_symlink(path)) {
+        pakka_die_e(0, "Refusing to add symlink/reparse '%s'", path);
+    }
+    if (pakka_compat_lstat(path, &sb) != 0) {
+        pakka_die_e(errno, "Cannot stat %s", path);
+    }
+    if (S_ISDIR(sb.st_mode)) {
+        cli_add_folder_r(pak, path, 0);
+    } else if (S_ISREG(sb.st_mode)) {
+        pakka_error_t err;
+        pakka_status_t s;
+        printf("Adding %s to pak\n", path);
+        s = pakka_add_file(pak, path, path, &err);
+        if (s != PAKKA_OK) {
+            fail_from_err(&err);
+        }
+    } else {
+        pakka_die_e(0, "Refusing to add non-regular file '%s'", path);
+    }
+}
+
+static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth) {
+    DIR *d;
+    struct dirent *dirp;
+    struct stat sb;
+    char tmp[OS_PATH_MAX];
+
+    if (depth >= ADD_FOLDER_MAX_DEPTH) {
+        pakka_die("Directory nesting too deep at '%s' (max %d)",
+                   path, ADD_FOLDER_MAX_DEPTH);
+    }
+    if (!(d = opendir(path))) {
+        pakka_die("Cannot open directory %s", path);
+    }
+    while ((dirp = readdir(d)) != NULL) {
+        if (strcmp(dirp->d_name, "..") == 0
+            || strcmp(dirp->d_name, ".") == 0) {
+            continue;
+        }
+        if (build_filename(tmp, sizeof(tmp), path, dirp->d_name) != 0) {
+            closedir(d);
+            pakka_die_e(0, "Path too long: %s/%s", path, dirp->d_name);
+        }
+        if (pakka_compat_is_reparse_or_symlink(tmp)) {
+            fprintf(stderr, "Skipping symlink/reparse point %s\n", tmp);
+            continue;
+        }
+        if (pakka_compat_lstat(tmp, &sb) == 0) {
+            if (S_ISDIR(sb.st_mode)) {
+                cli_add_folder_r(pak, tmp, depth + 1);
+            } else if (S_ISREG(sb.st_mode)) {
+                pakka_error_t err;
+                pakka_status_t s;
+                printf("Adding %s to pak\n", tmp);
+                s = pakka_add_file(pak, tmp, tmp, &err);
+                if (s != PAKKA_OK) {
+                    fail_from_err(&err);
+                }
+            }
+        } else {
+            int stat_errno = errno;
+            closedir(d);
+            pakka_die_e(stat_errno, "Couldn't stat %s", tmp);
+        }
+    }
+    closedir(d);
+}
+
+/*
+ * Remove operation. Walk requested names, pakka_delete each, commit.
+ */
+static void op_remove(pakka_archive_t *pak, char **paths, int path_count) {
+    pakka_error_t err;
+    pakka_status_t s;
+    int i;
+
+    for (i = 0; i < path_count; i++) {
+        s = pakka_delete(pak, paths[i], &err);
+        if (s != PAKKA_OK) {
+            fail_from_err(&err);
+        }
+    }
+
+    s = pakka_commit(pak, &err);
+    if (s != PAKKA_OK) {
+        fail_from_err(&err);
+    }
+}
+
+/*
+ * Verify operation: print one line per finding (INFO to stdout, WARNING
+ * and ERROR to stderr); exit non-zero if pakka_verify reports any error.
+ */
+static void verify_report_cb(void *userdata,
+                             pakka_report_severity_t severity,
+                             pakka_status_t status,
+                             const char *entry_name,
+                             const char *message) {
+    (void)userdata;
+    (void)status;
+    {
+        FILE *out = (severity == PAKKA_REPORT_INFO) ? stdout : stderr;
+        const char *tag = (severity == PAKKA_REPORT_ERROR) ? "ERROR"
+                       : (severity == PAKKA_REPORT_WARNING) ? "WARNING"
+                       : "INFO";
+        if (entry_name != NULL && entry_name[0] != '\0') {
+            char safe[PAKFILE_PATH_BUF];
+            pakka_sanitize_name(safe, sizeof(safe), entry_name);
+            fprintf(out, "%s [%s]: %s\n", tag, safe, message);
+        } else {
+            fprintf(out, "%s: %s\n", tag, message);
+        }
+    }
+}
+
+static void op_verify(pakka_archive_t *pak) {
+    pakka_error_t err;
+    pakka_status_t s = pakka_verify(pak, 0u, verify_report_cb, NULL, &err);
+    if (s != PAKKA_OK) {
+        /* Report callback already printed per-finding diagnostics;
+         * surface a final aggregate line on stderr and exit non-zero. */
+        fprintf(stderr, "Verify FAILED (status %d)\n", (int)s);
+        pakka_close(pak, NULL);
+        exit(1);
+    }
+}
+
+/*
+ * Build "<basedir>/<filename>" into dest. Returns 0 on success, non-zero
+ * if the result would overflow dest_size.
+ */
+static int build_filename(char *dest, size_t dest_size,
+                          const char *basedir, const char *filename) {
+    size_t blen = strlen(basedir);
+    int needs_sep = (blen > 0 && basedir[blen - 1] != '/'
+                              && basedir[blen - 1] != '\\');
+    int written = snprintf(dest, dest_size, "%s%s%s",
+                           basedir, needs_sep ? "/" : "", filename);
+    if (written < 0 || (size_t)written >= dest_size) {
+        return -1;
+    }
+    return 0;
+}
+
+/*
+ * Argument parsing.
+ */
+static int strip_long_options(int argc, char **argv, opts_t *opts) {
     int src;
     int dst = 1;
     int option_end = 0;
-
+    int as_capacity = 0;
     for (src = 1; src < argc; src++) {
-        if (! option_end && strcmp(argv[src], "--") == 0) {
+        if (!option_end && strcmp(argv[src], "--") == 0) {
             option_end = 1;
-        } else if (! option_end && strcmp(argv[src], "--tree") == 0) {
+        } else if (!option_end && strcmp(argv[src], "--tree") == 0) {
             opts->tree = 1;
             continue;
+        } else if (!option_end && strcmp(argv[src], "--verify") == 0) {
+            setmodetype(opts, PAK_VERIFY);
+            continue;
+        } else if (!option_end && strcmp(argv[src], "--as") == 0) {
+            /* Consume the next two argv slots as <entry_name> and
+             * <source_path>. Bail if the pair is incomplete. */
+            if (src + 2 >= argc) {
+                fprintf(stderr,
+                        "--as requires two arguments: <entry_name> <source_path>\n");
+                usage();
+            }
+            if (opts->aliased_count >= as_capacity) {
+                char **new_entries;
+                char **new_sources;
+                as_capacity = as_capacity ? as_capacity * 2 : 4;
+                new_entries = realloc(opts->aliased_entries,
+                                      sizeof(char *) * (size_t)as_capacity);
+                if (new_entries == NULL) {
+                    pakka_die("Cannot allocate --as entry buffer");
+                }
+                opts->aliased_entries = new_entries;
+                new_sources = realloc(opts->aliased_sources,
+                                      sizeof(char *) * (size_t)as_capacity);
+                if (new_sources == NULL) {
+                    pakka_die("Cannot allocate --as source buffer");
+                }
+                opts->aliased_sources = new_sources;
+            }
+            opts->aliased_entries[opts->aliased_count] = argv[src + 1];
+            opts->aliased_sources[opts->aliased_count] = argv[src + 2];
+            opts->aliased_count++;
+            src += 2;
+            continue;
         }
-
         argv[dst++] = argv[src];
     }
-
     argv[dst] = NULL;
     return dst;
 }
 
-int parseopts(int argc, char* argv[], opts_t *opts) {
+static int parseopts(int argc, char *argv[], opts_t *opts) {
     int c;
 
     argc = strip_long_options(argc, argv, opts);
-
     if (argc < 2) {
         usage();
     }
 
     while ((c = getopt(argc, argv, "lxcadhf:C:")) != -1) {
         switch (c) {
-            case 'l':
-                setmodetype(opts, PAK_LIST);
-                break;
-            case 'x':
-                setmodetype(opts, PAK_EXTRACT);
-                break;
-            case 'c':
-                setmodetype(opts, PAK_CREATE);
-                break;
-            case 'a':
-                setmodetype(opts, PAK_ADD);
-                break;
-            case 'd':
-                setmodetype(opts, PAK_REMOVE);
-                break;
-            case 'f':
-                opts->pakfile = optarg;
-                break;
-            case 'C':
-                opts->destination = optarg;
-                break;
-            case 'h':
-                help();
-                break;
-            default:
-                usage();
+            case 'l': setmodetype(opts, PAK_LIST); break;
+            case 'x': setmodetype(opts, PAK_EXTRACT); break;
+            case 'c': setmodetype(opts, PAK_CREATE); break;
+            case 'a': setmodetype(opts, PAK_ADD); break;
+            case 'd': setmodetype(opts, PAK_REMOVE); break;
+            case 'f': opts->pakfile = optarg; break;
+            case 'C': opts->destination = optarg; break;
+            case 'h': help(); break;
+            default: usage();
         }
     }
-    
+
     if (optind < argc) {
-        opts->paths = (char **) malloc(sizeof(char *) * (argc - optind));
+        opts->paths = malloc(sizeof(char *) * (argc - optind));
         if (opts->paths == NULL) {
-            error_exit("Cannot allocate path argument list");
+            pakka_die("Cannot allocate path argument list");
         }
         while (optind < argc) {
             opts->paths[opts->path_count++] = argv[optind++];
         }
     }
 
-    if (! opts->mode) {
+    if (!opts->mode) {
         fprintf(stderr, "You must specify one -lxcad option\n");
         usage();
     }
-
-    if (! opts->pakfile || opts->pakfile[0] == '\0') {
+    if (!opts->pakfile || opts->pakfile[0] == '\0') {
         fprintf(stderr, "You must specify a pakfile name with -f\n");
         usage();
     }
-
     if (opts->tree && opts->mode != PAK_LIST) {
         fprintf(stderr, "--tree may only be used with -l\n");
         usage();
     }
-
-    /* -a and -d require at least one path. The CLI's only "no path"
-     * modes are -l, -x (extracts everything), and -c (creates an
-     * empty pak — arguably surprising but historically allowed).
-     * Without this check, `pakka -df foo.pak` rewrites foo.pak through
-     * a temp file with no entries removed (different bytes, lost
-     * mode/owner/xattrs); `pakka -af foo.pak` is a no-op write. */
-    if ((opts->mode == PAK_ADD || opts->mode == PAK_REMOVE)
-        && opts->path_count == 0) {
+    if (opts->aliased_count > 0
+        && opts->mode != PAK_ADD
+        && opts->mode != PAK_CREATE) {
+        fprintf(stderr, "--as may only be used with -a or -c\n");
+        usage();
+    }
+    if (opts->mode == PAK_ADD
+        && opts->path_count == 0 && opts->aliased_count == 0) {
         fprintf(stderr,
-                "%s requires at least one path argument\n",
-                opts->mode == PAK_ADD ? "-a" : "-d");
+                "-a requires at least one path argument or --as pair\n");
+        usage();
+    }
+    if (opts->mode == PAK_REMOVE && opts->path_count == 0) {
+        fprintf(stderr, "-d requires at least one path argument\n");
         usage();
     }
 
     return 0;
 }
 
-void setmodetype(opts_t *opt, short mode) {
-    if (! opt->mode) {
-        opt->mode = mode;
+static void setmodetype(opts_t *opts, short mode) {
+    if (!opts->mode) {
+        opts->mode = mode;
     } else {
         fprintf(stderr, "You may not specify more than one -lxcad option\n");
         usage();
     }
 }
 
-void usage_banner(void) {
+static void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-lxcad] [--tree] -f [pak file] -C [destination path] [path(s)]\n", name);
+    fprintf(stderr, "Usage: %s -h [-lxcad] [--tree] [--verify] [--as <entry> <source>] -f [pak file] -C [destination path] [path(s)]\n",
+            g_argv0);
 }
 
-void usage(void) {
+static void usage(void) {
     usage_banner();
     exit(1);
 }
 
-void help(void) {
+static void help(void) {
     usage_banner();
-
     fprintf(stderr, "\nOperation Modes:\n");
-    fprintf(stderr, "You must specify one [lxcad] option\n");
-    fprintf(stderr, " -l    list files contained in pak file\n");
-    fprintf(stderr, " -x    extract files from pak file\n");
-    fprintf(stderr, " -c    create a new pak file\n");
-    fprintf(stderr, " -a    add files to pak file\n");
-    fprintf(stderr, " -d    remove files from pak file\n");
-
-    fprintf(stderr, " -h    this help\n");
-
+    fprintf(stderr, "You must specify exactly one mode\n");
+    fprintf(stderr, " -l         list files contained in pak file\n");
+    fprintf(stderr, " -x         extract files from pak file\n");
+    fprintf(stderr, " -c         create a new pak file\n");
+    fprintf(stderr, " -a         add files to pak file\n");
+    fprintf(stderr, " -d         remove files from pak file\n");
+    fprintf(stderr, " --verify   walk every entry, check name safety and payload readability,\n");
+    fprintf(stderr, "            and flag entries that would collide after extraction normalization\n");
+    fprintf(stderr, " -h         this help\n");
     fprintf(stderr, "\nModifiers:\n");
-    fprintf(stderr, " --tree    list pak contents as a directory tree (only with -l)\n");
-
+    fprintf(stderr, " --tree                          list pak contents as a directory tree (only with -l)\n");
+    fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");
+    fprintf(stderr, "                                 (repeat --as for multiple aliased pairs; may mix with plain paths)\n");
     fprintf(stderr, "\nExamples:\n");
-    fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", name);
-    fprintf(stderr, "  %s -lf pak1.pak --tree        # List contents as a directory tree\n", name);
-    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", name);
-    fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", name);
+    fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", g_argv0);
+    fprintf(stderr, "  %s -lf pak1.pak --tree        # List contents as a directory tree\n", g_argv0);
+    fprintf(stderr, "  %s --verify -f pak1.pak       # Walk every entry, report integrity findings\n", g_argv0);
+    fprintf(stderr, "  %s -af pak1.pak --as maps/foo.bsp /tmp/foo.bsp\n", g_argv0);
+    fprintf(stderr, "                                # Add /tmp/foo.bsp as entry 'maps/foo.bsp' (aliasing)\n");
+    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", g_argv0);
+    fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", g_argv0);
     fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
-    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", name);
-    
+    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", g_argv0);
     exit(1);
 }

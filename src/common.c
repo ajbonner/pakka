@@ -1,63 +1,17 @@
-#include <stdarg.h>
 #include "common.h"
 
-static void emit_and_exit(int saved_errno, const char *format, va_list args) {
-    char msg[1000];
-
-    vsnprintf(msg, sizeof(msg), format, args);
-
-    if (saved_errno != 0) {
-        fprintf(stderr, "%s: %s\n", msg, strerror(saved_errno));
-    } else {
-        fprintf(stderr, "%s\n", msg);
-    }
-
-    exit(1);
-}
-
-void error_exit(const char *format, ...) {
-    /* Capture errno before any further library call (vsnprintf/strerror)
-     * can perturb it. Callers that need to report errno but have
-     * intermediate cleanup (free/closedir/fclose) should use
-     * error_exit_e with an explicitly saved errno value. */
-    int saved_errno = errno;
-    va_list args;
-    va_start(args, format);
-    emit_and_exit(saved_errno, format, args);
-    va_end(args);
-}
-
-void error_exit_e(int saved_errno, const char *format, ...) {
-    va_list args;
-    va_start(args, format);
-    emit_and_exit(saved_errno, format, args);
-    va_end(args);
-}
-
-void fprint_sanitized(FILE *out, const char *s) {
-    unsigned char c;
-    while ((c = (unsigned char)*s++) != '\0') {
-        fputc((c < 0x20 || c == 0x7F) ? '?' : c, out);
-    }
-}
-
-char *sanitize_name(char *dst, size_t dstsz, const char *src) {
-    size_t i = 0;
-    unsigned char c;
-    if (dstsz == 0) return dst;
-    while ((c = (unsigned char)*src++) != '\0' && i + 1 < dstsz) {
-        dst[i++] = (c < 0x20 || c == 0x7F) ? '?' : (char)c;
-    }
-    dst[i] = '\0';
-    return dst;
-}
+/* pakka_die / pakka_die_e / pakka_fprint_sanitized / pakka_sanitize_name
+ * moved to src/main.c in Phase 6: they print to stderr or call exit(1),
+ * neither of which is allowed inside libpakka.a. The library returns
+ * pakka_status_t + pakka_error_t; only the CLI translates those into
+ * stderr + exit. */
 
 /* The on-disk pak format is canonically little-endian (Quake 1/2
  * originated on x86). A raw fread of a uint32_t works only on LE
  * hosts; on big-endian (s390x, sparc, ppc) it interprets the bytes in
  * the wrong order and corrupts diroffset/dirlength/offset/length.
  * Anything that touches an on-disk u32 must go through these. */
-int read_u32_le(FILE *fp, uint32_t *out) {
+int pakka_read_u32_le(FILE *fp, uint32_t *out) {
     unsigned char b[4];
     if (fread(b, 1, 4, fp) != 4) {
         return -1;
@@ -69,7 +23,7 @@ int read_u32_le(FILE *fp, uint32_t *out) {
     return 0;
 }
 
-int write_u32_le(FILE *fp, uint32_t value) {
+int pakka_write_u32_le(FILE *fp, uint32_t value) {
     unsigned char b[4];
     b[0] = (unsigned char)(value & 0xFF);
     b[1] = (unsigned char)((value >> 8) & 0xFF);

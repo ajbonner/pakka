@@ -1,123 +1,469 @@
+#include <stdarg.h>
+
 #include "common.h"
+#include "pakka.h"
 
-/* UTF-8 box-drawing sequences for --tree output. Encoded as octal escapes
- * so the source file's text encoding doesn't change the emitted bytes. */
-#define PAK_TREE_ROOT         "."
-#define PAK_TREE_BRANCH_MID   "\342\224\234\342\224\200\342\224\200 "  /* "├── " */
-#define PAK_TREE_BRANCH_LAST  "\342\224\224\342\224\200\342\224\200 "  /* "└── " */
-#define PAK_TREE_PREFIX_MID   "\342\224\202   "                        /* "│   " */
-#define PAK_TREE_PREFIX_LAST  "    "
+/* err_fill: write the status, optional system error, operation, and a
+ * formatted message into err. Tolerates err == NULL — every public
+ * function must work when the caller passes NULL for err. Returns the
+ * status passed in so callsites can
+ * `return err_fill(err, PAKKA_ERR_FORMAT, ...);` directly. */
+static pakka_status_t err_fill(pakka_error_t *err,
+                               pakka_status_t status,
+                               pakka_error_domain_t domain,
+                               uint32_t system_code,
+                               const char *operation,
+                               const char *fmt, ...) {
+    int written;
+    size_t op_len;
+    va_list args;
 
-typedef struct Paktreenode_s {
-    char *name;
-    int is_dir;
-    struct Paktreenode_s *children;
-    struct Paktreenode_s *next;
-} Paktreenode_t;
+    if (err == NULL) {
+        return status;
+    }
 
-static int build_filename(char *dest, size_t dest_size,
-                          const char *basedir, const char *filename);
-#define ADD_FOLDER_MAX_DEPTH 100
-#define PAK_TREE_MAX_DEPTH   100
-static int add_folder_r(Pak_t *pak, char *path, int depth);
-static Paktreenode_t *create_tree_node(const char *name, int is_dir);
-static void insert_tree_path(Paktreenode_t *root, const char *path,
-                             uint32_t *dir_count, uint32_t *file_count);
-static Paktreenode_t *find_tree_dir(Paktreenode_t *parent, const char *name);
-static void insert_tree_child(Paktreenode_t *parent, Paktreenode_t *node);
-static void print_tree_children(Paktreenode_t *node, const char *prefix);
-static void print_tree_summary(uint32_t dir_count, uint32_t file_count);
-static void free_tree(Paktreenode_t *node);
-static void load_pakfile(Pak_t *pak);
-static void load_directory(Pak_t *pak);
+    err->status = status;
+    err->domain = domain;
+    err->system_code = system_code;
+    err->entry_name[0] = '\0';
+    err->entry_name_truncated = 0;
+    err->entry_index = (size_t)-1;
+    err->offset = 0;
+    err->length = 0;
+    err->message_truncated = 0;
+
+    if (operation == NULL) {
+        err->operation[0] = '\0';
+    } else {
+        op_len = strlen(operation);
+        if (op_len >= PAKKA_OPERATION_SIZE) {
+            op_len = PAKKA_OPERATION_SIZE - 1;
+        }
+        memcpy(err->operation, operation, op_len);
+        err->operation[op_len] = '\0';
+    }
+
+    if (fmt == NULL) {
+        err->message[0] = '\0';
+    } else {
+        va_start(args, fmt);
+        written = vsnprintf(err->message, PAKKA_MESSAGE_SIZE, fmt, args);
+        va_end(args);
+        if (written < 0) {
+            err->message[0] = '\0';
+        } else if ((size_t)written >= PAKKA_MESSAGE_SIZE) {
+            err->message_truncated = 1;
+        }
+    }
+
+    return status;
+}
+
+/* err_set_entry: layer entry-specific context onto an existing err
+ * (entry name, directory index, file offset, declared length). Call
+ * after err_fill so callers see a fully-populated error. */
+static void err_set_entry(pakka_error_t *err,
+                          const char *entry_name,
+                          size_t entry_index,
+                          uint64_t offset,
+                          uint64_t length) {
+    size_t n;
+
+    if (err == NULL) {
+        return;
+    }
+
+    err->entry_index = entry_index;
+    err->offset = offset;
+    err->length = length;
+
+    if (entry_name == NULL) {
+        err->entry_name[0] = '\0';
+        err->entry_name_truncated = 0;
+        return;
+    }
+
+    n = strlen(entry_name);
+    if (n >= PAKKA_ENTRY_NAME_SIZE) {
+        n = PAKKA_ENTRY_NAME_SIZE - 1;
+        err->entry_name_truncated = 1;
+    } else {
+        err->entry_name_truncated = 0;
+    }
+    memcpy(err->entry_name, entry_name, n);
+    err->entry_name[n] = '\0';
+}
+
+static pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err);
+static pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err);
 static uint64_t compute_payload_end(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
 static void init_pak_header(Pak_t *pak);
-static void write_pak_directory(Pak_t *pak);
+static pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err);
 static Pakfileentry_t *find_entry(Pak_t *pak, char *path);
-static int delete_entries(Pak_t *pak, Pakfileentry_t **entries, int num_entries);
-static int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd);
-static FILE *create_tmp_pakfile(void);
-static int in_array(Pakfileentry_t *entry, Pakfileentry_t **entries, int num_entries);
-static int is_unsafe_extract_path(const char *path);
+static pakka_status_t copy_between_paks(Pakfileentry_t *entry,
+                                        FILE *ffd, FILE *tfd,
+                                        uint32_t *new_offset_out,
+                                        pakka_error_t *err);
 
-static int is_new = 0;
-static char cur_pakpath[OS_PATH_MAX];
-static char new_pakpath[OS_PATH_MAX];
-/* L_tmpnam on MSVC is 20 bytes — not enough for "C:\Users\...\Temp\pakkaXXXXXX". */
-static char tmp_pakpath[OS_PATH_MAX];
-static FILE *fp;
+/* qsort comparator for an array of `const char *` (which qsort passes
+ * as pointers-to-pointers). */
+static int name_ptr_cmp(const void *a, const void *b) {
+    const char *const *aa = (const char *const *)a;
+    const char *const *bb = (const char *const *)b;
+    return strcmp(*aa, *bb);
+}
 
-Pak_t *open_pakfile(const char *pakpath, int writable) {
-    Pak_t *pak;
-    size_t pakpath_len = strlen(pakpath);
-
-    if (pakpath_len >= sizeof(cur_pakpath)) {
-        error_exit("Pak path too long: %s", pakpath);
+/* Used on the error paths of pakka_open and pakka_create, where the
+ * Pak_t may have a live fp (fopen succeeded, validation later failed)
+ * and a partial entry list. Distinct from pakka_close, which assumes
+ * a fully-constructed archive. */
+static void destroy_pak(Pak_t *pak) {
+    Pakfileentry_t *e;
+    Pakfileentry_t *next;
+    if (pak == NULL) {
+        return;
     }
-    memcpy(cur_pakpath, pakpath, pakpath_len + 1);
+    if (pak->fp != NULL) {
+        fclose(pak->fp);
+        pak->fp = NULL;
+    }
+    e = pak->head;
+    while (e != NULL) {
+        next = e->next;
+        free(e);
+        e = next;
+    }
+    free(pak);
+}
+
+/* Open-time duplicate-name validation. Builds a temporary sorted array
+ * of name pointers and scans for adjacent equals. O(n log n); the array
+ * is freed before pakka_open returns. */
+static pakka_status_t validate_no_duplicates(Pak_t *pak, pakka_error_t *err) {
+    Pakfileentry_t *entry;
+    const char **names;
+    size_t i = 0;
+    size_t j;
+
+    if (pak->num_entries <= 1) {
+        return PAKKA_OK;
+    }
+
+    names = malloc(sizeof(const char *) * pak->num_entries);
+    if (names == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open",
+                        "Cannot allocate duplicate-name scratch for %" PRIu32
+                        " entries", pak->num_entries);
+    }
+
+    for (entry = pak->head; entry != NULL && i < pak->num_entries;
+         entry = entry->next) {
+        names[i++] = entry->filename;
+    }
+
+    /* qsort instead of insertion sort: PAKFILE_MAX_ENTRIES = 1,048,576
+     * makes O(n^2) untenable for hostile inputs. The comparator wraps
+     * strcmp so we work on `const char **` rather than `char *`. */
+    qsort(names, i, sizeof(const char *), name_ptr_cmp);
+
+    for (j = 1; j < i; j++) {
+        if (strcmp(names[j - 1], names[j]) == 0) {
+            err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "open",
+                     "Pak contains duplicate entry name");
+            err_set_entry(err, names[j], (size_t)-1, 0, 0);
+            free((void *)names);
+            return PAKKA_ERR_DUPLICATE;
+        }
+    }
+
+    free((void *)names);
+    return PAKKA_OK;
+}
+
+pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode,
+                          pakka_archive_t **out, pakka_error_t *err) {
+    Pak_t *pak;
+    size_t path_len;
+    int writable;
+    pakka_status_t status;
+    int saved_errno;
+
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (path == NULL || out == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                        "pakka_open: path and out must be non-NULL");
+    }
+
+    if (mode != PAKKA_OPEN_READ && mode != PAKKA_OPEN_READ_WRITE) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                        "pakka_open: unknown mode value %d", (int)mode);
+    }
+    writable = (mode == PAKKA_OPEN_READ_WRITE) ? 1 : 0;
 
     pak = calloc(sizeof(Pak_t), 1);
     if (pak == NULL) {
-        error_exit("Cannot allocate Pak_t");
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open", "Cannot allocate pakka_archive_t");
     }
 
-    if (! (fp = fopen(pakpath, writable ? "r+b" : "rb"))) {
-        error_exit("Cannot open %s", pakpath);
+    path_len = strlen(path);
+    if (path_len >= sizeof(pak->cur_pakpath)) {
+        free(pak);
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open", "Pak path too long: %s", path);
     }
+    memcpy(pak->cur_pakpath, path, path_len + 1);
+
+    if (! (pak->fp = fopen(path, writable ? "r+b" : "rb"))) {
+        saved_errno = errno;
+        free(pak);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot open %s", path);
+    }
+    pak->writable = writable;
 
     /* Hold an exclusive non-blocking lock for mutating opens. Two
      * concurrent `pakka -af` invocations would otherwise both seek to
      * the same byte-tail, write payloads on top of each other, and
      * race the directory rewrite. The lock is released automatically
-     * when fp is closed in close_pakfile. */
-    if (writable && compat_try_exclusive_lock(fp) != 0) {
-        error_exit("Could not lock %s for writing "
-                   "(another pakka process may be modifying it)", pakpath);
+     * when pak->fp is closed. */
+    if (writable && pakka_compat_try_exclusive_lock(pak->fp) != 0) {
+        saved_errno = errno;
+        destroy_pak(pak);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Could not lock %s for writing "
+                        "(another pakka process may be modifying it)",
+                        path);
     }
 
-    load_pakfile(pak);
-    load_directory(pak);
+    status = load_pakfile(pak, err);
+    if (status != PAKKA_OK) {
+        destroy_pak(pak);
+        return status;
+    }
 
-    return pak;
+    status = load_directory(pak, err);
+    if (status != PAKKA_OK) {
+        destroy_pak(pak);
+        return status;
+    }
+
+    status = validate_no_duplicates(pak, err);
+    if (status != PAKKA_OK) {
+        destroy_pak(pak);
+        return status;
+    }
+
+    *out = pak;
+    return PAKKA_OK;
 }
 
-Pak_t *create_pakfile(const char *pakpath) {
+pakka_status_t pakka_create(const char *path, pakka_format_t format,
+                            unsigned flags,
+                            pakka_archive_t **out, pakka_error_t *err) {
     Pak_t *pak;
     struct stat sb;
-    size_t pakpath_len = strlen(pakpath);
+    size_t path_len;
+    int saved_errno;
 
-    if (pakpath_len >= sizeof(new_pakpath)) {
-        error_exit("Pak path too long: %s", pakpath);
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (path == NULL || out == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "create",
+                        "pakka_create: path and out must be non-NULL");
+    }
+
+    if (flags != PAKKA_CREATE_DEFAULT) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "create",
+                        "pakka_create: unknown flag bits 0x%x", flags);
+    }
+
+    if (format == PAKKA_FORMAT_PK3) {
+        return err_fill(err, PAKKA_ERR_UNSUPPORTED, PAKKA_ERR_DOMAIN_NONE,
+                        0, "create",
+                        "PK3 format not supported in this build");
+    }
+    if (format != PAKKA_FORMAT_PAK && format != PAKKA_FORMAT_AUTO) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "create",
+                        "pakka_create: unknown format %d", (int)format);
     }
 
     pak = calloc(sizeof(Pak_t), 1);
     if (pak == NULL) {
-        error_exit("Cannot allocate Pak_t");
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "create", "Cannot allocate pakka_archive_t");
     }
 
-    is_new = 1;
-    memcpy(new_pakpath, pakpath, pakpath_len + 1);
-
-    if (stat(pakpath, &sb) == 0) {
-        error_exit("File already exists at destination %s", pakpath);
+    path_len = strlen(path);
+    if (path_len >= sizeof(pak->new_pakpath)) {
+        free(pak);
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "create", "Pak path too long: %s", path);
     }
 
-    if (! (fp = compat_mkstemp_open(pakpath, "pakkaXXXXXX",
-                                    tmp_pakpath, sizeof(tmp_pakpath)))) {
-        error_exit("Cannot create temp pak file");
+    pak->is_new = 1;
+    pak->writable = 1;
+    memcpy(pak->new_pakpath, path, path_len + 1);
+
+    if (stat(path, &sb) == 0) {
+        free(pak);
+        return err_fill(err, PAKKA_ERR_EXISTS, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "create",
+                        "File already exists at destination %s", path);
+    }
+
+    /* L_tmpnam on MSVC is 20 bytes — not enough for "C:\Users\...\Temp\
+     * pakkaXXXXXX" — hence the dedicated OS_PATH_MAX buffer on Pak_t. */
+    if (! (pak->fp = pakka_compat_mkstemp_open(path, "pakkaXXXXXX",
+                                         pak->tmp_pakpath,
+                                         sizeof(pak->tmp_pakpath)))) {
+        saved_errno = errno;
+        free(pak);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "create",
+                        "Cannot create temp pak file for %s", path);
     }
 
     init_pak_header(pak);
 
-    return pak;
+    /* Write a valid empty PACK header to disk now so a caller that does
+     * pakka_create() + pakka_close() with no payload produces a
+     * well-formed pak (12-byte PACK header, diroffset=12, dirlength=0).
+     * The CLI -c path always calls add_files() → write_pak_directory()
+     * which overwrites this same header on disk, so behavior is
+     * unchanged there. */
+    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1
+        || pakka_write_u32_le(pak->fp, pak->diroffset) != 0
+        || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
+        saved_errno = errno;
+        destroy_pak(pak);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "create",
+                        "Cannot write initial pak header to %s", path);
+    }
+
+    *out = pak;
+    return PAKKA_OK;
 }
 
-int close_pakfile(Pak_t *pak) {
-    Pakfileentry_t *e = pak->head;
+pakka_status_t pakka_close(pakka_archive_t *pak, pakka_error_t *err) {
+    Pakfileentry_t *e;
     Pakfileentry_t *next;
     int close_rc = 0;
+    int saved_errno;
+    pakka_status_t status = PAKKA_OK;
 
+    if (pak == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "close",
+                        "pakka_close: archive must be non-NULL");
+    }
+
+    /* Implicit commit on close: callers that did pakka_add_file /
+     * pakka_delete without an explicit pakka_commit get the writes
+     * persisted (matches the legacy CLI's "add_files then close"
+     * pattern). A commit failure here is sticky: status is set so we
+     * still proceed with the fclose/free below (the handle must be
+     * released), but we MUST skip the is_new → new_pakpath rename so a
+     * broken create doesn't get published. */
+    if (pak->dirty) {
+        pakka_status_t commit_s = pakka_commit(pak, err);
+        if (commit_s != PAKKA_OK) {
+            status = commit_s;
+        }
+    }
+
+    /* fclose BEFORE rename and BEFORE free(pak): CRT fopen on Windows
+     * does not request FILE_SHARE_DELETE, so MoveFileEx would otherwise
+     * be blocked by the still-open handle. delete_entries may have
+     * already closed pak->fp on its own (it sets pak->fp = NULL), so
+     * tolerate that.
+     *
+     * Capture the close return: when pak->is_new=1, pak->fp IS the temp
+     * pak about to be renamed into place, and buffered write errors
+     * (disk full, NFS, quota) surface here, not on fwrite. Renaming a
+     * half-flushed temp over a non-existent destination would leave a
+     * corrupt pak. */
+    if (pak->fp != NULL) {
+        close_rc = fclose(pak->fp);
+        saved_errno = errno;
+        pak->fp = NULL;
+    } else {
+        saved_errno = 0;
+    }
+
+    if (pak->is_new && status == PAKKA_OK) {
+        if (close_rc != 0) {
+            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                     (uint32_t)saved_errno, "close",
+                     "Error finalizing pak %s (disk full or I/O error)",
+                     pak->new_pakpath);
+            status = PAKKA_ERR_IO;
+        } else {
+            uint32_t win32_code = 0;
+            int rrc = pakka_compat_rename_noreplace(pak->tmp_pakpath,
+                                              pak->new_pakpath,
+                                              &win32_code);
+            if (rrc != 0) {
+                /* Differentiate "destination already exists" from
+                 * generic I/O failure so callers can react. On POSIX
+                 * errno carries the answer (link()+unlink() under
+                 * the hood). On Windows pakka_compat_rename_noreplace
+                 * captures GetLastError into win32_code before
+                 * returning. */
+                saved_errno = errno;
+#ifdef _WIN32
+                if (win32_code == 0xB7u /* ERROR_ALREADY_EXISTS */) {
+                    err_fill(err, PAKKA_ERR_EXISTS,
+                             PAKKA_ERR_DOMAIN_WIN32, win32_code, "close",
+                             "Could not create pak %s "
+                             "(destination already exists)",
+                             pak->new_pakpath);
+                    status = PAKKA_ERR_EXISTS;
+                } else {
+                    err_fill(err, PAKKA_ERR_IO,
+                             PAKKA_ERR_DOMAIN_WIN32, win32_code, "close",
+                             "Could not rename %s to %s (Win32 error %u)",
+                             pak->tmp_pakpath, pak->new_pakpath,
+                             (unsigned)win32_code);
+                    status = PAKKA_ERR_IO;
+                }
+#else
+                if (saved_errno == EEXIST) {
+                    err_fill(err, PAKKA_ERR_EXISTS,
+                             PAKKA_ERR_DOMAIN_ERRNO,
+                             (uint32_t)saved_errno, "close",
+                             "Could not create pak %s "
+                             "(destination already exists)",
+                             pak->new_pakpath);
+                    status = PAKKA_ERR_EXISTS;
+                } else {
+                    err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                             (uint32_t)saved_errno, "close",
+                             "Could not rename %s to %s",
+                             pak->tmp_pakpath, pak->new_pakpath);
+                    status = PAKKA_ERR_IO;
+                }
+                (void)win32_code;
+#endif
+            }
+        }
+    }
+
+    e = pak->head;
     while (e != NULL) {
         next = e->next;
         free(e);
@@ -126,72 +472,85 @@ int close_pakfile(Pak_t *pak) {
 
     free(pak);
 
-    /* fclose BEFORE rename: CRT fopen on Windows does not request
-     * FILE_SHARE_DELETE, so MoveFileEx would otherwise be blocked by
-     * the still-open handle. delete_entries may have already closed
-     * fp on its own (it sets fp = NULL), so tolerate that.
-     *
-     * Capture the close return: when is_new=1, fp IS the temp pak
-     * about to be renamed into place, and buffered write errors
-     * (disk full, NFS, quota) surface here, not on fwrite. Renaming
-     * a half-flushed temp over a non-existent destination would
-     * leave a corrupt pak. */
-    if (fp != NULL) {
-        close_rc = fclose(fp);
-        fp = NULL;
-    }
-
-    if (is_new) {
-        if (close_rc != 0) {
-            error_exit("Error finalizing pak %s "
-                       "(disk full or I/O error)", new_pakpath);
-        }
-        /* No-replace semantics: between create_pakfile's stat() check
-         * and now another process may have dropped a file at the
-         * destination. Atomically refuse to overwrite rather than
-         * silently clobbering. */
-        if (compat_rename_noreplace(tmp_pakpath, new_pakpath) != 0) {
-            error_exit("Could not create pak %s (destination may already exist)",
-                       new_pakpath);
-        }
-    }
-
-    return 0;
+    return status;
 }
 
-void load_pakfile(Pak_t *pak) {
+pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
     long size;
+    int saved_errno;
 
     /* Capture the actual file size up front so every bounds check below
      * compares against ground truth rather than self-reported header
      * values. */
-    if (fseek(fp, 0L, SEEK_END) != 0) {
-        error_exit("Cannot seek pak file");
+    if (fseek(pak->fp, 0L, SEEK_END) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot seek pak file");
     }
-    size = ftell(fp);
+    size = ftell(pak->fp);
     if (size < 0) {
-        error_exit("Cannot determine pak file size");
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot determine pak file size");
     }
     pak->file_size = (uint64_t)size;
 
-    rewind(fp);
-    if (fread(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
-        || read_u32_le(fp, &pak->diroffset) != 0
-        || read_u32_le(fp, &pak->dirlength) != 0) {
-        error_exit("Cannot read pak header");
+    /* Read the signature first and classify the format before fetching
+     * the rest of the header. A 4-byte ZIP magic should report
+     * PAKKA_ERR_UNSUPPORTED rather than I/O-truncation on the unread
+     * diroffset/dirlength fields. */
+    rewind(pak->fp);
+    if (fread(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot read pak signature");
+    }
+
+    /* Report PK3/ZIP archives with PAKKA_ERR_UNSUPPORTED rather than
+     * the generic FORMAT error so callers can distinguish "we know what
+     * this is but don't support it yet" from "we don't recognize the
+     * bytes at all". Covers the three common ZIP signatures:
+     *   PK\3\4  local file header (most ZIPs start with this)
+     *   PK\5\6  empty ZIP / end-of-central-directory only
+     *   PK\7\8  spanning marker
+     * PK3 read support is reserved-only — adding a real PK3 read path
+     * would flip these returns into an actual ZIP loader, but until
+     * then PAKKA_ERR_UNSUPPORTED is the honest answer. */
+    if (memcmp(pak->signature, "PK\x03\x04", PAKFILE_SIGNATURE_LEN) == 0
+        || memcmp(pak->signature, "PK\x05\x06", PAKFILE_SIGNATURE_LEN) == 0
+        || memcmp(pak->signature, "PK\x07\x08", PAKFILE_SIGNATURE_LEN) == 0) {
+        return err_fill(err, PAKKA_ERR_UNSUPPORTED,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                        "PK3/ZIP archives are not supported in this build");
     }
 
     if (memcmp(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN) != 0) {
-        error_exit("Not a pak file (bad signature)");
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open", "Not a pak file (bad signature)");
+    }
+
+    if (pakka_read_u32_le(pak->fp, &pak->diroffset) != 0
+        || pakka_read_u32_le(pak->fp, &pak->dirlength) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot read pak header (diroffset/dirlength)");
     }
 
     if ((pak->dirlength % PAKFILE_DIR_ENTRY_SIZE) != 0) {
-        error_exit("Pak header is corrupt (dirlength not a multiple of %d)",
-                   PAKFILE_DIR_ENTRY_SIZE);
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open",
+                        "Pak header is corrupt (dirlength not a multiple of %d)",
+                        PAKFILE_DIR_ENTRY_SIZE);
     }
 
     if (pak->diroffset < PAKFILE_HEADER_SIZE) {
-        error_exit("Pak header is corrupt (diroffset inside header)");
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open",
+                        "Pak header is corrupt (diroffset inside header)");
     }
 
     /* Guard the diroffset+dirlength sum against u32 wrap, then check it
@@ -199,25 +558,32 @@ void load_pakfile(Pak_t *pak) {
      * overflow risk on the addition itself. */
     if ((uint64_t)pak->dirlength > pak->file_size
         || (uint64_t)pak->diroffset > pak->file_size - pak->dirlength) {
-        error_exit("Pak header is corrupt (directory extends past EOF)");
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open",
+                        "Pak header is corrupt (directory extends past EOF)");
     }
 
     pak->num_entries = pak->dirlength / PAKFILE_DIR_ENTRY_SIZE;
 
     if (pak->num_entries > PAKFILE_MAX_ENTRIES) {
-        error_exit("Pak has too many entries (%" PRIu32 ", max %u)",
-                   pak->num_entries, PAKFILE_MAX_ENTRIES);
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open",
+                        "Pak has too many entries (%" PRIu32 ", max %u)",
+                        pak->num_entries, PAKFILE_MAX_ENTRIES);
     }
+
+    return PAKKA_OK;
 }
 
-void load_directory(Pak_t *pak) {
+pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *current = NULL;
     Pakfileentry_t *last = NULL;
     uint32_t i;
     uint64_t entry_pos;
+    int saved_errno;
 
     if (pak->num_entries == 0) {
-        return;
+        return PAKKA_OK;
     }
 
     for (i = 1; i <= pak->num_entries; i++) {
@@ -227,19 +593,34 @@ void load_directory(Pak_t *pak) {
         entry_pos = (uint64_t)pak->diroffset + (uint64_t)pak->dirlength
                     - (uint64_t)i * PAKFILE_DIR_ENTRY_SIZE;
 
-        if (fseek(fp, (long)entry_pos, SEEK_SET) != 0) {
-            error_exit("Cannot seek to pak directory entry %" PRIu32, i);
+        if (fseek(pak->fp, (long)entry_pos, SEEK_SET) != 0) {
+            saved_errno = errno;
+            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                     (uint32_t)saved_errno, "open",
+                     "Cannot seek to pak directory entry %" PRIu32, i);
+            err_set_entry(err, NULL, (size_t)i - 1, entry_pos, 0);
+            return PAKKA_ERR_IO;
         }
 
         current = calloc(1, sizeof(Pakfileentry_t));
         if (current == NULL) {
-            error_exit("Cannot allocate pak directory entry %" PRIu32, i);
+            err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "open",
+                     "Cannot allocate pak directory entry %" PRIu32, i);
+            err_set_entry(err, NULL, (size_t)i - 1, entry_pos, 0);
+            return PAKKA_ERR_NOMEM;
         }
 
-        if (fread(current->filename, PAKFILE_PATH_MAX, 1, fp) != 1
-            || read_u32_le(fp, &current->offset) != 0
-            || read_u32_le(fp, &current->length) != 0) {
-            error_exit("Cannot read pak directory entry %" PRIu32, i);
+        if (fread(current->filename, PAKFILE_PATH_MAX, 1, pak->fp) != 1
+            || pakka_read_u32_le(pak->fp, &current->offset) != 0
+            || pakka_read_u32_le(pak->fp, &current->length) != 0) {
+            saved_errno = errno;
+            free(current);
+            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                     (uint32_t)saved_errno, "open",
+                     "Cannot read pak directory entry %" PRIu32, i);
+            err_set_entry(err, NULL, (size_t)i - 1, entry_pos, 0);
+            return PAKKA_ERR_IO;
         }
 
         /* The on-disk filename is exactly PAKFILE_PATH_MAX bytes with no
@@ -255,9 +636,16 @@ void load_directory(Pak_t *pak) {
         if (current->offset < PAKFILE_HEADER_SIZE
             || (uint64_t)current->length > pak->file_size
             || (uint64_t)current->offset > pak->file_size - current->length) {
-            error_exit("Pak entry %" PRIu32 " bytes out of range "
-                       "(offset=%" PRIu32 ", length=%" PRIu32 ")",
-                       i, current->offset, current->length);
+            err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "open",
+                     "Pak entry %" PRIu32 " bytes out of range "
+                     "(offset=%" PRIu32 ", length=%" PRIu32 ")",
+                     i, current->offset, current->length);
+            err_set_entry(err, current->filename, (size_t)i - 1,
+                          (uint64_t)current->offset,
+                          (uint64_t)current->length);
+            free(current);
+            return PAKKA_ERR_FORMAT;
         }
 
         if (last != NULL) {
@@ -265,405 +653,28 @@ void load_directory(Pak_t *pak) {
         }
 
         last = current;
+        /* Publish the partial chain on every iteration so destroy_pak()
+         * can free it if a later entry fails. Without this, destroy_pak
+         * walks pak->head (still NULL) and leaks the prefix. */
+        pak->head = last;
     }
 
-    pak->head = last;
+    return PAKKA_OK;
 }
 
-void list_files(Pak_t *pak) {
-    Pakfileentry_t *current = pak->head;
 
-    if (current == NULL) {
-        printf("Pak is empty\n");
-        return;
-    }
 
-    do {
-        fprint_sanitized(stdout, current->filename);
-        printf(" (%" PRIu32 " bytes)\n", current->length);
-    } while ((current = current->next) != NULL);
-}
 
-void list_files_tree(Pak_t *pak) {
-    Pakfileentry_t *current = pak->head;
-    Paktreenode_t *root = create_tree_node(PAK_TREE_ROOT, 1);
-    uint32_t dir_count = 0;
-    uint32_t file_count = 0;
 
-    printf("%s\n", PAK_TREE_ROOT);
 
-    if (current != NULL) {
-        do {
-            insert_tree_path(root, current->filename, &dir_count, &file_count);
-        } while ((current = current->next) != NULL);
 
-        print_tree_children(root, "");
-    }
 
-    print_tree_summary(dir_count, file_count);
-    free_tree(root);
-}
 
-Paktreenode_t *create_tree_node(const char *name, int is_dir) {
-    Paktreenode_t *node = calloc(1, sizeof(Paktreenode_t));
-    size_t name_len;
 
-    if (node == NULL) {
-        error_exit("Cannot allocate tree node");
-    }
-    name_len = strlen(name);
-    node->name = malloc(name_len + 1);
-    if (node->name == NULL) {
-        error_exit("Cannot allocate tree node name");
-    }
-    memcpy(node->name, name, name_len + 1);
-    node->is_dir = is_dir;
 
-    return node;
-}
 
-void insert_tree_path(Paktreenode_t *root, const char *path,
-                      uint32_t *dir_count, uint32_t *file_count) {
-    char *path_copy;
-    char *component;
-    char *next;
-    Paktreenode_t *parent = root;
-    Paktreenode_t *dir;
-    int depth = 0;
 
-    if (path[0] == '\0') {
-        return;
-    }
 
-    path_copy = compat_strdup(path);
-    component = strtok(path_copy, "/");
-
-    while (component != NULL) {
-        next = strtok(NULL, "/");
-
-        /* Cap nesting at the same limit add_folder uses. A pak with
-         * thousands of nested directory entries would stack-overflow
-         * print_tree_children below. */
-        if (depth >= PAK_TREE_MAX_DEPTH) {
-            error_exit("Pak directory nesting exceeds %d levels at '%s'",
-                       PAK_TREE_MAX_DEPTH, path);
-        }
-
-        if (next == NULL) {
-            insert_tree_child(parent, create_tree_node(component, 0));
-            (*file_count)++;
-        } else {
-            dir = find_tree_dir(parent, component);
-            if (dir == NULL) {
-                dir = create_tree_node(component, 1);
-                insert_tree_child(parent, dir);
-                (*dir_count)++;
-            }
-            parent = dir;
-            depth++;
-        }
-
-        component = next;
-    }
-
-    free(path_copy);
-}
-
-Paktreenode_t *find_tree_dir(Paktreenode_t *parent, const char *name) {
-    Paktreenode_t *current = parent->children;
-
-    while (current != NULL) {
-        if (current->is_dir && strcmp(current->name, name) == 0) {
-            return current;
-        }
-        current = current->next;
-    }
-
-    return NULL;
-}
-
-void insert_tree_child(Paktreenode_t *parent, Paktreenode_t *node) {
-    Paktreenode_t *current = parent->children;
-    Paktreenode_t *previous = NULL;
-
-    while (current != NULL && strcmp(current->name, node->name) <= 0) {
-        previous = current;
-        current = current->next;
-    }
-
-    if (previous == NULL) {
-        node->next = parent->children;
-        parent->children = node;
-    } else {
-        node->next = previous->next;
-        previous->next = node;
-    }
-}
-
-void print_tree_children(Paktreenode_t *node, const char *prefix) {
-    Paktreenode_t *current = node->children;
-    char *next_prefix;
-    const char *branch;
-    const char *prefix_suffix;
-
-    while (current != NULL) {
-        branch        = current->next == NULL ? PAK_TREE_BRANCH_LAST : PAK_TREE_BRANCH_MID;
-        prefix_suffix = current->next == NULL ? PAK_TREE_PREFIX_LAST : PAK_TREE_PREFIX_MID;
-
-        printf("%s%s", prefix, branch);
-        fprint_sanitized(stdout, current->name);
-        putchar('\n');
-
-        if (current->is_dir) {
-            size_t next_size = strlen(prefix) + strlen(prefix_suffix) + 1;
-            next_prefix = malloc(next_size);
-            if (next_prefix == NULL) {
-                error_exit("Cannot allocate tree prefix");
-            }
-            snprintf(next_prefix, next_size, "%s%s", prefix, prefix_suffix);
-            print_tree_children(current, next_prefix);
-            free(next_prefix);
-        }
-
-        current = current->next;
-    }
-}
-
-void print_tree_summary(uint32_t dir_count, uint32_t file_count) {
-    printf("\n%" PRIu32 " %s, %" PRIu32 " %s\n",
-           dir_count,
-           dir_count == 1 ? "directory" : "directories",
-           file_count,
-           file_count == 1 ? "file" : "files");
-}
-
-void free_tree(Paktreenode_t *node) {
-    Paktreenode_t *current = node;
-    Paktreenode_t *next;
-
-    while (current != NULL) {
-        next = current->next;
-        free_tree(current->children);
-        free(current->name);
-        free(current);
-        current = next;
-    }
-}
-
-int add_files(Pak_t *pak, char **paths, int path_count) {
-    int i;
-
-    for (i = 0; i < path_count; i++) {
-        if (add_to_pak(pak, paths[i]) != 0) {
-            error_exit("Could not add %s to pak", paths[i]);
-        }
-    }
-
-    write_pak_directory(pak);
-
-    return 0;
-}
-
-int add_to_pak(Pak_t *pak, char* path) {
-    struct stat sb;
-
-    /* Reject symlinks (POSIX) and reparse points / junctions (Windows)
-     * BEFORE the regular stat-based dispatch so a junction pointing
-     * outside the user's intended source tree can't pull data in. */
-    if (compat_is_reparse_or_symlink(path)) {
-        error_exit_e(0,
-            "Refusing to add symlink/reparse point %s "
-            "(use the target path directly)", path);
-    }
-
-    if (compat_lstat(path, &sb) != 0) {
-        error_exit("Cannot add %s", path);
-    } else if (S_ISREG(sb.st_mode)) {
-        add_file(pak, path);
-    } else if (S_ISDIR(sb.st_mode)) {
-        add_folder(pak, path);
-    } else {
-        error_exit("Error adding %s: can only add regular files and folders", path);
-    }
-
-    return 0;
-}
-
-int add_file(Pak_t *pak, char *path) {
-    FILE *tfd;
-    int64_t size;
-    uint64_t append_offset;
-    Pakfileentry_t *tail;
-    Pakfileentry_t *entry;
-    char *bytes;
-    size_t path_len;
-
-    /* The on-disk filename field is PAKFILE_PATH_MAX bytes including its
-     * NUL terminator, so the longest legal name is PAKFILE_PATH_MAX-1
-     * bytes. Reject before the strcpy that would otherwise overwrite
-     * entry->offset / length / next on the heap. */
-    path_len = strlen(path);
-    if (path_len >= PAKFILE_PATH_MAX) {
-        error_exit("Path '%s' too long for pak entry (%zu bytes, max %d)",
-                   path, path_len, PAKFILE_PATH_MAX - 1);
-    }
-
-    /* Refuse to bake a name into the pak that pakka itself would refuse
-     * to extract: traversal sequences, drive prefixes, Windows reserved
-     * names, ADS colons, control bytes. Catches the case where the user
-     * passes an absolute path or `../foo` by mistake and otherwise
-     * produces a pak that's only extractable by tools that don't share
-     * pakka's hardening. */
-    if (is_unsafe_extract_path(path)) {
-        error_exit_e(0, "Refusing to add '%s': name is not safe to extract", path);
-    }
-
-    /* Quake's pak format permits duplicate entry names, but find_entry
-     * only ever returns the first match — every operation after a
-     * duplicate add is ambiguous. Reject up front. */
-    if (find_entry(pak, path) != NULL) {
-        error_exit("Entry '%s' already exists in pak", path);
-    }
-
-    /* All input is validated; print after so the diagnostic line
-     * doesn't appear for paths that we then reject. */
-    printf("Adding %s to pak\n", path);
-
-    if (! (tfd = fopen(path, "rb"))) {
-        error_exit("Cannot open %s", path);
-    }
-
-    size = filesize(tfd);
-    if (size < 0) {
-        error_exit("Cannot determine size of %s", path);
-    }
-    if ((uint64_t)size > UINT32_MAX) {
-        error_exit("File %s too large for pak format (%" PRId64
-                   " bytes, max %u)", path, size, UINT32_MAX);
-    }
-
-    entry = calloc(sizeof(Pakfileentry_t), 1);
-    if (entry == NULL) {
-        error_exit("Cannot allocate pak entry for %s", path);
-    }
-
-    /* Append at the highest byte-offset across all existing entries, not
-     * at the directory-order tail. Quake's pak0.pak has entries out of
-     * byte order and an orphan payload past the directory; trusting the
-     * directory-tail's offset+length would overwrite live data. */
-    tail = find_tail(pak);
-    if (tail == NULL) {
-        append_offset = PAKFILE_HEADER_SIZE;
-    } else {
-        append_offset = compute_payload_end(pak);
-    }
-
-    if (append_offset > UINT32_MAX - (uint64_t)size) {
-        error_exit("Pak would exceed 4 GiB after adding %s", path);
-    }
-
-    if (fseek(fp, (long)append_offset, SEEK_SET) != 0) {
-        error_exit("Cannot seek to append point in pak");
-    }
-
-    if (size > 0) {
-        /* Stream in fixed-size chunks. Avoids a malloc that scales with
-         * file size — large entries used to fail on 32-bit hosts and
-         * burn peak RSS proportional to the payload on 64-bit hosts. */
-        size_t remaining = (size_t)size;
-        size_t chunk;
-        bytes = malloc(PAKFILE_COPY_CHUNK);
-        if (bytes == NULL) {
-            error_exit("Cannot allocate copy buffer for %s", path);
-        }
-        while (remaining > 0) {
-            chunk = remaining > PAKFILE_COPY_CHUNK ? PAKFILE_COPY_CHUNK : remaining;
-            if (fread(bytes, 1, chunk, tfd) != chunk) {
-                int err = errno;
-                free(bytes);
-                error_exit_e(err, "Cannot read %s", path);
-            }
-            if (fwrite(bytes, 1, chunk, fp) != chunk) {
-                int err = errno;
-                free(bytes);
-                error_exit_e(err, "Could not add %s to pak", path);
-            }
-            remaining -= chunk;
-        }
-        free(bytes);
-    }
-
-    memcpy(entry->filename, path, path_len);
-    entry->filename[path_len] = '\0';
-    entry->length = (uint32_t)size;
-    entry->offset = (uint32_t)append_offset;
-
-    if (tail == NULL) {
-        pak->head = entry;
-    } else {
-        tail->next = entry;
-    }
-
-    fclose(tfd);
-
-    return 0;
-}
-
-int add_folder(Pak_t *pak, char *path) {
-    return add_folder_r(pak, path, 0);
-}
-
-int add_folder_r(Pak_t *pak, char *path, int depth) {
-    DIR *d;
-    struct dirent *dirp;
-    struct stat sb;
-    char tmp[OS_PATH_MAX];
-
-    if (depth >= ADD_FOLDER_MAX_DEPTH) {
-        error_exit("Directory nesting too deep at '%s' (max %d)",
-                   path, ADD_FOLDER_MAX_DEPTH);
-    }
-
-    if (! (d = opendir(path))) {
-        error_exit("Cannot open directory %s", path);
-    }
-
-    while ((dirp = readdir(d)) != NULL) {
-        if (strcmp(dirp->d_name, "..") == 0
-           || strcmp(dirp->d_name, ".") == 0) {
-            continue;
-        }
-
-        if (build_filename(tmp, sizeof(tmp), path, dirp->d_name) != 0) {
-            closedir(d);
-            error_exit_e(0, "Path too long: %s/%s", path, dirp->d_name);
-        }
-
-        /* Check for symlinks (POSIX) and reparse points / junctions
-         * (Windows) per entry. Skipping is the safer default;
-         * loud-failing would break legitimate trees that incidentally
-         * contain a symlink. */
-        if (compat_is_reparse_or_symlink(tmp)) {
-            fprintf(stderr, "Skipping symlink/reparse point %s\n", tmp);
-            continue;
-        }
-
-        if (compat_lstat(tmp, &sb) == 0) {
-            if (S_ISDIR(sb.st_mode)) {
-                add_folder_r(pak, tmp, depth + 1);
-            } else if (S_ISREG(sb.st_mode)) {
-                add_file(pak, tmp);
-            }
-        } else {
-            int stat_errno = errno;
-            closedir(d);
-            error_exit_e(stat_errno, "Couldn't stat %s", tmp);
-        }
-    }
-
-    closedir(d);
-    return 0;
-}
 
 /* Write a single pak entry's payload under dest_dir. The compat
  * helper does the path join, creates missing directories, and refuses
@@ -671,47 +682,6 @@ int add_folder_r(Pak_t *pak, char *path, int depth) {
  * an attacker who plants `models -> /tmp/outside` in dest_dir can't
  * redirect the write. Caller has already validated current->filename
  * for path-traversal characters. */
-static void extract_one_entry(Pakfileentry_t *current, const char *dest_dir) {
-    unsigned char *buffer;
-    FILE *tfd;
-
-    printf("Writing %" PRIu32 " bytes to %s/%s\n",
-           current->length, dest_dir, current->filename);
-
-    tfd = compat_open_extract_target(dest_dir, current->filename);
-    if (tfd == NULL) {
-        error_exit("Cannot open %s/%s for writing "
-                   "(symlink in path or filesystem error)",
-                   dest_dir, current->filename);
-    }
-
-    /* Zero-length entries: skip the I/O entirely (malloc(0) and fread/
-     * fwrite with size 0 are implementation-defined). The open above
-     * still materializes the empty file on disk. */
-    if (current->length > 0) {
-        if (fseek(fp, (long)current->offset, SEEK_SET) != 0) {
-            error_exit("Cannot seek to entry '%s' in pak", current->filename);
-        }
-        buffer = malloc(current->length);
-        if (buffer == NULL) {
-            error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
-                       current->length, current->filename);
-        }
-        if (fread(buffer, current->length, 1, fp) != 1) {
-            int err = errno;
-            free(buffer);
-            error_exit_e(err, "Cannot read entry '%s' from pak", current->filename);
-        }
-        if (fwrite(buffer, current->length, 1, tfd) != 1) {
-            int err = errno;
-            free(buffer);
-            error_exit_e(err, "Cannot write entry '%s'", current->filename);
-        }
-        free(buffer);
-    }
-
-    fclose(tfd);
-}
 
 /*
  * Two-pass extract:
@@ -719,7 +689,7 @@ static void extract_one_entry(Pakfileentry_t *current, const char *dest_dir) {
  *   Pass 1 (preflight): walk every entry, match against requested
  *   paths, run is_unsafe_extract_path on the selected ones, verify
  *   every requested path is found in the pak. No filesystem side
- *   effects. error_exit anywhere here leaves the destination dir
+ *   effects. pakka_die anywhere here leaves the destination dir
  *   untouched.
  *
  *   Pass 2 (write): walk the same entries, extract the ones flagged
@@ -729,119 +699,7 @@ static void extract_one_entry(Pakfileentry_t *current, const char *dest_dir) {
  * "safe/a" followed by "../etc/passwd" would write safe/a to disk
  * before bailing on the traversal entry.
  */
-void extract_files(Pak_t *pak, char *dest, char **paths, int path_count) {
-    Pakfileentry_t *current;
-    int *path_matched = NULL;
-    int *should_extract = NULL;
-    uint32_t idx;
-    int i, matched;
 
-    if (pak->head == NULL) {
-        if (path_count > 0) {
-            error_exit("Pak is empty; cannot extract %s", paths[0]);
-        }
-        printf("Pak is empty\n");
-        return;
-    }
-
-    if (pak->num_entries > 0) {
-        should_extract = calloc(pak->num_entries, sizeof(int));
-        if (should_extract == NULL) {
-            error_exit("Cannot allocate extract preflight buffer");
-        }
-    }
-    if (path_count > 0) {
-        path_matched = calloc(path_count, sizeof(int));
-        if (path_matched == NULL) {
-            error_exit("Cannot allocate path-match buffer");
-        }
-    }
-
-    /* Pass 1: preflight. */
-    idx = 0;
-    for (current = pak->head; current != NULL; current = current->next) {
-        if (idx >= pak->num_entries) {
-            error_exit("Pak directory linked list longer than num_entries");
-        }
-
-        if (path_count == 0) {
-            matched = 1;
-        } else {
-            matched = 0;
-            /* Don't break on first match: `pakka -xf foo a a` must
-             * mark both path_matched[] entries or the coverage check
-             * below spuriously errors on the duplicate. */
-            for (i = 0; i < path_count; i++) {
-                if (strcmp(current->filename, paths[i]) == 0) {
-                    matched = 1;
-                    path_matched[i] = 1;
-                }
-            }
-        }
-
-        if (matched) {
-            if (is_unsafe_extract_path(current->filename)) {
-                /* The unsafe name is going into a user-visible error
-                 * message — strip control bytes so it can't reflow
-                 * the terminal. */
-                char safe[PAKFILE_PATH_BUF];
-                sanitize_name(safe, sizeof(safe), current->filename);
-                error_exit_e(0,
-                    "Refusing to extract '%s': entry name would escape destination",
-                    safe);
-            }
-            should_extract[idx] = 1;
-        }
-        idx++;
-    }
-
-    if (path_count > 0) {
-        for (i = 0; i < path_count; i++) {
-            if (! path_matched[i]) {
-                error_exit("Cannot find %s in pak file", paths[i]);
-            }
-        }
-    }
-
-    /* Pass 2: write. compat_open_extract_target performs the dest_dir +
-     * rel_path join internally with per-component symlink rejection,
-     * so we don't precompute a flat destfile string. */
-    idx = 0;
-    for (current = pak->head; current != NULL; current = current->next) {
-        if (should_extract[idx]) {
-            extract_one_entry(current, dest);
-        }
-        idx++;
-    }
-
-    free(should_extract);
-    free(path_matched);
-}
-
-void delete_files(Pak_t *pak, char *paths[], int path_count) {
-    int i;
-    Pakfileentry_t *entry;
-    Pakfileentry_t **to_delete;
-
-    to_delete = calloc(sizeof(Pakfileentry_t *), path_count);
-    if (to_delete == NULL) {
-        error_exit("Cannot allocate delete-selection buffer");
-    }
-
-    for (i = 0; i < path_count; i++) {
-        if ((entry = find_entry(pak, paths[i])) != NULL) {
-            to_delete[i] = entry;
-        } else {
-            error_exit("Cannot find %s in pak file", paths[i]);
-        }
-    }
-
-    if (delete_entries(pak, to_delete, path_count) != 0) {
-        error_exit("Could not remove paths from pak file");
-    }
-
-    free(to_delete);
-}
 
 Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
     Pakfileentry_t *current;
@@ -857,8 +715,1129 @@ Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
             return current;
         }
     } while ((current = current->next) != NULL);
-    
+
     return NULL;
+}
+
+pakka_format_t pakka_format(const pakka_archive_t *archive) {
+    /* NULL archive returns AUTO as a sentinel — callers should check for
+     * AUTO before treating the result as authoritative. Any successfully
+     * opened archive is PAK in V1: PK3 returns PAKKA_ERR_UNSUPPORTED
+     * from pakka_create / pakka_open before any archive_t exists. */
+    if (archive == NULL) {
+        return PAKKA_FORMAT_AUTO;
+    }
+    return PAKKA_FORMAT_PAK;
+}
+
+size_t pakka_entry_count(const pakka_archive_t *archive) {
+    if (archive == NULL) {
+        return 0;
+    }
+    return (size_t)archive->num_entries;
+}
+
+pakka_status_t pakka_entry_at(const pakka_archive_t *archive, size_t index,
+                              const pakka_entry_t **out) {
+    Pakfileentry_t *current;
+    size_t i = 0;
+
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (archive == NULL || out == NULL) {
+        return PAKKA_ERR_INVALID_ARGUMENT;
+    }
+
+    if (index >= (size_t)archive->num_entries) {
+        return PAKKA_ERR_NOT_FOUND;
+    }
+
+    for (current = archive->head; current != NULL; current = current->next) {
+        if (i == index) {
+            *out = current;
+            return PAKKA_OK;
+        }
+        i++;
+    }
+
+    /* Should be unreachable given the num_entries guard above. */
+    return PAKKA_ERR_NOT_FOUND;
+}
+
+pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
+                                const char *entry_name,
+                                const pakka_entry_t **out) {
+    Pakfileentry_t *current;
+
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (archive == NULL || entry_name == NULL || out == NULL) {
+        return PAKKA_ERR_INVALID_ARGUMENT;
+    }
+
+    for (current = archive->head; current != NULL; current = current->next) {
+        if (strcmp(current->filename, entry_name) == 0) {
+            *out = current;
+            return PAKKA_OK;
+        }
+    }
+
+    return PAKKA_ERR_NOT_FOUND;
+}
+
+const char *pakka_entry_name(const pakka_entry_t *entry) {
+    if (entry == NULL) {
+        return NULL;
+    }
+    return entry->filename;
+}
+
+uint64_t pakka_entry_size(const pakka_entry_t *entry) {
+    if (entry == NULL) {
+        return 0;
+    }
+    return (uint64_t)entry->length;
+}
+
+uint64_t pakka_entry_offset(const pakka_entry_t *entry) {
+    if (entry == NULL) {
+        return 0;
+    }
+    return (uint64_t)entry->offset;
+}
+
+pakka_status_t pakka_open_entry(pakka_archive_t *archive,
+                                const char *entry_name,
+                                pakka_reader_t **out,
+                                pakka_error_t *err) {
+    const pakka_entry_t *entry = NULL;
+    pakka_reader_t *reader;
+    pakka_status_t s;
+
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (archive == NULL || entry_name == NULL || out == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                        "pakka_open_entry: archive, entry_name, "
+                        "and out must be non-NULL");
+    }
+    if (archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                        "pakka_open_entry: archive has no live "
+                        "file handle (closed or commit-failed)");
+    }
+
+    s = pakka_find_entry(archive, entry_name, &entry);
+    if (s != PAKKA_OK) {
+        err_fill(err, s, PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                 s == PAKKA_ERR_NOT_FOUND
+                   ? "Entry not found: %s"
+                   : "pakka_find_entry failed for %s",
+                 entry_name);
+        /* Populate the structured entry-name field so callers can
+         * format diagnostics without re-parsing message. */
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return s;
+    }
+
+    reader = calloc(1, sizeof(pakka_reader_t));
+    if (reader == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open_entry",
+                        "Cannot allocate pakka_reader_t for %s",
+                        entry_name);
+    }
+
+    reader->archive = archive;
+    reader->next_offset = (uint64_t)entry->offset;
+    reader->remaining = (uint64_t)entry->length;
+
+    *out = reader;
+    return PAKKA_OK;
+}
+
+pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
+                                 size_t len, size_t *nread,
+                                 pakka_error_t *err) {
+    size_t chunk;
+    size_t got;
+    int saved_errno;
+
+    if (nread != NULL) {
+        *nread = 0;
+    }
+    if (reader == NULL || buf == NULL || nread == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "reader_read",
+                        "pakka_reader_read: reader, buf, "
+                        "and nread must be non-NULL");
+    }
+    if (reader->archive == NULL || reader->archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "reader_read",
+                        "pakka_reader_read: backing archive has no "
+                        "live file handle");
+    }
+
+    if (reader->remaining == 0 || len == 0) {
+        return PAKKA_OK;            /* clean EOF (or no-op read) */
+    }
+
+    chunk = (len < reader->remaining) ? len : (size_t)reader->remaining;
+
+    /* Re-seek every read: multiple readers may share the archive's
+     * single FILE *, so a different reader's seek between calls would
+     * otherwise leave this one mispositioned. fseek is cheap; coherence
+     * is the priority. */
+    if (fseek(reader->archive->fp, (long)reader->next_offset, SEEK_SET) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "reader_read",
+                        "Cannot seek to entry byte offset %" PRIu64,
+                        reader->next_offset);
+    }
+
+    got = fread(buf, 1, chunk, reader->archive->fp);
+    if (got != chunk) {
+        saved_errno = errno;
+        *nread = got;
+        reader->next_offset += (uint64_t)got;
+        reader->remaining -= (uint64_t)got;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "reader_read",
+                        "Short read at offset %" PRIu64
+                        " (got %zu of %zu)",
+                        reader->next_offset - (uint64_t)got, got, chunk);
+    }
+
+    *nread = got;
+    reader->next_offset += (uint64_t)got;
+    reader->remaining -= (uint64_t)got;
+    return PAKKA_OK;
+}
+
+void pakka_reader_close(pakka_reader_t *reader) {
+    if (reader == NULL) {
+        return;
+    }
+    /* The archive owns the FILE*; the reader only holds a re-seek
+     * position. No fclose here. */
+    free(reader);
+}
+
+pakka_status_t pakka_add_file(pakka_archive_t *archive,
+                              const char *source_path,
+                              const char *entry_name,
+                              pakka_error_t *err) {
+    FILE *src_fp = NULL;
+    int64_t src_size;
+    uint64_t append_offset;
+    Pakfileentry_t *tail;
+    Pakfileentry_t *entry = NULL;
+    char *bytes = NULL;
+    size_t name_len;
+    size_t remaining;
+    int saved_errno;
+
+    if (archive == NULL || source_path == NULL || entry_name == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "add_file",
+                        "pakka_add_file: archive, source_path, "
+                        "and entry_name must be non-NULL");
+    }
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "add_file",
+                        "pakka_add_file: archive not writable "
+                        "or no live file handle");
+    }
+
+    /* On-disk filename field is PAKFILE_PATH_MAX bytes; longest legal
+     * name is one less. Reject before strcpy that would overwrite
+     * adjacent struct fields. */
+    name_len = strlen(entry_name);
+    if (name_len >= PAKFILE_PATH_MAX) {
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "Entry name too long for pak (%zu bytes, max %d)",
+                 name_len, PAKFILE_PATH_MAX - 1);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_LIMIT;
+    }
+
+    /* Refuse to bake an entry name that pakka itself would refuse to
+     * extract. Catches absolute paths, traversal, Windows reserved
+     * names, control bytes. */
+    if (pakka_unsafe_entry_name(entry_name)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "Entry name is not safe to extract: %s", entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+
+    if (find_entry(archive, (char *)entry_name) != NULL) {
+        err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "Entry already exists in pak: %s", entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_DUPLICATE;
+    }
+
+    /* Source-side hardening: reject symlink/reparse points and any
+     * non-regular file (FIFO, socket, char/block device). Mirrors the
+     * checks legacy add_folder_r runs on every recursive entry; a
+     * direct pakka_add_file caller needs the same. */
+    if (pakka_compat_is_reparse_or_symlink(source_path)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "Refusing symlink/reparse source: %s", source_path);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+    {
+        struct stat sb;
+        if (pakka_compat_lstat(source_path, &sb) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "add_file",
+                            "Cannot stat source %s", source_path);
+        }
+        if (!S_ISREG(sb.st_mode)) {
+            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
+                     0, "add_file",
+                     "Source is not a regular file: %s", source_path);
+            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_UNSAFE_NAME;
+        }
+    }
+
+    src_fp = fopen(source_path, "rb");
+    if (src_fp == NULL) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "add_file",
+                        "Cannot open source %s", source_path);
+    }
+
+    src_size = pakka_filesize(src_fp);
+    if (src_size < 0) {
+        saved_errno = errno;
+        fclose(src_fp);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "add_file",
+                        "Cannot determine size of %s", source_path);
+    }
+    if ((uint64_t)src_size > UINT32_MAX) {
+        fclose(src_fp);
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "File too large for pak format (%" PRId64 " bytes, max %u)",
+                 src_size, UINT32_MAX);
+        err_set_entry(err, entry_name, (size_t)-1, 0, (uint64_t)src_size);
+        return PAKKA_ERR_LIMIT;
+    }
+
+    /* Append at the highest byte-offset across all existing entries, not
+     * the directory-order tail. Quake's pak0.pak has out-of-order
+     * payloads and an orphan blob past the directory; the directory
+     * tail's offset+length would overwrite live data. */
+    tail = find_tail(archive);
+    append_offset = (tail == NULL)
+                  ? (uint64_t)PAKFILE_HEADER_SIZE
+                  : compute_payload_end(archive);
+
+    if (append_offset > UINT32_MAX - (uint64_t)src_size) {
+        fclose(src_fp);
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_file",
+                 "Pak would exceed 4 GiB after adding %s", source_path);
+        err_set_entry(err, entry_name, (size_t)-1, append_offset,
+                      (uint64_t)src_size);
+        return PAKKA_ERR_LIMIT;
+    }
+
+    /* Allocate the entry node BEFORE touching the on-disk archive. A
+     * NOMEM here leaves the pak file unmodified; an in-progress fwrite
+     * failure would leave orphan bytes either way, but at least an
+     * allocation failure here can't desynchronize the in-memory entry
+     * list from what's on disk. */
+    entry = calloc(1, sizeof(Pakfileentry_t));
+    if (entry == NULL) {
+        fclose(src_fp);
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "add_file",
+                        "Cannot allocate pak entry for %s", entry_name);
+    }
+    memcpy(entry->filename, entry_name, name_len);
+    entry->filename[name_len] = '\0';
+    entry->offset = (uint32_t)append_offset;
+    entry->length = (uint32_t)src_size;
+
+    if (fseek(archive->fp, (long)append_offset, SEEK_SET) != 0) {
+        saved_errno = errno;
+        fclose(src_fp);
+        free(entry);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "add_file",
+                        "Cannot seek to append point in pak");
+    }
+
+    if (src_size > 0) {
+        bytes = malloc(PAKFILE_COPY_CHUNK);
+        if (bytes == NULL) {
+            fclose(src_fp);
+            free(entry);
+            return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                            0, "add_file",
+                            "Cannot allocate copy buffer for %s",
+                            source_path);
+        }
+        remaining = (size_t)src_size;
+        while (remaining > 0) {
+            size_t chunk = remaining > PAKFILE_COPY_CHUNK
+                         ? PAKFILE_COPY_CHUNK : remaining;
+            if (fread(bytes, 1, chunk, src_fp) != chunk) {
+                saved_errno = errno;
+                free(bytes);
+                fclose(src_fp);
+                free(entry);
+                return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "add_file",
+                                "Cannot read %s", source_path);
+            }
+            if (fwrite(bytes, 1, chunk, archive->fp) != chunk) {
+                saved_errno = errno;
+                free(bytes);
+                fclose(src_fp);
+                free(entry);
+                return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "add_file",
+                                "Cannot append %s to pak", entry_name);
+            }
+            remaining -= chunk;
+        }
+        free(bytes);
+    }
+    fclose(src_fp);
+
+    if (tail == NULL) {
+        archive->head = entry;
+    } else {
+        tail->next = entry;
+    }
+    archive->num_entries++;
+    archive->dirty = 1;
+
+    return PAKKA_OK;
+}
+
+pakka_status_t pakka_add_memory(pakka_archive_t *archive,
+                                const char *entry_name,
+                                const void *data, size_t len,
+                                pakka_error_t *err) {
+    Pakfileentry_t *tail;
+    Pakfileentry_t *entry;
+    uint64_t append_offset;
+    size_t name_len;
+    int saved_errno;
+
+    if (archive == NULL || entry_name == NULL || (data == NULL && len > 0)) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "add_memory",
+                        "pakka_add_memory: archive and entry_name must "
+                        "be non-NULL; data may be NULL only when len == 0");
+    }
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "add_memory",
+                        "pakka_add_memory: archive not writable "
+                        "or no live file handle");
+    }
+
+    name_len = strlen(entry_name);
+    if (name_len >= PAKFILE_PATH_MAX) {
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_memory",
+                 "Entry name too long for pak (%zu bytes, max %d)",
+                 name_len, PAKFILE_PATH_MAX - 1);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_LIMIT;
+    }
+    if (pakka_unsafe_entry_name(entry_name)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_memory",
+                 "Entry name is not safe to extract: %s", entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+    if (find_entry(archive, (char *)entry_name) != NULL) {
+        err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_memory",
+                 "Entry already exists in pak: %s", entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_DUPLICATE;
+    }
+    if (len > UINT32_MAX) {
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_memory",
+                 "Payload too large for pak format (%zu bytes, max %u)",
+                 len, UINT32_MAX);
+        err_set_entry(err, entry_name, (size_t)-1, 0, (uint64_t)len);
+        return PAKKA_ERR_LIMIT;
+    }
+
+    tail = find_tail(archive);
+    append_offset = (tail == NULL)
+                  ? (uint64_t)PAKFILE_HEADER_SIZE
+                  : compute_payload_end(archive);
+    if (append_offset > UINT32_MAX - (uint64_t)len) {
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "add_memory",
+                 "Pak would exceed 4 GiB after adding %s", entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, append_offset,
+                      (uint64_t)len);
+        return PAKKA_ERR_LIMIT;
+    }
+
+    entry = calloc(1, sizeof(Pakfileentry_t));
+    if (entry == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "add_memory",
+                        "Cannot allocate pak entry for %s", entry_name);
+    }
+    memcpy(entry->filename, entry_name, name_len);
+    entry->filename[name_len] = '\0';
+    entry->offset = (uint32_t)append_offset;
+    entry->length = (uint32_t)len;
+
+    if (fseek(archive->fp, (long)append_offset, SEEK_SET) != 0) {
+        saved_errno = errno;
+        free(entry);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "add_memory",
+                        "Cannot seek to append point in pak");
+    }
+    if (len > 0 && fwrite(data, 1, len, archive->fp) != len) {
+        saved_errno = errno;
+        free(entry);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "add_memory",
+                        "Cannot append memory payload for %s", entry_name);
+    }
+
+    if (tail == NULL) {
+        archive->head = entry;
+    } else {
+        tail->next = entry;
+    }
+    archive->num_entries++;
+    archive->dirty = 1;
+
+    return PAKKA_OK;
+}
+
+pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
+                                      const char *entry_name,
+                                      void **data, size_t *len,
+                                      pakka_error_t *err) {
+    pakka_reader_t *reader = NULL;
+    const pakka_entry_t *entry = NULL;
+    pakka_status_t s;
+    unsigned char *buf;
+    uint64_t total;
+    size_t nread;
+    size_t consumed = 0;
+
+    if (data != NULL) {
+        *data = NULL;
+    }
+    if (len != NULL) {
+        *len = 0;
+    }
+    if (archive == NULL || entry_name == NULL
+        || data == NULL || len == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "read_entry_alloc",
+                        "pakka_read_entry_alloc: archive, entry_name, "
+                        "data, and len must be non-NULL");
+    }
+
+    s = pakka_find_entry(archive, entry_name, &entry);
+    if (s != PAKKA_OK) {
+        err_fill(err, s, PAKKA_ERR_DOMAIN_NONE, 0, "read_entry_alloc",
+                 s == PAKKA_ERR_NOT_FOUND
+                   ? "Entry not found: %s"
+                   : "pakka_find_entry failed for %s",
+                 entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return s;
+    }
+    total = pakka_entry_size(entry);
+    if (total == 0) {
+        return PAKKA_OK;        /* *data stays NULL, *len stays 0 */
+    }
+    if (total > (uint64_t)SIZE_MAX) {
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "read_entry_alloc",
+                        "Entry size exceeds SIZE_MAX on this host");
+    }
+
+    buf = malloc((size_t)total);
+    if (buf == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "read_entry_alloc",
+                        "Cannot allocate %" PRIu64 " bytes for %s",
+                        total, entry_name);
+    }
+
+    s = pakka_open_entry(archive, entry_name, &reader, err);
+    if (s != PAKKA_OK) {
+        free(buf);
+        return s;
+    }
+    while (consumed < (size_t)total) {
+        s = pakka_reader_read(reader, buf + consumed,
+                              (size_t)total - consumed, &nread, err);
+        if (s != PAKKA_OK) {
+            free(buf);
+            pakka_reader_close(reader);
+            return s;
+        }
+        if (nread == 0) {
+            free(buf);
+            pakka_reader_close(reader);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "read_entry_alloc",
+                            "Short stream: expected %" PRIu64
+                            " bytes, got %zu", total, consumed);
+        }
+        consumed += nread;
+    }
+    pakka_reader_close(reader);
+
+    *data = buf;
+    *len = consumed;
+    return PAKKA_OK;
+}
+
+void pakka_free(void *ptr) {
+    /* Thin wrapper around free() so callers don't cross the C-runtime
+     * boundary on Windows when the library and consumer happen to link
+     * different CRTs. POSIX consumers can use free() interchangeably,
+     * but using pakka_free everywhere makes the contract portable. */
+    free(ptr);
+}
+
+pakka_status_t pakka_delete(pakka_archive_t *archive,
+                            const char *entry_name,
+                            pakka_error_t *err) {
+    Pakfileentry_t *current;
+    Pakfileentry_t *prev = NULL;
+
+    if (archive == NULL || entry_name == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "delete",
+                        "pakka_delete: archive and entry_name "
+                        "must be non-NULL");
+    }
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "delete",
+                        "pakka_delete: archive not writable "
+                        "or no live file handle");
+    }
+
+    for (current = archive->head; current != NULL; current = current->next) {
+        if (strcmp(current->filename, entry_name) == 0) {
+            if (prev == NULL) {
+                archive->head = current->next;
+            } else {
+                prev->next = current->next;
+            }
+            free(current);
+            archive->num_entries--;
+            archive->dirty = 1;
+            archive->needs_rebuild = 1;
+            return PAKKA_OK;
+        }
+        prev = current;
+    }
+
+    err_fill(err, PAKKA_ERR_NOT_FOUND, PAKKA_ERR_DOMAIN_NONE, 0, "delete",
+             "Entry not found: %s", entry_name);
+    err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+    return PAKKA_ERR_NOT_FOUND;
+}
+
+/* Commit pending changes to disk. Three modes:
+ *   - clean state (!dirty): no-op
+ *   - dirty without rebuild (adds only): write directory in place at the
+ *     new diroffset (= byte tail after appended payloads), update header
+ *   - dirty with rebuild (any pakka_delete happened): copy retained
+ *     entries to a temp file, write directory, fclose original, rename
+ *     temp over cur_pakpath. pak->fp is reopened on the renamed file so
+ *     subsequent operations remain valid.
+ *
+ * The is_new case (after pakka_create) writes header+directory the same
+ * as a regular add commit; the temp file is renamed to new_pakpath by
+ * pakka_close, not here. */
+pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
+    Pakfileentry_t *current;
+    Pakfileentry_t *new_head = NULL;
+    Pakfileentry_t *new_tail = NULL;
+    FILE *tfd = NULL;
+    FILE *old_fp;
+    int saved_errno;
+    pakka_status_t status = PAKKA_OK;
+
+    if (archive == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                        "pakka_commit: archive must be non-NULL");
+    }
+
+    if (!archive->dirty) {
+        return PAKKA_OK;        /* no-op */
+    }
+
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                        "pakka_commit: archive not writable or fp closed");
+    }
+
+    if (!archive->needs_rebuild) {
+        /* Add-only path: just rewrite the directory + header in place.
+         * write_pak_directory positions itself at byte-tail before
+         * writing the directory, then rewinds and writes the header. */
+        status = write_pak_directory(archive, err);
+        if (status != PAKKA_OK) {
+            return status;
+        }
+        /* Flush so a subsequent fopen on the same file sees the bytes. */
+        if (fflush(archive->fp) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot flush pak directory write");
+        }
+        archive->dirty = 0;
+        return PAKKA_OK;
+    }
+
+    /* Rebuild path (needs_rebuild=1 because at least one pakka_delete).
+     * The byte layout no longer matches the directory order — id's
+     * non-sequential pak0.pak would shift wrong if we tried in-place.
+     *
+     * Use a LOCAL scratch path rather than the archive's tmp_pakpath:
+     * for an is_new archive, tmp_pakpath is the path of the original
+     * pakka_create temp which pakka_close will rename to new_pakpath.
+     * Overwriting tmp_pakpath here would lose that target. */
+    {
+        char rebuild_scratch[OS_PATH_MAX];
+        const char *dir_hint;
+        const char *rename_target;
+        /* Parallel arrays of survivors. entry_ptrs[] is the in-memory
+         * list pointer; new_offsets[] is the byte offset each entry
+         * will have AFTER the rebuild. We install new offsets only
+         * once every copy AND the directory write AND the fclose of
+         * the temp succeed. Until then, entry->offset still describes
+         * archive->fp's pre-rebuild byte layout, so an error path can
+         * return without touching archive state. */
+        uint32_t *new_offsets = NULL;
+        Pakfileentry_t **entry_ptrs = NULL;
+        size_t n_entries = 0;
+        size_t i;
+
+        dir_hint = archive->is_new ? archive->tmp_pakpath
+                                   : archive->cur_pakpath;
+        rename_target = dir_hint;       /* same path, after rename */
+
+        for (current = archive->head; current != NULL;
+             current = current->next) {
+            n_entries++;
+        }
+        if (n_entries > 0) {
+            new_offsets = malloc(sizeof(uint32_t) * n_entries);
+            entry_ptrs = malloc(sizeof(Pakfileentry_t *) * n_entries);
+            if (new_offsets == NULL || entry_ptrs == NULL) {
+                free(new_offsets);
+                free(entry_ptrs);
+                return err_fill(err, PAKKA_ERR_NOMEM,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                                "Cannot allocate rebuild bookkeeping");
+            }
+            i = 0;
+            for (current = archive->head; current != NULL;
+                 current = current->next) {
+                entry_ptrs[i++] = current;
+            }
+        }
+
+        tfd = pakka_compat_mkstemp_open(dir_hint, "pakkaXXXXXX",
+                                  rebuild_scratch,
+                                  sizeof(rebuild_scratch));
+        if (tfd == NULL) {
+            saved_errno = errno;
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot create rebuild scratch near %s",
+                            dir_hint);
+        }
+        if (fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
+            saved_errno = errno;
+            fclose(tfd);
+            (void)remove(rebuild_scratch);
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot seek in rebuild scratch");
+        }
+
+        /* Copy survivors. entry->offset is NOT mutated by
+         * copy_between_paks (it returns the new offset via out param).
+         * On failure here, nothing in archive state has changed. */
+        for (i = 0; i < n_entries; i++) {
+            status = copy_between_paks(entry_ptrs[i], archive->fp, tfd,
+                                       &new_offsets[i], err);
+            if (status != PAKKA_OK) {
+                fclose(tfd);
+                (void)remove(rebuild_scratch);
+                free(new_offsets);
+                free(entry_ptrs);
+                return status;
+            }
+            if (new_tail == NULL) {
+                new_head = entry_ptrs[i];
+            } else {
+                new_tail->next = entry_ptrs[i];
+            }
+            new_tail = entry_ptrs[i];
+        }
+        if (new_tail != NULL) {
+            new_tail->next = NULL;
+        }
+
+        /* write_pak_directory needs to see the new offsets. Install
+         * them now (still rollback-safe; archive->head order is
+         * already the new layout, and pak->fp hasn't been swapped to
+         * the scratch yet). Save the prior values in old_offsets_swap
+         * so we can revert if the directory write or close fails. */
+        archive->head = new_head;
+        {
+            uint32_t *old_offsets_swap;
+            old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
+            if (old_offsets_swap == NULL && n_entries > 0) {
+                fclose(tfd);
+                (void)remove(rebuild_scratch);
+                free(new_offsets);
+                free(entry_ptrs);
+                return err_fill(err, PAKKA_ERR_NOMEM,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                                "Cannot allocate rollback buffer");
+            }
+            for (i = 0; i < n_entries; i++) {
+                old_offsets_swap[i] = entry_ptrs[i]->offset;
+                entry_ptrs[i]->offset = new_offsets[i];
+            }
+
+            old_fp = archive->fp;
+            archive->fp = tfd;
+            status = write_pak_directory(archive, err);
+            archive->fp = old_fp;
+            if (status != PAKKA_OK) {
+                for (i = 0; i < n_entries; i++) {
+                    entry_ptrs[i]->offset = old_offsets_swap[i];
+                }
+                fclose(tfd);
+                (void)remove(rebuild_scratch);
+                free(old_offsets_swap);
+                free(new_offsets);
+                free(entry_ptrs);
+                return status;
+            }
+            if (fclose(tfd) != 0) {
+                saved_errno = errno;
+                for (i = 0; i < n_entries; i++) {
+                    entry_ptrs[i]->offset = old_offsets_swap[i];
+                }
+                (void)remove(rebuild_scratch);
+                free(old_offsets_swap);
+                free(new_offsets);
+                free(entry_ptrs);
+                return err_fill(err, PAKKA_ERR_IO,
+                                PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "commit",
+                                "Cannot finalize rebuild scratch %s "
+                                "(disk full or I/O error)",
+                                rebuild_scratch);
+            }
+
+            /* Past this point the new layout is durably on disk in
+             * rebuild_scratch. Close original, rename. If rename or
+             * reopen fails we keep the new offsets installed (the
+             * scratch IS the canonical content even if not yet
+             * renamed; rolling back would mismatch what we just wrote). */
+            fclose(archive->fp);
+            archive->fp = NULL;
+
+            {
+                uint32_t win32_code = 0;
+                if (pakka_compat_rename_replace(rebuild_scratch, rename_target,
+                                          &win32_code) != 0) {
+                    saved_errno = errno;
+                    /* Best-effort restore: revert offsets, drop the
+                     * scratch, and reopen the un-renamed original so
+                     * the archive handle is at least readable. */
+                    for (i = 0; i < n_entries; i++) {
+                        entry_ptrs[i]->offset = old_offsets_swap[i];
+                    }
+                    (void)remove(rebuild_scratch);
+                    archive->fp = fopen(rename_target, "r+b");
+                    free(old_offsets_swap);
+                    free(new_offsets);
+                    free(entry_ptrs);
+#ifdef _WIN32
+                    return err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_WIN32, win32_code,
+                                    "commit",
+                                    "Could not rename %s to %s "
+                                    "(Win32 error %u)",
+                                    rebuild_scratch, rename_target,
+                                    (unsigned)win32_code);
+#else
+                    (void)win32_code;
+                    return err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)saved_errno, "commit",
+                                    "Could not rename %s to %s",
+                                    rebuild_scratch, rename_target);
+#endif
+                }
+            }
+
+            free(old_offsets_swap);
+        }
+
+        archive->fp = fopen(rename_target, "r+b");
+        if (archive->fp == NULL) {
+            saved_errno = errno;
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot reopen %s after rebuild",
+                            rename_target);
+        }
+
+        free(new_offsets);
+        free(entry_ptrs);
+        archive->dirty = 0;
+        archive->needs_rebuild = 0;
+    }
+    return status;
+}
+
+/* { normalized, original } record used by pakka_verify's collision
+ * scan. Keeping both in one struct lets qsort sort them together so a
+ * detected collision can name both original entries. */
+typedef struct {
+    char *norm;
+    const char *original;
+} verify_collision_record_t;
+
+static int verify_collision_cmp(const void *a, const void *b) {
+    const verify_collision_record_t *aa = (const verify_collision_record_t *)a;
+    const verify_collision_record_t *bb = (const verify_collision_record_t *)b;
+    return strcmp(aa->norm, bb->norm);
+}
+
+/* No-op when report is NULL. */
+static void verify_report(pakka_report_fn report, void *userdata,
+                          pakka_report_severity_t severity,
+                          pakka_status_t status,
+                          const char *entry_name,
+                          const char *fmt, ...) {
+    char buf[PAKKA_MESSAGE_SIZE];
+    va_list args;
+    if (report == NULL) {
+        return;
+    }
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    report(userdata, severity, status, entry_name, buf);
+}
+
+pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
+                            pakka_report_fn report, void *userdata,
+                            pakka_error_t *err) {
+    Pakfileentry_t *current;
+    pakka_status_t first_error = PAKKA_OK;
+    char buf[PAKFILE_COPY_CHUNK];
+    size_t n_entries = 0;
+    size_t i;
+
+    if (archive == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                        "pakka_verify: archive must be non-NULL");
+    }
+    if (flags != 0u) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                        "pakka_verify: unknown flag bits 0x%x", flags);
+    }
+    if (archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                        "pakka_verify: archive has no live file handle");
+    }
+
+    /* Pass A: per-entry name and payload integrity. */
+    for (current = archive->head; current != NULL; current = current->next) {
+        n_entries++;
+
+        if (pakka_unsafe_entry_name(current->filename)) {
+            verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                          PAKKA_ERR_UNSAFE_NAME, current->filename,
+                          "Entry name is not safe to extract");
+            if (first_error == PAKKA_OK) {
+                err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                         PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                         "Entry name is not safe to extract");
+                err_set_entry(err, current->filename, (size_t)-1,
+                              (uint64_t)current->offset,
+                              (uint64_t)current->length);
+                first_error = PAKKA_ERR_UNSAFE_NAME;
+            }
+            continue;        /* skip payload read for unsafe names */
+        }
+
+        if (current->length == 0) {
+            verify_report(report, userdata, PAKKA_REPORT_INFO,
+                          PAKKA_OK, current->filename,
+                          "OK (0 bytes)");
+            continue;
+        }
+
+        if (fseek(archive->fp, (long)current->offset, SEEK_SET) != 0) {
+            int seek_errno = errno;
+            verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                          PAKKA_ERR_IO, current->filename,
+                          "Cannot seek to entry payload at offset %"
+                          PRIu32, current->offset);
+            if (first_error == PAKKA_OK) {
+                err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                         (uint32_t)seek_errno, "verify",
+                         "Cannot seek to entry payload");
+                err_set_entry(err, current->filename, (size_t)-1,
+                              (uint64_t)current->offset,
+                              (uint64_t)current->length);
+                first_error = PAKKA_ERR_IO;
+            }
+            continue;
+        }
+        {
+            uint64_t remaining = (uint64_t)current->length;
+            int io_failed = 0;
+            while (remaining > 0) {
+                size_t chunk = remaining > sizeof(buf)
+                             ? sizeof(buf) : (size_t)remaining;
+                if (fread(buf, 1, chunk, archive->fp) != chunk) {
+                    int read_errno = errno;
+                    uint64_t at = (uint64_t)current->offset
+                                + ((uint64_t)current->length - remaining);
+                    verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                                  PAKKA_ERR_IO, current->filename,
+                                  "Cannot read entry payload "
+                                  "(short read at offset %" PRIu64 ")",
+                                  at);
+                    if (first_error == PAKKA_OK) {
+                        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                 (uint32_t)read_errno, "verify",
+                                 "Short read on entry payload");
+                        err_set_entry(err, current->filename, (size_t)-1,
+                                      at, (uint64_t)current->length);
+                        first_error = PAKKA_ERR_IO;
+                    }
+                    io_failed = 1;
+                    break;
+                }
+                remaining -= chunk;
+            }
+            if (!io_failed) {
+                verify_report(report, userdata, PAKKA_REPORT_INFO,
+                              PAKKA_OK, current->filename,
+                              "OK (%" PRIu32 " bytes)", current->length);
+            }
+        }
+    }
+
+    /* Pass B: normalized-collision scan. Builds one array of
+     * { norm, original } records so we can sort with qsort
+     * (O(n log n)) while still naming both colliding originals. */
+    if (n_entries > 1) {
+        verify_collision_record_t *recs;
+        recs = malloc(sizeof(verify_collision_record_t) * n_entries);
+        if (recs == NULL) {
+            return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                            0, "verify",
+                            "Cannot allocate collision scratch");
+        }
+        i = 0;
+        for (current = archive->head; current != NULL;
+             current = current->next) {
+            size_t name_len = strlen(current->filename);
+            recs[i].norm = malloc(name_len + 1);
+            if (recs[i].norm == NULL) {
+                size_t j;
+                for (j = 0; j < i; j++) free(recs[j].norm);
+                free(recs);
+                return err_fill(err, PAKKA_ERR_NOMEM,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                                "Cannot allocate normalized-name buffer");
+            }
+            pakka_normalize_entry_name(current->filename, recs[i].norm,
+                                       name_len + 1);
+            recs[i].original = current->filename;
+            i++;
+        }
+        qsort(recs, n_entries, sizeof(verify_collision_record_t),
+              verify_collision_cmp);
+        for (i = 1; i < n_entries; i++) {
+            if (strcmp(recs[i - 1].norm, recs[i].norm) == 0) {
+                char msg[256];
+                snprintf(msg, sizeof(msg),
+                         "Normalized collision with '%s'",
+                         recs[i - 1].original);
+                verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                              PAKKA_ERR_DUPLICATE,
+                              recs[i].original, "%s", msg);
+                if (first_error == PAKKA_OK) {
+                    err_fill(err, PAKKA_ERR_DUPLICATE,
+                             PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                             "%s", msg);
+                    err_set_entry(err, recs[i].original,
+                                  (size_t)-1, 0, 0);
+                    first_error = PAKKA_ERR_DUPLICATE;
+                }
+            }
+        }
+        for (i = 0; i < n_entries; i++) free(recs[i].norm);
+        free(recs);
+    }
+
+    return first_error;
 }
 
 /*
@@ -867,140 +1846,103 @@ Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
  * the temp file over the original. This avoids any assumption about whether
  * file bytes are laid out in directory order — id's pak0.pak famously isn't.
  */
-int delete_entries(Pak_t *pak, Pakfileentry_t *entries[], int num_entries) {
-    Pakfileentry_t *current = NULL;
-    Pakfileentry_t *last = NULL;
-    FILE *tfd;
-    FILE *tempfp;
 
-    if ((current = pak->head) == NULL) {
-        return -1;
-    }
-
-    tfd = create_tmp_pakfile();
-
-    do {
-        if (! in_array(current, entries, num_entries)) {
-            copy_between_paks(current, fp, tfd);
-
-            if (last == NULL) {
-                pak->head = current;
-            } else {
-                last->next = current;
-            }
-            last = current;
-        }
-    } while ((current = current->next) != NULL);
-
-    if (last != NULL) {
-        last->next = NULL;
-    } else {
-        pak->head = NULL;
-    }
-
-    tempfp = fp;
-    fp = tfd;
-    write_pak_directory(pak);
-    fp = tempfp;
-
-    /* Check fclose return: buffered writes are flushed here and a
-     * disk-full / NFS / quota failure first surfaces on close. If we
-     * ignored it, the eventual rename would replace the original pak
-     * with a truncated temp. */
-    if (fclose(tfd) != 0) {
-        error_exit("Error finalizing temp pak %s "
-                   "(disk full or I/O error)", tmp_pakpath);
-    }
-
-    /* Close the original pak before the rename. On Windows the open
-     * handle on cur_pakpath would block MoveFileEx; on POSIX this just
-     * ensures buffered data is flushed before we replace the file
-     * underneath ourselves. close_pakfile tolerates fp == NULL. */
-    fclose(fp);
-    fp = NULL;
-
-    if (compat_rename_replace(tmp_pakpath, cur_pakpath) != 0) {
-        /* Pre-fix this used new_pakpath which is the create-mode
-         * destination — empty when we got here through delete. */
-        error_exit("Could not rename tmp pak %s to final pak %s",
-                   tmp_pakpath, cur_pakpath);
-    }
-
-    return 0;
-}
-
-int copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd) {
+/* Copy one entry's payload from ffd to tfd, returning the new byte
+ * offset in tfd via *new_offset_out. The caller is responsible for
+ * deciding when to commit *new_offset_out into entry->offset — leaving
+ * the entry untouched here lets a failing pakka_commit roll back its
+ * in-memory layout. */
+pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
+                                 uint32_t *new_offset_out,
+                                 pakka_error_t *err) {
     char *buffer;
     long new_offset;
     uint32_t src_offset = entry->offset;
+    int saved_errno;
 
-    /* Seek the source pak to the entry's existing offset BEFORE we
-     * overwrite entry->offset with the temp pak position. load_directory
-     * already validated src_offset + entry->length against file_size. */
     if (fseek(ffd, (long)src_offset, SEEK_SET) != 0) {
-        error_exit("Cannot seek to source entry '%s'", entry->filename);
+        saved_errno = errno;
+        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                 (uint32_t)saved_errno, "commit",
+                 "Cannot seek to source entry");
+        err_set_entry(err, entry->filename, (size_t)-1,
+                      (uint64_t)src_offset, (uint64_t)entry->length);
+        return PAKKA_ERR_IO;
     }
 
     new_offset = ftell(tfd);
     if (new_offset < 0) {
-        error_exit("Cannot determine offset in temp pak");
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot determine offset in temp pak");
     }
-    /* The temp pak is built from scratch, so its offsets must fit u32.
-     * Cap explicitly to keep a corrupt rebuild from silently wrapping. */
     if ((uint64_t)new_offset > UINT32_MAX) {
-        error_exit("Temp pak exceeds 4 GiB during rebuild");
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "commit",
+                        "Temp pak exceeds 4 GiB during rebuild");
     }
-    entry->offset = (uint32_t)new_offset;
+    if (new_offset_out != NULL) {
+        *new_offset_out = (uint32_t)new_offset;
+    }
 
     if (entry->length == 0) {
-        return 0;
+        return PAKKA_OK;
     }
 
-    buffer = malloc(entry->length);
+    /* Stream in PAKFILE_COPY_CHUNK chunks rather than malloc(length)
+     * so a deleting a 100 MiB-retained entry doesn't fail on RAM
+     * pressure. peak RSS bounded at 64 KiB regardless of payload. */
+    buffer = malloc(PAKFILE_COPY_CHUNK);
     if (buffer == NULL) {
-        error_exit("Cannot allocate %" PRIu32 " bytes for '%s'",
-                   entry->length, entry->filename);
+        err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "commit",
+                 "Cannot allocate copy buffer for entry");
+        err_set_entry(err, entry->filename, (size_t)-1,
+                      (uint64_t)src_offset, (uint64_t)entry->length);
+        return PAKKA_ERR_NOMEM;
     }
 
-    if (fread(buffer, entry->length, 1, ffd) != 1) {
-        int err = errno;
-        free(buffer);
-        error_exit_e(err, "Error reading entry '%s' from source pak", entry->filename);
-    }
-
-    if (fwrite(buffer, entry->length, 1, tfd) != 1) {
-        int err = errno;
-        free(buffer);
-        error_exit_e(err, "Error writing entry '%s' to dest pak", entry->filename);
-    }
-
-    free(buffer);
-    return 0;
-}
-
-int in_array(Pakfileentry_t *entry, Pakfileentry_t *entries[], int num_entries) {
-    int i;
-    for (i = 0; i < num_entries; i++) {
-        if (entries[i] == entry) {
-            return 1;
+    {
+        size_t remaining = (size_t)entry->length;
+        while (remaining > 0) {
+            size_t chunk = remaining > PAKFILE_COPY_CHUNK
+                         ? PAKFILE_COPY_CHUNK : remaining;
+            if (fread(buffer, 1, chunk, ffd) != chunk) {
+                saved_errno = errno;
+                free(buffer);
+                err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                         (uint32_t)saved_errno, "commit",
+                         "Cannot read entry from source pak");
+                err_set_entry(err, entry->filename, (size_t)-1,
+                              (uint64_t)src_offset,
+                              (uint64_t)entry->length);
+                return PAKKA_ERR_IO;
+            }
+            if (fwrite(buffer, 1, chunk, tfd) != chunk) {
+                saved_errno = errno;
+                free(buffer);
+                err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                         (uint32_t)saved_errno, "commit",
+                         "Cannot write entry to dest pak");
+                err_set_entry(err, entry->filename, (size_t)-1,
+                              (uint64_t)src_offset,
+                              (uint64_t)entry->length);
+                return PAKKA_ERR_IO;
+            }
+            remaining -= chunk;
         }
     }
 
-    return 0;
+    free(buffer);
+    return PAKKA_OK;
 }
+
 
 /* Bounded "basedir/filename" join. Returns 0 on success, non-zero if the
  * combined result wouldn't fit in dest_size (NUL included). Replaces the
  * old strcat-into-fixed-buffer pattern that overflowed stack buffers on
  * deep paths. */
-int build_filename(char *dest, size_t dest_size,
-                   const char *basedir, const char *filename) {
-    int n = snprintf(dest, dest_size, "%s/%s", basedir, filename);
-    if (n < 0 || (size_t)n >= dest_size) {
-        return -1;
-    }
-    return 0;
-}
 
 /* Windows reserved device names. Matched against the segment's base
  * (everything before the first '.') case-insensitively, regardless of
@@ -1083,9 +2025,52 @@ static int is_unsafe_segment(const char *seg, size_t seg_len) {
  * constraints on entry names beyond a 56-byte upper bound, so a malicious
  * pak can name an entry "../../etc/passwd", "C:\windows\foo", "CON",
  * "foo:stream", or "trailing." and corrupt or redirect the extract.
- * Both POSIX and Windows shapes are checked here because pak archives
- * are portable. */
-static int is_unsafe_extract_path(const char *path) {
+ * Both POSIX and Windows path forms are checked here because pak
+ * archives are portable across hosts. */
+/* pakka_normalize_entry_name: produce the form a pak entry name would
+ * collapse to on Windows / HFS+ extraction. The portable union below
+ * is applied on every host so paks remain safe across destinations:
+ *   - backslash separators become forward slashes
+ *   - ASCII A-Z fold to a-z
+ *   - trailing '.' and ' ' bytes are stripped from each path segment
+ * dst is NUL-terminated. dst must be at least as large as src + 1.
+ * Used by extract preflight to reject paks where two distinct entries
+ * would materialize to the same path on disk. */
+void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz) {
+    size_t in = 0;
+    size_t out = 0;
+    size_t seg_start = 0;
+
+    if (dstsz == 0) {
+        return;
+    }
+
+    while (out + 1 < dstsz) {
+        char c = src[in];
+        if (c == '\0' || c == '/' || c == '\\') {
+            /* End of segment: strip trailing dots and spaces */
+            while (out > seg_start
+                   && (dst[out - 1] == '.' || dst[out - 1] == ' ')) {
+                out--;
+            }
+            if (c == '\0') {
+                break;
+            }
+            dst[out++] = '/';
+            seg_start = out;
+            in++;
+        } else {
+            if (c >= 'A' && c <= 'Z') {
+                c = (char)(c - 'A' + 'a');
+            }
+            dst[out++] = c;
+            in++;
+        }
+    }
+    dst[out] = '\0';
+}
+
+int pakka_unsafe_entry_name(const char *path) {
     const char *p, *seg;
 
     if (path == NULL || *path == '\0') {
@@ -1157,24 +2142,31 @@ void init_pak_header(Pak_t *pak) {
     pak->dirlength = 0;
 }
 
-/* Serialize one pak header to fp. Writes exactly PAKFILE_HEADER_SIZE
- * bytes — the in-memory Pak_t struct has additional bookkeeping fields
- * after dirlength that must not leak to disk. */
-static void write_pak_header(Pak_t *pak) {
-    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, fp) != 1
-        || write_u32_le(fp, pak->diroffset) != 0
-        || write_u32_le(fp, pak->dirlength) != 0) {
-        error_exit("Cannot write pak header");
+/* Serialize one pak header to pak->fp. Writes exactly
+ * PAKFILE_HEADER_SIZE bytes — the in-memory Pak_t struct has additional
+ * bookkeeping fields after dirlength that must not leak to disk. */
+static pakka_status_t write_pak_header(Pak_t *pak, pakka_error_t *err) {
+    int saved_errno;
+    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1
+        || pakka_write_u32_le(pak->fp, pak->diroffset) != 0
+        || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot write pak header");
     }
+    return PAKKA_OK;
 }
 
 /* Serialize one directory entry: 56-byte filename field (NUL-padded if
  * shorter) followed by two LE u32s. Written field-by-field instead of
  * struct-as-bytes so the in-memory filename[] buffer can be a different
  * size than the on-disk PAKFILE_PATH_MAX without breaking the format. */
-static void write_pak_entry(Pakfileentry_t *entry) {
+static pakka_status_t write_pak_entry(Pak_t *pak, Pakfileentry_t *entry,
+                                      pakka_error_t *err) {
     char name_field[PAKFILE_PATH_MAX];
     size_t len = strlen(entry->filename);
+    int saved_errno;
 
     if (len > PAKFILE_PATH_MAX) {
         len = PAKFILE_PATH_MAX;
@@ -1184,67 +2176,65 @@ static void write_pak_entry(Pakfileentry_t *entry) {
         memset(name_field + len, 0, PAKFILE_PATH_MAX - len);
     }
 
-    if (fwrite(name_field, PAKFILE_PATH_MAX, 1, fp) != 1
-        || write_u32_le(fp, entry->offset) != 0
-        || write_u32_le(fp, entry->length) != 0) {
-        error_exit("Cannot write new pak directory");
+    if (fwrite(name_field, PAKFILE_PATH_MAX, 1, pak->fp) != 1
+        || pakka_write_u32_le(pak->fp, entry->offset) != 0
+        || pakka_write_u32_le(pak->fp, entry->length) != 0) {
+        saved_errno = errno;
+        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                 (uint32_t)saved_errno, "commit",
+                 "Cannot write directory entry");
+        err_set_entry(err, entry->filename, (size_t)-1, 0,
+                      (uint64_t)entry->length);
+        return PAKKA_ERR_IO;
     }
+    return PAKKA_OK;
 }
 
-void write_pak_directory(Pak_t *pak) {
+pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *current = pak->head;
     Pakfileentry_t *tail;
+    pakka_status_t s;
+    int saved_errno;
 
     /* Empty pak still needs a valid PACK header so the file isn't malformed.
      * This happens after a delete that removes every entry. */
     if (current == NULL) {
         pak->diroffset = PAKFILE_HEADER_SIZE;
         pak->dirlength = 0;
-        if (fseek(fp, 0L, SEEK_SET) != 0) {
-            error_exit("Cannot seek to pak header");
+        if (fseek(pak->fp, 0L, SEEK_SET) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot seek to pak header");
         }
-        write_pak_header(pak);
-        return;
+        return write_pak_header(pak, err);
     }
 
     tail = find_tail(pak);
     pak->diroffset = tail->offset + tail->length;
     pak->dirlength = 0;
-    if (fseek(fp, (long)pak->diroffset, SEEK_SET) != 0) {
-        error_exit("Cannot seek to pak directory");
+    if (fseek(pak->fp, (long)pak->diroffset, SEEK_SET) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot seek to pak directory");
     }
 
     do {
-        write_pak_entry(current);
+        s = write_pak_entry(pak, current, err);
+        if (s != PAKKA_OK) {
+            return s;
+        }
         pak->dirlength += PAKFILE_DIR_ENTRY_SIZE;
-#ifndef _DEBUG
-        debug_directory_entry(current);
-#endif
     } while ((current = current->next) != NULL);
 
-    if (fseek(fp, 0L, SEEK_SET) != 0) {
-        error_exit("Cannot seek to pak header");
+    if (fseek(pak->fp, 0L, SEEK_SET) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot seek to pak header");
     }
 
-#ifndef _DEBUG
-    debug_header(pak);
-#endif
-    write_pak_header(pak);
+    return write_pak_header(pak, err);
 }
 
-FILE *create_tmp_pakfile(void) {
-    FILE *tfd;
-
-    /* For delete-rebuild, the eventual rename is over cur_pakpath, so
-     * hint the temp location to its directory. */
-    if (! (tfd = compat_mkstemp_open(cur_pakpath, "pakkaXXXXXX",
-                                     tmp_pakpath, sizeof(tmp_pakpath)))) {
-        error_exit("Cannot create temp pak file");
-    }
-
-    if (fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
-        error_exit("Cannot seek in temp pak");
-    }
-
-    return tfd;
-}

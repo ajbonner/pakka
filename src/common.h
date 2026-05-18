@@ -25,21 +25,56 @@
  * 64 KiB regardless of input file size. */
 #define PAKFILE_COPY_CHUNK 65536u
 
-typedef struct Pakfileentry_s {
+/* Tagged so it matches the opaque forward declaration in
+ * include/pakka.h (`typedef struct pakka_entry pakka_entry_t;`). The
+ * full definition stays internal. */
+struct pakka_entry {
     char filename[PAKFILE_PATH_BUF];
     uint32_t offset;
     uint32_t length;
-    struct Pakfileentry_s *next;
-} Pakfileentry_t;
+    struct pakka_entry *next;
+};
 
-typedef struct {
+typedef struct pakka_entry Pakfileentry_t;
+
+/* Tagged to match include/pakka.h's
+ * `typedef struct pakka_reader pakka_reader_t;` forward declaration.
+ * Each reader owns a re-seek position into the archive's single FILE*
+ * so multiple readers on the same archive remain coherent — every
+ * pakka_reader_read seeks to next_offset before fread. */
+struct pakka_reader {
+    struct pakka_archive *archive;
+    uint64_t next_offset;
+    uint64_t remaining;
+};
+
+/* Tagged so it matches the opaque forward declaration in include/pakka.h
+ * (`typedef struct pakka_archive pakka_archive_t;`). The full definition
+ * stays internal — consumers of the public header see only the tag. */
+struct pakka_archive {
     char signature[PAKFILE_SIGNATURE_LEN];
     uint32_t diroffset;
     uint32_t dirlength;
     uint32_t num_entries;
     uint64_t file_size;
     Pakfileentry_t *head;
-} Pak_t;
+
+    /* Moved from src/pakfile.c file-local globals in Phase 2 of the
+     * libpakka migration. The archive handle now owns its file handle
+     * and paths; only close_pakfile and delete_entries may close fp,
+     * and both must do so before any rename — Windows CRT fopen omits
+     * FILE_SHARE_DELETE, so a live handle blocks MoveFileEx. */
+    FILE *fp;
+    char cur_pakpath[OS_PATH_MAX];  /* set by open_pakfile */
+    char new_pakpath[OS_PATH_MAX];  /* set by create_pakfile (destination) */
+    char tmp_pakpath[OS_PATH_MAX];  /* mkstemp scratch; renamed into place on commit */
+    int is_new;                     /* 1 if created via create_pakfile, 0 otherwise */
+    int writable;                   /* 1 if pak->fp is r+b (PAKKA_OPEN_READ_WRITE or create) */
+    int dirty;                      /* 1 if pakka_add/delete have unflushed changes */
+    int needs_rebuild;              /* 1 if any pakka_delete touched the entry list — commit must rebuild via temp */
+};
+
+typedef struct pakka_archive Pak_t;
 
 /* C99-compatible compile-time check via typedef'd array of length 1 or
  * -1. Used to guard the constants the on-disk format depends on; if a
@@ -60,49 +95,21 @@ PAKKA_STATIC_ASSERT(
     PAKFILE_PATH_BUF == PAKFILE_PATH_MAX + 1,
     path_buf_has_nul_guard);
 
-void error_exit(const char *format, ...);
-/* As error_exit, but uses an explicitly captured errno instead of the
- * current global. Use this from any call site where a library call
- * (free/closedir/fclose/snprintf, etc.) may run between the failing
- * operation and the error_exit call — those intermediates can reset
- * errno and produce a misleading strerror in the message. Pass 0 to
- * suppress the strerror suffix entirely. */
-void error_exit_e(int saved_errno, const char *format, ...);
-
-/* Write s to out with any control byte (0x00-0x1F or 0x7F) replaced
- * by '?'. Defense in depth for the list/tree/debug printers: pak entry
- * names are 56 bytes of attacker-controlled data, and even though
- * extract refuses to materialize control bytes on disk, listing a
- * malicious pak shouldn't let it inject ANSI escapes that reflow a
- * user's terminal. */
-void fprint_sanitized(FILE *out, const char *s);
-
-/* Copy src into dst with the same sanitization, NUL-terminated, up
- * to dstsz-1 bytes. Returns dst. Use to inject pak-derived names
- * into error_exit format strings without leaking control bytes into
- * the user's terminal. */
-char *sanitize_name(char *dst, size_t dstsz, const char *src);
+/* pakka_die, pakka_die_e, pakka_fprint_sanitized, pakka_sanitize_name
+ * live in src/main.c (the CLI). Their prototypes are intentionally NOT
+ * declared here so library code can't accidentally call them — the
+ * library returns pakka_status_t + pakka_error_t, and only the CLI
+ * translates those into exit/stderr. */
 
 /* The pak header diroffset/dirlength and entry offset/length fields
  * are stored little-endian on disk. Use these to read/write them so
  * the code is correct on big-endian hosts (s390x, sparc, ppc).
  * Return 0 on success, -1 on I/O failure (errno set by stdio). */
-int read_u32_le(FILE *fp, uint32_t *out);
-int write_u32_le(FILE *fp, uint32_t value);
-/* Open an existing pak. writable=0 opens "rb" (works on read-only
- * paks; required for list/extract), writable=1 opens "r+b" (required
- * for add/delete). */
-Pak_t *open_pakfile(const char *pakpath, int writable);
-Pak_t *create_pakfile(const char *pakpath);
-int close_pakfile(Pak_t *pak);
-void list_files(Pak_t *pak);
-void list_files_tree(Pak_t *pak);
-void extract_files(Pak_t *pak, char *dest, char **paths, int path_count);
-void delete_files(Pak_t *pak, char **paths, int path_count);
-void debug_header(Pak_t *pak);
-void debug_directory_entry(Pakfileentry_t *entry);
+int pakka_read_u32_le(FILE *fp, uint32_t *out);
+int pakka_write_u32_le(FILE *fp, uint32_t value);
 
-int add_file(Pak_t *pak, char *path);
-int add_to_pak(Pak_t *pak, char *path);
-int add_folder(Pak_t *pak, char *path);
-int add_files(Pak_t *pak, char **paths, int path_count);
+/* Internal helpers exposed to the CLI for preflight checks. Not part
+ * of the public include/pakka.h surface, but still pakka_*-prefixed so
+ * the symbol-audit gate passes. */
+int pakka_unsafe_entry_name(const char *path);
+void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz);
