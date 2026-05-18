@@ -367,6 +367,55 @@ EOF
 # not leave the safe entry on disk when the traversal causes the extract
 # to error.
 
+@test "extract: refuses pak where entries collide after normalization (case fold)" {
+    # Two entries differ only in case. On Windows/HFS+ they materialize
+    # to the same file; pakka rejects the whole extraction at preflight
+    # so we never get a half-extracted output tree.
+    #
+    # Layout (LE):
+    #   bytes  0..11 : "PACK" + diroffset=12 + dirlength=128
+    #   bytes 12..75 : dir entry 0 = "Foo.txt" (offset=140, length=0)
+    #   bytes 76..139: dir entry 1 = "foo.txt" (offset=140, length=0)
+    {
+        printf 'PACK\014\000\000\000\200\000\000\000'
+        printf 'Foo.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+        printf 'foo.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/case_collide.pak"
+
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/case_collide.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collide after normalization"* ]] \
+        || [[ "${stderr:-$output}" == *"collide after normalization"* ]]
+    # Neither variant should have been materialized.
+    [ ! -e "$BATS_TEST_TMPDIR/out/Foo.txt" ]
+    [ ! -e "$BATS_TEST_TMPDIR/out/foo.txt" ]
+}
+
+@test "extract: refuses pak where entries collide after normalization (slash vs backslash)" {
+    # "dir/file" and "dir\file" normalize to the same path. Same
+    # preflight rejection as the case-fold variant.
+    {
+        printf 'PACK\014\000\000\000\200\000\000\000'
+        printf 'dir/file'
+        dd if=/dev/zero bs=1 count=$((56 - 8)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+        printf 'dir\\file'
+        dd if=/dev/zero bs=1 count=$((56 - 8)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/sep_collide.pak"
+
+    mkdir -p "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/sep_collide.pak" -C "$BATS_TEST_TMPDIR/out"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"collide after normalization"* ]] \
+        || [[ "${stderr:-$output}" == *"collide after normalization"* ]]
+}
+
 @test "extract: preflight rejects entire archive on later unsafe entry" {
     # Two entries: "safe/a" (legit), then "../escape" (rejected). Both
     # have zero length. Pre-fix, "safe/a" was written before the second
@@ -605,6 +654,99 @@ EOF
     run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
+}
+
+@test "add: --as stores source under requested virtual entry name" {
+    echo "hello" > "$BATS_TEST_TMPDIR/src.bin"
+    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/aliased.pak" \
+        --as "renamed/hi.txt" "$BATS_TEST_TMPDIR/src.bin"
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/aliased.pak"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"renamed/hi.txt"* ]]
+    # The source file's name (src.bin) must NOT be the entry name.
+    [[ "$output" != *"src.bin"* ]]
+}
+
+@test "add: --as supports multiple aliased pairs in one invocation" {
+    echo "a" > "$BATS_TEST_TMPDIR/a.bin"
+    echo "bb" > "$BATS_TEST_TMPDIR/b.bin"
+    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/multi.pak" \
+        --as "virt/a.txt" "$BATS_TEST_TMPDIR/a.bin" \
+        --as "virt/b.txt" "$BATS_TEST_TMPDIR/b.bin"
+    [ "$status" -eq 0 ]
+    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/multi.pak"
+    [[ "$output" == *"virt/a.txt"* ]]
+    [[ "$output" == *"virt/b.txt"* ]]
+}
+
+@test "add: --as rejected outside -a/-c" {
+    echo "x" > "$BATS_TEST_TMPDIR/x.bin"
+    run "$PAKKA" -lf build/test/pak0.pak \
+        --as "v/x.txt" "$BATS_TEST_TMPDIR/x.bin"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--as may only be used with -a or -c"* ]] \
+        || [[ "${stderr:-$output}" == *"--as may only be used with -a or -c"* ]]
+}
+
+@test "add: --as rejects incomplete pair" {
+    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/inc.pak" --as "virt/only.txt"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--as requires two arguments"* ]] \
+        || [[ "${stderr:-$output}" == *"--as requires two arguments"* ]]
+}
+
+@test "verify: succeeds on valid pak0.pak" {
+    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/../pak0.pak"
+    [ "$status" -eq 0 ] || true
+    # The exact path under BATS_TEST_TMPDIR may not exist — fall back
+    # to the build/test fixture directly.
+    if [ "$status" -ne 0 ]; then
+        run "$PAKKA" --verify -f build/test/pak0.pak
+    fi
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"OK"* ]]
+}
+
+@test "verify: fails on pak with duplicate exact names" {
+    # Same layout as the C-API duplicate test, exercised through the CLI.
+    {
+        printf 'PACK\014\000\000\000\200\000\000\000'
+        printf 'dup.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+        printf 'dup.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/dup.pak"
+
+    # pakka_open itself rejects exact duplicates, so --verify never
+    # gets to run — the open failure surfaces with PAKKA_ERR_DUPLICATE.
+    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/dup.pak"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"duplicate"* ]] \
+        || [[ "${stderr:-$output}" == *"duplicate"* ]]
+}
+
+@test "verify: rejects pak that survives open but has normalized collisions" {
+    # Two entries differ only in case: pakka_open accepts these (the
+    # exact-duplicate check is byte-equal), but pakka_verify rejects
+    # because they collide after portable normalization.
+    {
+        printf 'PACK\014\000\000\000\200\000\000\000'
+        printf 'Foo.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+        printf 'foo.txt'
+        dd if=/dev/zero bs=1 count=$((56 - 7)) 2>/dev/null
+        printf '\214\000\000\000\000\000\000\000'
+    } > "$BATS_TEST_TMPDIR/casecollide.pak"
+
+    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/casecollide.pak"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"Normalized collision"* ]] \
+        || [[ "${stderr:-$output}" == *"Normalized collision"* ]]
 }
 
 @test "open: pak with bad PACK magic is rejected" {

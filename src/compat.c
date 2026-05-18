@@ -25,25 +25,28 @@
 #include <fcntl.h>
 #include <sys/locking.h>
 
-char *compat_realpath(const char *path, char *resolved) {
+char *pakka_compat_realpath(const char *path, char *resolved) {
     return _fullpath(resolved, path, _MAX_PATH);
 }
 
-char *compat_getcwd(char *buf, size_t size) {
+char *pakka_compat_getcwd(char *buf, size_t size) {
     return _getcwd(buf, (int)size);
 }
 
-/* Convert an exclusive-open Win32 HANDLE to a binary write FILE*.
- * Closing the FILE* via fclose tears down the handle as well. */
+/* Convert an exclusive-open Win32 HANDLE to a binary read/write FILE*.
+ * Closing the FILE* via fclose tears down the handle as well. We use
+ * read/write rather than write-only so callers that need to read back
+ * what they just wrote (pakka_commit's rebuild path, for example)
+ * aren't blocked at the stdio layer. */
 static FILE *handle_to_wb_file(HANDLE h) {
     int fd;
     FILE *fp;
-    fd = _open_osfhandle((intptr_t)h, _O_WRONLY | _O_BINARY);
+    fd = _open_osfhandle((intptr_t)h, _O_RDWR | _O_BINARY);
     if (fd < 0) {
         CloseHandle(h);
         return NULL;
     }
-    fp = _fdopen(fd, "wb");
+    fp = _fdopen(fd, "w+b");
     if (fp == NULL) {
         _close(fd);  /* also tears down the underlying HANDLE */
         return NULL;
@@ -71,7 +74,9 @@ static FILE *mkstemp_open_at(const char *dir,
     for (retries = 8; retries > 0; retries--) {
         strcpy(out_path, template_save);
         if (_mktemp_s(out_path, out_path_size) != 0) return NULL;
-        h = CreateFileA(out_path, GENERIC_WRITE, 0, NULL,
+        /* GENERIC_READ | GENERIC_WRITE so pakka_commit's rebuild can
+         * read back payloads it appended to a freshly-created temp. */
+        h = CreateFileA(out_path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                         CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             FILE *fp = handle_to_wb_file(h);
@@ -96,11 +101,11 @@ static FILE *mkstemp_open_near(const char *target_path,
     if (target_path == NULL) return NULL;
     if (strlen(target_path) >= sizeof(target_copy)) return NULL;
     strcpy(target_copy, target_path);
-    dir = compat_dirname(target_copy);
+    dir = pakka_compat_dirname(target_copy);
     return mkstemp_open_at(dir, basename_template, out_path, out_path_size);
 }
 
-FILE *compat_mkstemp_open(const char *target_path,
+FILE *pakka_compat_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
@@ -123,7 +128,7 @@ FILE *compat_mkstemp_open(const char *target_path,
     return mkstemp_open_at(tempdir, basename_template, out_path, out_path_size);
 }
 
-char *compat_dirname(char *path) {
+char *pakka_compat_dirname(char *path) {
     char *slash, *backslash, *last;
     size_t len;
 
@@ -161,40 +166,54 @@ char *compat_dirname(char *path) {
     return path;
 }
 
-int compat_mkdir(const char *path, int mode) {
+int pakka_compat_mkdir(const char *path, int mode) {
     (void)mode;
     return _mkdir(path);
 }
 
-char *compat_strdup(const char *s) {
+char *pakka_compat_strdup(const char *s) {
     return _strdup(s);
 }
 
-int compat_rename_replace(const char *src, const char *dst) {
-    return MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING) ? 0 : -1;
+int pakka_compat_rename_replace(const char *src, const char *dst,
+                          uint32_t *win32_code) {
+    if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING)) {
+        return 0;
+    }
+    if (win32_code != NULL) {
+        *win32_code = (uint32_t)GetLastError();
+    }
+    return -1;
 }
 
-int compat_rename_noreplace(const char *src, const char *dst) {
+int pakka_compat_rename_noreplace(const char *src, const char *dst,
+                            uint32_t *win32_code) {
     /* MoveFileExA without MOVEFILE_REPLACE_EXISTING fails with
      * ERROR_ALREADY_EXISTS if dst exists — that's exactly the
      * no-replace semantic we want. */
-    return MoveFileExA(src, dst, 0) ? 0 : -1;
+    if (MoveFileExA(src, dst, 0)) {
+        return 0;
+    }
+    if (win32_code != NULL) {
+        *win32_code = (uint32_t)GetLastError();
+    }
+    return -1;
 }
 
-int compat_lstat(const char *path, struct stat *sb) {
+int pakka_compat_lstat(const char *path, struct stat *sb) {
     /* Windows has no POSIX symlinks. The recursive-add path checks
-     * for reparse points via compat_is_reparse_or_symlink — keep
-     * compat_lstat as a thin stat() shim for the regular/dir test. */
+     * for reparse points via pakka_compat_is_reparse_or_symlink — keep
+     * pakka_compat_lstat as a thin stat() shim for the regular/dir test. */
     return stat(path, sb);
 }
 
-int compat_is_reparse_or_symlink(const char *path) {
+int pakka_compat_is_reparse_or_symlink(const char *path) {
     DWORD attr = GetFileAttributesA(path);
     if (attr == INVALID_FILE_ATTRIBUTES) return 0;
     return (attr & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
 }
 
-int compat_try_exclusive_lock(FILE *fp) {
+int pakka_compat_try_exclusive_lock(FILE *fp) {
     /* _locking with _LK_NBLCK is exclusive + non-blocking. Lock the
      * first byte from position 0; load_pakfile's first read happens
      * right after open with the stream still at 0, so we don't need
@@ -220,7 +239,7 @@ static int append_path_component(char *path, size_t cap, const char *name,
     return 0;
 }
 
-FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
     char path[PATH_MAX];
     DWORD attr;
     const char *p, *seg;
@@ -344,11 +363,11 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
 #  endif
 #endif
 
-char *compat_realpath(const char *path, char *resolved) {
+char *pakka_compat_realpath(const char *path, char *resolved) {
     return realpath(path, resolved);
 }
 
-char *compat_getcwd(char *buf, size_t size) {
+char *pakka_compat_getcwd(char *buf, size_t size) {
     return getcwd(buf, size);
 }
 
@@ -365,14 +384,16 @@ static FILE *mkstemp_open_in_dir(const char *target_path,
     if (target_path == NULL) return NULL;
     if (strlen(target_path) >= sizeof(target_copy)) return NULL;
     strcpy(target_copy, target_path);
-    dir = compat_dirname(target_copy);
+    dir = pakka_compat_dirname(target_copy);
 
     n = snprintf(out_path, out_path_size, "%s/%s", dir, basename_template);
     if (n < 0 || (size_t)n >= out_path_size) return NULL;
 
     fd = mkstemp(out_path);
     if (fd < 0) return NULL;
-    fp = fdopen(fd, "wb");
+    /* "w+b" so pakka_commit can read back payloads it appended; mkstemp
+     * already returns an O_RDWR fd, the mode string is what stdio sees. */
+    fp = fdopen(fd, "w+b");
     if (fp == NULL) {
         close(fd);
         unlink(out_path);
@@ -381,7 +402,7 @@ static FILE *mkstemp_open_in_dir(const char *target_path,
     return fp;
 }
 
-FILE *compat_mkstemp_open(const char *target_path,
+FILE *pakka_compat_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
@@ -400,7 +421,8 @@ FILE *compat_mkstemp_open(const char *target_path,
     if ((fd = mkstemp(out_path)) < 0) {
         return NULL;
     }
-    if ((fp = fdopen(fd, "wb")) == NULL) {
+    /* "w+b" so pakka_commit can read back payloads it appended. */
+    if ((fp = fdopen(fd, "w+b")) == NULL) {
         close(fd);
         unlink(out_path);
         return NULL;
@@ -408,23 +430,29 @@ FILE *compat_mkstemp_open(const char *target_path,
     return fp;
 }
 
-char *compat_dirname(char *path) {
+char *pakka_compat_dirname(char *path) {
     return dirname(path);
 }
 
-int compat_mkdir(const char *path, int mode) {
+int pakka_compat_mkdir(const char *path, int mode) {
     return mkdir(path, (mode_t)mode);
 }
 
-char *compat_strdup(const char *s) {
+char *pakka_compat_strdup(const char *s) {
     return strdup(s);
 }
 
-int compat_rename_replace(const char *src, const char *dst) {
+int pakka_compat_rename_replace(const char *src, const char *dst,
+                          uint32_t *win32_code) {
+    /* POSIX: errno carries the failure information; win32_code is
+     * always left untouched. */
+    (void)win32_code;
     return rename(src, dst);
 }
 
-int compat_rename_noreplace(const char *src, const char *dst) {
+int pakka_compat_rename_noreplace(const char *src, const char *dst,
+                            uint32_t *win32_code) {
+    (void)win32_code;
     /* POSIX rename() always replaces — there is no portable no-replace
      * flag (renameat2's RENAME_NOREPLACE is Linux-specific). Use the
      * link(2)/unlink(2) two-step: link fails with EEXIST when dst
@@ -444,17 +472,17 @@ int compat_rename_noreplace(const char *src, const char *dst) {
     return 0;
 }
 
-int compat_lstat(const char *path, struct stat *sb) {
+int pakka_compat_lstat(const char *path, struct stat *sb) {
     return lstat(path, sb);
 }
 
-int compat_is_reparse_or_symlink(const char *path) {
+int pakka_compat_is_reparse_or_symlink(const char *path) {
     struct stat sb;
     if (lstat(path, &sb) != 0) return 0;
     return S_ISLNK(sb.st_mode) ? 1 : 0;
 }
 
-int compat_try_exclusive_lock(FILE *fp) {
+int pakka_compat_try_exclusive_lock(FILE *fp) {
     /* fcntl(F_SETLK) is POSIX-mandatory and visible under
      * _XOPEN_SOURCE=700 on every CI target. flock(2) is BSD-derived
      * and the BSDs hide it behind __BSD_VISIBLE, which is 0 in strict
@@ -479,7 +507,7 @@ int compat_try_exclusive_lock(FILE *fp) {
  * the previous fd, so even if an attacker swaps a component for a
  * symlink between syscalls, the next openat with O_NOFOLLOW fails
  * atomically. */
-FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
     int dirfd, newfd, leaf_fd;
     const char *p, *seg;
     size_t seg_len;
@@ -545,7 +573,7 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
     }
 }
 #else
-/* Pre-glibc-2.4 fallback for compat_open_extract_target. fchdir into
+/* Pre-glibc-2.4 fallback for pakka_compat_open_extract_target. fchdir into
  * each opened intermediate so we never name a path that could be
  * raced under us; O_NOFOLLOW makes each step's symlink refusal atomic
  * with the open. The mkdir→reopen window on missing intermediates is
@@ -555,7 +583,7 @@ FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
  * Cwd mutation is safe because pakka is single-threaded; we still
  * have to restore via fchdir(saved_cwd) on every return path or the
  * caller's next syscall would resolve against the wrong directory. */
-FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
     int dest_fd, saved_cwd, dir_fd, leaf_fd;
     const char *p, *seg;
     size_t seg_len;

@@ -9,17 +9,28 @@ TARGET=pakka
 # _XOPEN_SOURCE=700 (POSIX.1-2008 + XSI) — needed for realpath():
 # glibc gates it on __USE_XOPEN_EXTENDED, musl on _XOPEN_SOURCE, neither
 # on _POSIX_C_SOURCE.
-CPPFLAGS = -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+CPPFLAGS = -Iinclude -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 CC=cc $(CPPFLAGS)
 CFLAGS=-g -Wall --std=c99 --pedantic
+AR ?= ar
 
 SRC_DIR=src
+INCLUDE_DIR=include
 BUILD_DIR=build
 OBJ_DIR=$(BUILD_DIR)/obj
+LIB_DIR=$(BUILD_DIR)/lib
 TEST_DIR=$(BUILD_DIR)/test
 
 SOURCES=$(wildcard $(SRC_DIR)/*.c)
 OBJECTS=$(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
+# Library is every src/*.c except main.c; main.c is CLI-only and links
+# against build/lib/libpakka.a. The `symbol-audit` target below enforces
+# that only pakka_*-prefixed names leave the archive.
+LIB_SOURCES=$(filter-out $(SRC_DIR)/main.c,$(SOURCES))
+LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+CLI_OBJECTS=$(OBJ_DIR)/main.o
+LIBPAKKA=$(LIB_DIR)/libpakka.a
 
 QUAKE_URL=https://www.libsdl.org/projects/quake/data/quakesw-1.0.6.tar.gz
 QUAKE_SHA256=d173e9f828b932a8160d4c65927281d0c28131cd922f0bf0d69e92a35185b499
@@ -27,13 +38,19 @@ QUAKE_TARBALL=$(TEST_DIR)/quakesw.tar.gz
 PAK0=$(TEST_DIR)/pak0.pak
 
 CLANG_TIDY ?= clang-tidy
+NM ?= nm
 
-.PHONY: all clean test test-clean distclean lint verify-tarball fixture
+# Public header. Linted explicitly via lint-header so transitive-include
+# regressions in include/pakka.h surface even when every internal TU
+# happens to pull in the missing dependency for unrelated reasons.
+PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
+
+.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test verify-tarball fixture
 
 all: $(TARGET)
 
 clean:
-	rm -rf $(OBJ_DIR) $(TARGET)
+	rm -rf $(OBJ_DIR) $(LIB_DIR) $(TARGET)
 
 test-clean:
 	rm -rf $(TEST_DIR)/extracted $(TEST_DIR)/re_extracted $(TEST_DIR)/rebuilt.pak $(TEST_DIR)/crud $(TEST_DIR)/id1
@@ -41,11 +58,54 @@ test-clean:
 distclean:
 	rm -rf $(BUILD_DIR) $(TARGET)
 
-lint:
-	$(CLANG_TIDY) --quiet $(SOURCES) -- $(CPPFLAGS) --std=c99
+# Verify the public header parses as standalone C with the same warning
+# flags the rest of the codebase uses. Catches regressions where the
+# header silently relies on transitive includes from an internal TU.
+lint-header:
+	$(CC) $(CFLAGS) -fsyntax-only -x c $(PUBLIC_HEADERS)
 
-$(TARGET): $(OBJECTS)
-	$(CC) $(CFLAGS) -o $(TARGET) $^
+lint: lint-header
+	$(CLANG_TIDY) --quiet $(SOURCES) $(PUBLIC_HEADERS) -- $(CPPFLAGS) --std=c99
+
+# Hard gate against non-pakka_ defined globals leaking out of
+# libpakka.a. Prints the full list AND exits non-zero on any violation;
+# `make test` depends on this. Filters NF==3 to skip nm's "filename:"
+# lines and 2-field undefined refs. Includes 'C' (tentative/common)
+# alongside T/D/B/R/S so an uninitialized global can't sneak past.
+# Skips names containing '.' — those are compiler-emitted artifacts
+# like gcc's i386 PIC thunks _x86.get_pc_thunk.{ax,bx,si}; legitimate
+# C identifiers can't contain a dot, so this can't hide a pakka leak.
+symbol-audit: $(LIBPAKKA)
+	@all=`$(NM) -g $(LIBPAKKA) | awk 'NF == 3 && $$2 ~ /^[TDBRSC]$$/ { sub(/^_/, "", $$3); if ($$3 ~ /\./) next; print $$3 }' | sort -u`; \
+	bad=`printf '%s\n' "$$all" | grep -v '^pakka_' || true`; \
+	printf '%s\n' "$$all"; \
+	if [ -n "$$bad" ]; then \
+		echo "" >&2; \
+		echo "symbol-audit FAILED: non-pakka_ defined globals in $(LIBPAKKA):" >&2; \
+		printf '%s\n' "$$bad" >&2; \
+		exit 1; \
+	fi
+
+$(TARGET): $(CLI_OBJECTS) $(LIBPAKKA)
+	$(CC) $(CFLAGS) -o $(TARGET) $(CLI_OBJECTS) $(LIBPAKKA)
+
+# ar rcs: r = insert/replace, c = create silently, s = write index.
+# Inline mkdir keeps us GNU make 3.79.1 compatible (no order-only prereqs).
+$(LIBPAKKA): $(LIB_OBJECTS)
+	@mkdir -p $(LIB_DIR)
+	$(AR) rcs $@ $(LIB_OBJECTS)
+
+# C-API test binary. Built against the public include/ surface only,
+# linked against the static archive. Exercises every pakka_* public
+# function: NULL tolerance, structured-error population, opaque-entry
+# accessors, the streaming reader, add/delete/commit round-trips, and
+# the verify report callback — none of which the bats CLI suite can
+# reach.
+C_API_TEST = $(TEST_DIR)/c_api_test
+$(C_API_TEST): tests/c_api_test.c $(LIBPAKKA)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -o $@ tests/c_api_test.c $(LIBPAKKA)
+c_api_test: $(C_API_TEST)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -77,5 +137,5 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: $(TARGET) $(PAK0)
+test: $(TARGET) $(PAK0) $(C_API_TEST) symbol-audit
 	bats tests/

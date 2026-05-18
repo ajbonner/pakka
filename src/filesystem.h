@@ -6,6 +6,6 @@
 
 #include "compat.h"
 
-int file_exists(const char *dirname);
-int mkdir_r(char *path);
-int64_t filesize(FILE *fd);
+int pakka_file_exists(const char *dirname);
+int pakka_mkdir_r(char *path);
+int64_t pakka_filesize(FILE *fd);

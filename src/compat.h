@@ -7,6 +7,7 @@
  * GetTempPathA, MoveFileExA, etc. The point is that the rest of the
  * codebase only ever names POSIX (or pakka-internal) primitives. */
 
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -44,12 +45,16 @@
 
 #define PATH_SEPARATOR "/"
 
-char *compat_realpath(const char *path, char *resolved);
-char *compat_getcwd(char *buf, size_t size);
+char *pakka_compat_realpath(const char *path, char *resolved);
+char *pakka_compat_getcwd(char *buf, size_t size);
 
-/* Open a fresh temp file in binary write mode and write the resolved
- * path into out_path (capacity out_path_size). The basename suffix
- * must contain "XXXXXX" for mkstemp/_mktemp_s substitution.
+/* Open a fresh temp file in binary read/write mode ("w+b") and write
+ * the resolved path into out_path (capacity out_path_size). The
+ * basename suffix must contain "XXXXXX" for mkstemp/_mktemp_s
+ * substitution. Read access matters for pakka_commit's rebuild path,
+ * which seeks back to read payloads it appended through this same
+ * handle; the legacy create/delete paths only write so the upgraded
+ * mode is a strict superset.
  *
  * Tries to create the temp in the same directory as target_path (or
  * the target directory itself when used for create / delete rebuilds)
@@ -57,22 +62,22 @@ char *compat_getcwd(char *buf, size_t size);
  * to the system temp dir if the target's directory is unwritable.
  * target_path may be NULL to skip the same-dir attempt. Returns NULL
  * on failure. */
-FILE *compat_mkstemp_open(const char *target_path,
+FILE *pakka_compat_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size);
 
 /* Returns the directory part of path. May mutate path in place
  * (POSIX dirname() contract). Callers must pass a throwaway copy. */
-char *compat_dirname(char *path);
+char *pakka_compat_dirname(char *path);
 
-int   compat_mkdir(const char *path, int mode);
-char *compat_strdup(const char *s);
+int   pakka_compat_mkdir(const char *path, int mode);
+char *pakka_compat_strdup(const char *s);
 
 /* lstat() on POSIX (does not dereference the final path component);
  * falls back to stat() on Windows where reparse-point checks belong
  * to a separate code path. Used by the recursive-add path so symlinks
  * are detected explicitly rather than silently followed. */
-int compat_lstat(const char *path, struct stat *sb);
+int pakka_compat_lstat(const char *path, struct stat *sb);
 
 /* Returns 1 if path is a symlink (POSIX) or a reparse point /
  * junction / mount point (Windows), else 0. Errors are reported as 0
@@ -80,7 +85,7 @@ int compat_lstat(const char *path, struct stat *sb);
  * better message). Used by the recursive-add path to reject indirections
  * that would otherwise let an attacker-controlled tree pull files
  * from outside the requested directory. */
-int compat_is_reparse_or_symlink(const char *path);
+int pakka_compat_is_reparse_or_symlink(const char *path);
 
 /* Try to acquire an exclusive non-blocking lock on the open FILE*.
  * POSIX: flock(LOCK_EX | LOCK_NB). Windows: _locking on byte 0. Lock
@@ -89,7 +94,7 @@ int compat_is_reparse_or_symlink(const char *path);
  * pakka invocations from corrupting a pak in parallel — multiple
  * concurrent add/delete operations would silently clobber each
  * other's directory rewrites. */
-int compat_try_exclusive_lock(FILE *fp);
+int pakka_compat_try_exclusive_lock(FILE *fp);
 
 /* Open a write FILE* at dest_dir/rel_path, refusing to follow any
  * symlink (POSIX) or reparse point (Windows) along rel_path. Missing
@@ -109,19 +114,29 @@ int compat_try_exclusive_lock(FILE *fp);
  *     mkdir→reopen window on missing intermediates and nothing more.
  *   - Windows: GetFileAttributesA + CreateFile with a short TOCTOU
  *     window. */
-FILE *compat_open_extract_target(const char *dest_dir, const char *rel_path);
+FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path);
 
 /* Rename src→dst, replacing dst if it exists. Returns 0 on success
  * (POSIX rename convention), -1 on failure. Callers MUST close every
  * open FILE* on dst before calling: CRT fopen on Windows omits
- * FILE_SHARE_DELETE, so an outstanding handle blocks the replace. */
-int compat_rename_replace(const char *src, const char *dst);
+ * FILE_SHARE_DELETE, so an outstanding handle blocks the replace.
+ *
+ * win32_code (optional, may be NULL): on Windows MoveFileExA does not
+ * set errno; the implementation captures GetLastError() into *win32_code
+ * immediately after the failing call so callers can populate
+ * pakka_error_t.system_code with a real DWORD. POSIX implementations
+ * leave *win32_code untouched and rely on errno as before. */
+int pakka_compat_rename_replace(const char *src, const char *dst,
+                          uint32_t *win32_code);
 
 /* Rename src→dst with no-replace semantics: fails if dst exists.
  * Used by create mode to close the TOCTOU window between create_pakfile's
  * stat() existence check and close_pakfile's final rename. Returns 0
  * on success, -1 on failure (including dst-already-exists). Same FILE*
- * close-first rule as compat_rename_replace. */
-int compat_rename_noreplace(const char *src, const char *dst);
+ * close-first rule as pakka_compat_rename_replace.
+ *
+ * win32_code as for pakka_compat_rename_replace. */
+int pakka_compat_rename_noreplace(const char *src, const char *dst,
+                            uint32_t *win32_code);
 
 #endif

@@ -1,6 +1,6 @@
 #include "filesystem.h"
 
-int file_exists(const char *filename) {
+int pakka_file_exists(const char *filename) {
 	struct stat sb;
 	return stat(filename, &sb) == 0;
 }
@@ -10,7 +10,7 @@ int file_exists(const char *filename) {
  * sharing a -C dir spuriously fail when one wins the mkdir race. */
 static int mkdir_or_exists_dir(const char *path, int mode) {
     struct stat sb;
-    if (compat_mkdir(path, mode) == 0) {
+    if (pakka_compat_mkdir(path, mode) == 0) {
         return 0;
     }
     if (errno != EEXIST) {
@@ -26,17 +26,20 @@ static int mkdir_or_exists_dir(const char *path, int mode) {
     return 0;
 }
 
-int mkdir_r(char *path) {
+/* Recursive mkdir. Silent — library code; the caller (CLI) is
+ * responsible for translating non-zero return into a user-facing
+ * diagnostic. errno is set on failure (either by mkdir(2) or by
+ * setting it explicitly when the existing path is not a directory). */
+int pakka_mkdir_r(char *path) {
     struct stat sb;
     char *curpos = path;
     int mode = 0777;
 
     if (stat(path, &sb) == 0) {
         if (S_ISDIR(sb.st_mode) == 0) {
-            fprintf(stderr, "Could not create directory '%s': file exists but is not a directory\n", path);
+            errno = ENOTDIR;
             return -1;
         }
-
         return 0;
     }
 
@@ -47,10 +50,8 @@ int mkdir_r(char *path) {
     while ((curpos = strchr(curpos, '/'))) {
         *curpos = '\0';
         if (mkdir_or_exists_dir(path, mode) != 0) {
-            fprintf(stderr, "Could not create directory '%s': %s\n", path, strerror(errno));
             return -1;
         }
-
         *curpos++ = '/';
         while (*curpos == '/') {
             curpos++;
@@ -58,14 +59,13 @@ int mkdir_r(char *path) {
     }
 
     if (mkdir_or_exists_dir(path, mode) != 0) {
-        fprintf(stderr, "Could not create directory '%s': %s\n", path, strerror(errno));
         return -1;
     }
 
     return 0;
 }
 
-int64_t filesize(FILE *fd) {
+int64_t pakka_filesize(FILE *fd) {
     long size;
 
     if (fseek(fd, 0L, SEEK_END) != 0) {
