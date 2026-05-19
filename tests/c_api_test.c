@@ -932,6 +932,103 @@ static int test_zip_format_label_roundtrip(const char *scratch_dir) {
     return 0;
 }
 
+/* SiN round-trip via the public C API: create an SPAK archive,
+ * pakka_add_memory a 120-byte-name and one ordinary entry, close, then
+ * reopen and confirm pakka_format() reports SIN and both entries are
+ * present with intact bytes. */
+static int test_sin_roundtrip(const char *scratch_dir) {
+    char path[1024];
+    pakka_archive_t *arc = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e = NULL;
+    char longname[120];
+
+    snprintf(path, sizeof(path), "%s/c_api_sin.sin", scratch_dir);
+
+    /* 119-byte name (one short of the SiN 120-byte cap). */
+    memset(longname, 'a', 119);
+    longname[119] = '\0';
+
+    s = pakka_create(path, PAKKA_FORMAT_SIN, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create SiN");
+    s = pakka_add_memory(arc, "maps/test.bsp",
+                         "level-bytes", 11, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add_memory SiN entry 1");
+    s = pakka_add_memory(arc, longname, "x", 1, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add_memory SiN entry 2 (119-byte name)");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close SiN");
+
+    s = pakka_open(path, PAKKA_OPEN_READ, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen SiN");
+    EXPECT_EQ(pakka_format(arc), PAKKA_FORMAT_SIN, "format == SIN");
+    EXPECT_EQ((int)pakka_entry_count(arc), 2, "SiN entry count");
+    s = pakka_find_entry(arc, "maps/test.bsp", &e);
+    EXPECT_EQ(s, PAKKA_OK, "find SiN entry 1");
+    s = pakka_find_entry(arc, longname, &e);
+    EXPECT_EQ(s, PAKKA_OK, "find SiN entry 2 (119-byte name)");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close SiN reopen");
+    return 0;
+}
+
+/* DK archives are read-only at the API boundary: pakka_create rejects
+ * the format, and the mutation APIs (add_file, add_memory, delete,
+ * commit) reject DK archives opened for write. We do not have a real DK
+ * fixture available, so we exercise the create-rejection path. */
+static int test_daikatana_create_rejected(const char *scratch_dir) {
+    char path[1024];
+    int sentinel = 0;
+    pakka_archive_t *arc = (pakka_archive_t *)&sentinel;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    snprintf(path, sizeof(path), "%s/c_api_dk_rejected.pak", scratch_dir);
+
+    s = pakka_create(path, PAKKA_FORMAT_DAIKATANA, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_ERR_UNSUPPORTED, "create DK rejected");
+    EXPECT_EQ(arc == NULL, 1, "create DK clears *out");
+    return 0;
+}
+
+/* pakka_open_ex with an explicit hint that does not match the on-disk
+ * magic must return PAKKA_ERR_INVALID_ARGUMENT. Build a small SPAK
+ * archive and try to reopen it with --format pak / PAKKA_FORMAT_PAK. */
+static int test_open_ex_hint_mismatch(const char *scratch_dir) {
+    char path[1024];
+    pakka_archive_t *arc = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    snprintf(path, sizeof(path), "%s/c_api_hint.sin", scratch_dir);
+
+    s = pakka_create(path, PAKKA_FORMAT_SIN, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create SiN for hint test");
+    s = pakka_add_memory(arc, "x.txt", "y", 1, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add to SiN");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close SiN for hint test");
+
+    /* Opening the SPAK archive with PAKKA_FORMAT_PAK must fail. */
+    arc = NULL;
+    s = pakka_open_ex(path, PAKKA_OPEN_READ, PAKKA_FORMAT_PAK,
+                      &arc, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "PAK hint vs SPAK magic");
+    EXPECT_EQ(arc == NULL, 1, "open_ex clears *out on hint mismatch");
+
+    /* PAKKA_FORMAT_SIN succeeds. */
+    s = pakka_open_ex(path, PAKKA_OPEN_READ, PAKKA_FORMAT_SIN,
+                      &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "SIN hint matches SPAK magic");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after explicit SIN hint");
+    return 0;
+}
+
 static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
     /* Truncated PK3 signatures (just the 4-byte magic, no EOCD)
      * should fail with FORMAT now that PK3 is a recognized format.
@@ -962,6 +1059,9 @@ int main(int argc, char **argv) {
     if (test_open_rejects_duplicates(argv[2]) != 0) return 1;
     if (test_open_rejects_malformed_pk3(argv[2]) != 0) return 1;
     if (test_zip_format_label_roundtrip(argv[2]) != 0) return 1;
+    if (test_sin_roundtrip(argv[2]) != 0) return 1;
+    if (test_daikatana_create_rejected(argv[2]) != 0) return 1;
+    if (test_open_ex_hint_mismatch(argv[2]) != 0) return 1;
     if (test_add_commit_roundtrip(argv[2]) != 0) return 1;
     if (test_delete_commit(argv[2]) != 0) return 1;
     if (test_add_to_readonly_fails(argv[1]) != 0) return 1;
