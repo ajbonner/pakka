@@ -6,7 +6,7 @@
 # include/, and src/vendor/ but nothing else.
 
 cmake_minimum_required(VERSION 3.15)
-project(pakka VERSION 1.3.0 LANGUAGES C)
+project(pakka VERSION 1.4.0 LANGUAGES C)
 
 set(CMAKE_C_STANDARD 99)
 set(CMAKE_C_STANDARD_REQUIRED ON)
