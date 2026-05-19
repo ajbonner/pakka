@@ -20,6 +20,7 @@ string(TIMESTAMP PAKKA_BUILD_DATE "%b %d, %Y")
 set(PAKKA_LIB_SOURCES
     src/common.c
     src/compat.c
+    src/dk_codec.c
     src/filesystem.c
     src/pakfile.c
     src/pk3file.c

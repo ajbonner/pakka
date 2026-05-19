@@ -67,6 +67,10 @@ struct pakka_entry {
     uint32_t pk3_lfh_offset;        /* offset of LFH for verify cross-check */
     uint32_t pk3_crc32;
     uint16_t pk3_method;            /* PK3_METHOD_STORED or PK3_METHOD_DEFLATE */
+
+    /* Daikatana fields. Zero for PAK/SiN entries. */
+    uint32_t dk_compressed_size;    /* on-disk bytes for DK compressed entries */
+    uint8_t  dk_is_compressed;      /* 0 = STORED, 1 = custom byte-codec */
 };
 
 typedef struct pakka_entry Pakfileentry_t;
@@ -95,6 +99,19 @@ static inline int pakka_format_is_zip(pakka_format_t f) {
     return f == PAKKA_FORMAT_PK3 || f == PAKKA_FORMAT_PK4;
 }
 
+/* Per-format geometry for PAK-class archives (Quake PAK, SiN, Daikatana).
+ * pakka_pak_geometry(fmt) returns NULL for ZIP-class or any non-PAK
+ * label; internal callers dispatch on (geometry != NULL ? PAK-class :
+ * ZIP-class) before consulting the per-row fields below. */
+typedef struct {
+    const char *signature;       /* "PACK" or "SPAK" — 4 bytes, no NUL */
+    size_t      name_field_len;  /* 56 (PAK/DK) or 120 (SiN) */
+    size_t      dir_entry_size;  /* 64 (PAK) / 72 (DK) / 128 (SiN) */
+    int         has_compression; /* 0 (PAK/SiN), 1 (DK) */
+} pakka_pak_geometry_t;
+
+const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt);
+
 struct pakka_archive {
     pakka_format_t format;          /* PAKKA_FORMAT_PAK, _PK3, or _PK4 */
     char signature[PAKFILE_SIGNATURE_LEN];
@@ -115,13 +132,22 @@ struct pakka_archive {
     int dirty;                      /* 1 if pakka_add/delete have unflushed changes */
     int needs_rebuild;              /* 1 if any pakka_delete touched the entry list — commit must rebuild via temp */
 
+    /* Caller-supplied format hint from pakka_open_ex. AUTO means "probe
+     * and decide from the on-disk magic + layout"; any other value
+     * skips the PACK→Daikatana layout probe and asserts the on-disk
+     * magic is compatible. Set before load_pakfile runs. */
+    pakka_format_t format_hint;
+
     /* ZIP-class (PK3/PK4). The central directory starts here in the
      * file. New LFHs are written from this offset (replacing any prior
      * CDR + EOCD), with the new CDR + EOCD rewritten at commit. */
     uint32_t pk3_cdr_offset;
     /* Cap on per-entry decompressed bytes for pakka_open_entry and
-     * pakka_read_entry_alloc. 0 disables the cap. */
-    uint64_t pk3_max_decompressed;
+     * pakka_read_entry_alloc. 0 disables the cap. Applies to both ZIP-
+     * class (PK3/PK4) DEFLATE entries and Daikatana compressed entries —
+     * the field used to be PK3-only (hence the historical name); see
+     * pakka_set_max_decompressed_size for the public API. */
+    uint64_t max_decompressed;
 };
 
 typedef struct pakka_archive Pak_t;
@@ -196,3 +222,20 @@ pakka_status_t pakka_pk3_commit_impl(struct pakka_archive *pak,
 pakka_status_t pakka_pk3_deep_verify_entry(struct pakka_archive *pak,
                                            struct pakka_entry *entry,
                                            pakka_error_t *err);
+
+/* Daikatana custom byte-codec decoder. Whole-buffer decode: in/in_len is
+ * the compressed payload, out/out_len is the destination buffer (must
+ * equal entry->length — DK does not record decompressed size in the
+ * stream itself). Strict bounds + exact-length contract:
+ *  - every input read checked against in_len
+ *  - every output write checked against out_len
+ *  - back-reference distance must be 1..produced (no underflow)
+ *  - LZ overlap (copy_len > distance) is legal and decoded byte-by-byte
+ *  - termination accepts 0xFF terminator OR clean input exhaustion,
+ *    but only if produced == out_len; partial fill returns
+ *    PAKKA_ERR_FORMAT
+ *  - opcode b == 254 is invalid and returns PAKKA_ERR_FORMAT
+ * Returns PAKKA_OK on success or a populated err on any violation. */
+pakka_status_t pakka_dk_inflate(const unsigned char *in, size_t in_len,
+                                unsigned char *out, size_t out_len,
+                                pakka_error_t *err);

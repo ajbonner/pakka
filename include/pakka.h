@@ -24,7 +24,9 @@ typedef enum {
     PAKKA_FORMAT_AUTO = 0,
     PAKKA_FORMAT_PAK,
     PAKKA_FORMAT_PK3,
-    PAKKA_FORMAT_PK4
+    PAKKA_FORMAT_PK4,
+    PAKKA_FORMAT_SIN,        /* Ritual 1998, SPAK + 120-byte names */
+    PAKKA_FORMAT_DAIKATANA   /* Ion Storm 2000, PACK + 72-byte dir entries; read-only */
 } pakka_format_t;
 
 typedef enum {
@@ -86,6 +88,18 @@ typedef void (*pakka_report_fn)(void *userdata,
 
 pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode,
                           pakka_archive_t **out, pakka_error_t *err);
+/* Same as pakka_open but lets the caller pin the format. format_hint ==
+ * PAKKA_FORMAT_AUTO means "probe and decide from the on-disk magic + a
+ * layout probe for the PACK/Daikatana ambiguity" (today's pakka_open
+ * behavior). Other values skip the probe and assert that the on-disk
+ * magic is compatible with the hint:
+ *   - PAKKA_FORMAT_SIN: requires "SPAK" magic
+ *   - PAKKA_FORMAT_PAK / PAKKA_FORMAT_DAIKATANA: requires "PACK" magic
+ *   - PAKKA_FORMAT_PK3 / PAKKA_FORMAT_PK4: requires "PK\3\4" / "PK\5\6"
+ * Mismatch returns PAKKA_ERR_INVALID_ARGUMENT. */
+pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
+                             pakka_format_t format_hint,
+                             pakka_archive_t **out, pakka_error_t *err);
 pakka_status_t pakka_create(const char *path, pakka_format_t format,
                             unsigned flags,
                             pakka_archive_t **out, pakka_error_t *err);
@@ -110,9 +124,9 @@ pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
 /* Accessors for the opaque entry handle. Names are NUL-terminated and
  * remain valid until the owning pakka_archive_t is closed. Offsets and
  * sizes are uint64_t so the API can grow into ZIP64-sized archives in
- * the future without an ABI change; today every supported format (PAK,
- * PK3, PK4) stays inside the 32-bit ceiling and pakka explicitly refuses
- * ZIP64 sentinels. */
+ * the future without an ABI change; today every supported format
+ * stays inside the 32-bit ceiling and pakka explicitly refuses ZIP64
+ * sentinels. */
 const char *pakka_entry_name(const pakka_entry_t *entry);
 uint64_t    pakka_entry_size(const pakka_entry_t *entry);
 uint64_t    pakka_entry_offset(const pakka_entry_t *entry);
@@ -190,11 +204,12 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_error_t *err);
 
 /* Cap the maximum decompressed payload size that pakka_open_entry and
- * pakka_read_entry_alloc will accept for a ZIP-class archive (PK3/PK4).
- * Set to 0 to disable the cap. Default is 64 MiB. Applies to both
- * compressed and uncompressed sides — peak resident bytes during
- * inflate are bounded by 2x this value per open reader. No effect on
- * PAK archives (PAK has no compression). */
+ * pakka_read_entry_alloc will accept for archives with compressed
+ * entries (PK3/PK4 DEFLATE and Daikatana). Set to 0 to disable the
+ * cap. Default is 64 MiB. Applies to both compressed and uncompressed
+ * sides — peak resident bytes during inflate are bounded by 2x this
+ * value per open reader. No effect on Quake PAK / SiN archives or
+ * STORED ZIP entries (no decompression step). */
 pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
                                                uint64_t max_bytes,
                                                pakka_error_t *err);

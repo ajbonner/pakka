@@ -79,6 +79,11 @@ typedef struct opts_s {
     char **aliased_entries;
     char **aliased_sources;
     int aliased_count;
+    /* --format <name>. PAKKA_FORMAT_AUTO means "infer from extension or
+     * on-disk magic" (today's behaviour). Other values override both at
+     * open time (pakka_open_ex) and at create time (overrides the
+     * extension sniffer). */
+    pakka_format_t format;
 } opts_t;
 
 typedef struct treenode_s {
@@ -131,22 +136,44 @@ int main(int argc, char *argv[]) {
     g_argv0 = argv[0];
     parseopts(argc, argv, &opts);
 
+    /* --format daikatana applies to mutation modes only after we've
+     * confirmed they are mutation modes — but reject the explicit case
+     * here regardless, before opening or creating any file. */
+    if (opts.format == PAKKA_FORMAT_DAIKATANA
+        && (opts.mode == PAK_CREATE
+            || opts.mode == PAK_ADD
+            || opts.mode == PAK_REMOVE)) {
+        pakka_die("Daikatana archives are read-only "
+                  "(custom codec has no encoder)");
+    }
+
     if (opts.mode == PAK_CREATE) {
-        /* Format selection from extension (case-insensitive):
-         * .pk3 → PK3 (Quake 3), .pk4 → PK4 (Doom 3), anything else
-         * → PAK. PK3/PK4 produce only STORED entries in this build;
-         * DEFLATE encode is a future addition shared between both. */
-        pakka_format_t fmt = PAKKA_FORMAT_PAK;
-        size_t plen = strlen(opts.pakfile);
-        if (plen >= 4) {
-            const char *ext = opts.pakfile + plen - 4;
-            if ((ext[0] == '.')
-                && (ext[1] == 'p' || ext[1] == 'P')
-                && (ext[2] == 'k' || ext[2] == 'K')) {
-                if (ext[3] == '3') {
-                    fmt = PAKKA_FORMAT_PK3;
-                } else if (ext[3] == '4') {
-                    fmt = PAKKA_FORMAT_PK4;
+        /* Format selection from --format if explicit, else from
+         * extension (case-insensitive): .pk3 → PK3 (Quake 3), .pk4 →
+         * PK4 (Doom 3), .sin → SiN (Ritual), anything else → PAK.
+         * PK3/PK4 produce only STORED entries in this build; DEFLATE
+         * encode is a future addition shared between both. */
+        pakka_format_t fmt = opts.format;
+        if (fmt == PAKKA_FORMAT_AUTO) {
+            size_t plen = strlen(opts.pakfile);
+            fmt = PAKKA_FORMAT_PAK;
+            if (plen >= 4) {
+                const char *ext = opts.pakfile + plen - 4;
+                if ((ext[0] == '.')
+                    && (ext[1] == 'p' || ext[1] == 'P')
+                    && (ext[2] == 'k' || ext[2] == 'K')) {
+                    if (ext[3] == '3') {
+                        fmt = PAKKA_FORMAT_PK3;
+                    } else if (ext[3] == '4') {
+                        fmt = PAKKA_FORMAT_PK4;
+                    }
+                }
+                if (plen >= 4
+                    && (opts.pakfile[plen - 4] == '.')
+                    && (opts.pakfile[plen - 3] == 's' || opts.pakfile[plen - 3] == 'S')
+                    && (opts.pakfile[plen - 2] == 'i' || opts.pakfile[plen - 2] == 'I')
+                    && (opts.pakfile[plen - 1] == 'n' || opts.pakfile[plen - 1] == 'N')) {
+                    fmt = PAKKA_FORMAT_SIN;
                 }
             }
         }
@@ -157,7 +184,7 @@ int main(int argc, char *argv[]) {
             (opts.mode == PAK_ADD || opts.mode == PAK_REMOVE)
               ? PAKKA_OPEN_READ_WRITE
               : PAKKA_OPEN_READ;
-        s = pakka_open(opts.pakfile, mode, &pak, &err);
+        s = pakka_open_ex(opts.pakfile, mode, opts.format, &pak, &err);
     }
     if (s != PAKKA_OK) {
         fail_from_err(&err);
@@ -797,6 +824,38 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
         } else if (!option_end && strcmp(argv[src], "--deep") == 0) {
             opts->deep = 1;
             continue;
+        } else if (!option_end && strcmp(argv[src], "--format") == 0) {
+            if (src + 1 >= argc) {
+                fprintf(stderr,
+                        "--format requires one argument: "
+                        "pak | sin | daikatana | pk3 | pk4\n");
+                usage();
+            }
+            {
+                const char *name = argv[src + 1];
+                if (strcmp(name, "pak") == 0) {
+                    opts->format = PAKKA_FORMAT_PAK;
+                } else if (strcmp(name, "sin") == 0) {
+                    opts->format = PAKKA_FORMAT_SIN;
+                } else if (strcmp(name, "daikatana") == 0
+                           || strcmp(name, "dk") == 0) {
+                    opts->format = PAKKA_FORMAT_DAIKATANA;
+                } else if (strcmp(name, "pk3") == 0) {
+                    opts->format = PAKKA_FORMAT_PK3;
+                } else if (strcmp(name, "pk4") == 0) {
+                    opts->format = PAKKA_FORMAT_PK4;
+                } else if (strcmp(name, "auto") == 0) {
+                    opts->format = PAKKA_FORMAT_AUTO;
+                } else {
+                    fprintf(stderr,
+                            "Unknown --format value: %s "
+                            "(use pak, sin, daikatana, pk3, or pk4)\n",
+                            name);
+                    usage();
+                }
+            }
+            src += 1;
+            continue;
         } else if (!option_end && strcmp(argv[src], "--as") == 0) {
             if (src + 2 >= argc) {
                 fprintf(stderr,
@@ -932,6 +991,9 @@ static void help(void) {
     fprintf(stderr, " --tree                          list pak contents as a directory tree (only with -l)\n");
     fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");
     fprintf(stderr, "                                 (repeat --as for multiple aliased pairs; may mix with plain paths)\n");
+    fprintf(stderr, " --format <name>                 pin archive format: pak, sin, daikatana, pk3, pk4\n");
+    fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
+    fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", g_argv0);
     fprintf(stderr, "  %s -lf pak1.pak --tree        # List contents as a directory tree\n", g_argv0);

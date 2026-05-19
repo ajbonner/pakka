@@ -634,7 +634,7 @@ pakka_status_t pakka_pk3_open_impl(Pak_t *pak, pakka_error_t *err) {
     /* pak->format is set by the caller in src/pakfile.c (PK3 or PK4
      * depending on the filename extension); we share the rest of the
      * open path between the two formats. */
-    pak->pk3_max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
+    pak->max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
 
     if (pk3_find_eocd(pak->fp, pak->file_size, &eocd_offset) != 0) {
         saved_errno = errno;
@@ -713,9 +713,9 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
     reader->inflated_cursor = 0;
 
     /* Enforce the decompressed-size cap on both sides. */
-    if (pak->pk3_max_decompressed > 0) {
-        if ((uint64_t)entry->length > pak->pk3_max_decompressed
-            || (uint64_t)entry->pk3_compressed_size > pak->pk3_max_decompressed) {
+    if (pak->max_decompressed > 0) {
+        if ((uint64_t)entry->length > pak->max_decompressed
+            || (uint64_t)entry->pk3_compressed_size > pak->max_decompressed) {
             return pk3_err_fill(err, PAKKA_ERR_LIMIT,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
                                 "ZIP entry %s exceeds max_decompressed_size "
@@ -724,7 +724,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
                                 entry->filename,
                                 (unsigned)entry->length,
                                 (unsigned)entry->pk3_compressed_size,
-                                pak->pk3_max_decompressed);
+                                pak->max_decompressed);
         }
     }
 
@@ -1028,7 +1028,7 @@ pakka_status_t pakka_pk3_create_impl(Pak_t *pak, pakka_error_t *err) {
 
     /* pak->format is set by the caller in src/pakfile.c (PK3 or PK4
      * depending on the requested format). */
-    pak->pk3_max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
+    pak->max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
     pak->pk3_cdr_offset = 0;
     pak->num_entries = 0;
     pak->head = NULL;

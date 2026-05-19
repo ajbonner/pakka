@@ -63,7 +63,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test verify-tarball verify-q3demo fixture slow-test
+.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
 
 all: $(TARGET)
 
@@ -125,6 +125,16 @@ $(C_API_TEST): tests/c_api_test.c $(LIBPAKKA)
 	$(CC) $(CFLAGS) -o $@ tests/c_api_test.c $(LIBPAKKA)
 c_api_test: $(C_API_TEST)
 
+# DK-codec exerciser. Unlike c_api_test (which is public-surface only),
+# this test calls pakka_dk_inflate directly through src/common.h. The
+# codec lives behind the library symbol audit (pakka_dk_inflate), so
+# linking against $(LIBPAKKA) is enough — no separate object compile.
+DK_CODEC_TEST = $(TEST_DIR)/dk_codec_test
+$(DK_CODEC_TEST): tests/dk_codec_test.c $(LIBPAKKA)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ tests/dk_codec_test.c $(LIBPAKKA)
+dk_codec_test: $(DK_CODEC_TEST)
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -155,7 +165,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: $(TARGET) $(PAK0) $(C_API_TEST) symbol-audit
+test: $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
 	CFLAGS='$(CFLAGS)' bats tests/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

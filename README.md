@@ -1,6 +1,7 @@
 # Pakka
-A command line utility for working with Quake 1 / 2 .pak files,
-Quake 3 .pk3 files, and Doom 3 .pk4 files.
+A command line utility for working with Quake 1 / 2 `.pak` files,
+SiN `.sin` archives, Daikatana `.pak` archives (read-only),
+Quake 3 `.pk3` files, and Doom 3 `.pk4` files.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -44,9 +45,12 @@ the same `src/*.c` (including `src/pk3file.c` and the vendored
 
 ## Usage
 Pakka has 6 major modes (one per invocation), each working on `.pak`
-(Quake 1 / 2), `.pk3` (Quake 3), and `.pk4` (Doom 3) archives. PK3 and
-PK4 are byte-identical ZIP containers; the extension only changes the
-label returned by `pakka_format()`.
+(Quake 1 / 2), `.sin` (SiN), Daikatana `.pak` (read-only), `.pk3`
+(Quake 3), and `.pk4` (Doom 3) archives. PK3 and PK4 are byte-identical
+ZIP containers; the extension only changes the label returned by
+`pakka_format()`. Daikatana shares Quake's `"PACK"` magic — pakka
+probes both directory layouts at open time, and `--format daikatana`
+pins the decision when the archive is ambiguous.
 
 * List pak contents: `./pakka -lf <archive>`
   * `--tree` renders the listing as a UTF-8 box-drawing directory tree.
@@ -58,7 +62,10 @@ label returned by `pakka_format()`.
     directory.
 * Create: `./pakka -cf <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * Format is picked from the destination extension (case-insensitive):
-    `.pk3` → PK3, `.pk4` → PK4, anything else → PAK.
+    `.pk3` → PK3, `.pk4` → PK4, `.sin` → SiN, anything else → PAK.
+    `--format <name>` (`pak`, `sin`, `pk3`, `pk4`) overrides the
+    extension. `--format daikatana` is rejected on `-c` (Daikatana
+    archives are read-only).
 * Add to archive: `./pakka -af <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
     entry name (the source path on disk and the name stored in the archive
@@ -78,6 +85,8 @@ label returned by `pakka_format()`.
 | Format | Read | List | Extract | Create | Add | Delete | Verify |
 |---|---|---|---|---|---|---|---|
 | Quake 1 / 2 PAK | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| SiN (`SPAK`, 120-byte names) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Daikatana (`PACK`, 72-byte entries, custom codec) | ✓ | ✓ | ✓ | — | — | — | ✓ |
 | Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
 | Doom 3 PK4 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
 
@@ -86,6 +95,12 @@ Quake and Doom 3 engines accept STORED archives; the output is larger
 than a DEFLATE-compressed equivalent. DEFLATE encode support is deferred
 for both formats.
 
+Daikatana is read-only: the custom byte-codec has no published encoder,
+so `pakka_create(PAKKA_FORMAT_DAIKATANA, ...)` and the mutation modes
+(`-c`/`-a`/`-d` with `--format daikatana`) return `PAKKA_ERR_UNSUPPORTED`
+before any state changes. Compressed Daikatana entries decode through
+`pakka_dk_inflate` (reference: yquake2/pakextract).
+
 Refused for PK3/PK4 archives: ZIP64, encrypted entries, data descriptors
 (general-purpose bit 3), multi-disk archives, and compression methods
 other than STORED (0) and DEFLATE (8). Each refusal returns
@@ -93,11 +108,12 @@ other than STORED (0) and DEFLATE (8). Each refusal returns
 
 ### Using libpakka from C
 
-`include/pakka.h` exposes 20 functions for opening, inspecting,
+`include/pakka.h` exposes 22 functions for opening, inspecting,
 extracting from, and mutating pak archives:
 
-* Archive lifecycle: `pakka_open` / `pakka_create` / `pakka_close`
-  (close implicitly commits on dirty)
+* Archive lifecycle: `pakka_open` / `pakka_open_ex` (lets the caller
+  pin the format) / `pakka_create` / `pakka_close` (close implicitly
+  commits on dirty)
 * Read introspection: `pakka_format` / `pakka_entry_count` /
   `pakka_entry_at` / `pakka_find_entry`
 * Entry accessors over the opaque `pakka_entry_t`:
@@ -115,13 +131,14 @@ every failure returns a `pakka_status_t` and optionally populates a
 caller-provided `pakka_error_t` with structured detail (errno or Win32
 `GetLastError`, operation name, entry index, file offset, message).
 
-For PK3/PK4 archives, `pakka_set_max_decompressed_size(archive, max_bytes,
-err)` caps the bytes any single `pakka_open_entry` /
-`pakka_read_entry_alloc` will inflate — refuses zip-bomb-style
-high-ratio entries before they hit RAM. Default 64 MiB; pass 0 to
-disable. `pakka_verify` with the `PAKKA_VERIFY_DEEP` flag adds
-per-entry CRC32 and decompression checks on top of the structural
-walk.
+For archives with compressed entries (PK3/PK4 DEFLATE and Daikatana),
+`pakka_set_max_decompressed_size(archive, max_bytes, err)` caps the
+bytes any single `pakka_open_entry` / `pakka_read_entry_alloc` will
+inflate — refuses zip-bomb-style high-ratio entries before they hit
+RAM. Default 64 MiB; pass 0 to disable. `pakka_verify` with the
+`PAKKA_VERIFY_DEEP` flag adds per-entry CRC32 and decompression checks
+on top of the structural walk (CRC for PK3/PK4; byte-count check for
+Daikatana — the custom codec has no CRC).
 
 `tests/c_api_test.c` exercises every one of those functions against
 `libpakka.a` only (no internal headers) and is the canonical example
@@ -129,12 +146,15 @@ of call patterns.
 
 ## Security
 
-Pak entry names are 56 bytes of attacker-controlled data. Extract,
-add, and verify share a fail-fast validator (`pakka_unsafe_entry_name`)
-that rejects entry names that would escape the destination or
-materialize as something dangerous on disk. The same rules apply to
-the entry-name side of `pakka_add_file` / `--as` so a pak built with
-pakka can be re-extracted with pakka without surprises.
+Pak entry names are attacker-controlled data (up to 56 bytes for Quake
+PAK / Daikatana, 120 bytes for SiN, up to the ZIP cap for PK3/PK4).
+Extract, add, and verify share a fail-fast validator
+(`pakka_unsafe_entry_name`) that is format-independent — it inspects
+the byte content, not the field width — and rejects entry names that
+would escape the destination or materialize as something dangerous on
+disk. The same rules apply to the entry-name side of `pakka_add_file`
+/ `--as` so a pak built with pakka can be re-extracted with pakka
+without surprises.
 
 Rejected entry names:
 
