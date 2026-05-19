@@ -135,6 +135,8 @@ extracting from, and mutating pak archives:
   `pakka_add_memory` / `pakka_delete` / `pakka_commit`
 * Integrity: `pakka_verify` (drives a caller-supplied
   `pakka_report_fn` callback)
+* Tuning: `pakka_set_max_decompressed_size` (caps PK3/PK4 DEFLATE and
+  Daikatana decompressed payload size; default 64 MiB, 0 disables)
 * Memory convenience: `pakka_read_entry_alloc` / `pakka_free`
 
 Library functions never call `exit` and never write to stdout/stderr;
