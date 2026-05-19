@@ -20,6 +20,12 @@ typedef struct pakka_entry pakka_entry_t;
 typedef struct pakka_reader pakka_reader_t;
 typedef struct pakka_error pakka_error_t;
 
+/* Version string of the linked libpakka, e.g. "1.3.0". Static storage,
+ * never NULL. Useful for runtime feature gating in language bindings or
+ * for embedding the linked library version in a host application's
+ * diagnostics. */
+const char *pakka_version(void);
+
 typedef enum {
     PAKKA_FORMAT_AUTO = 0,
     PAKKA_FORMAT_PAK,
