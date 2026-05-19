@@ -188,7 +188,7 @@ verify-q3demo: $(Q3DEMO_ZIP)
 # to producing the fixture.
 $(Q3DEMO_PAK0_PK3): $(TARGET) verify-q3demo
 	@mkdir -p $(TEST_DIR)/q3demo_raw
-	./$(TARGET) -xf $(Q3DEMO_ZIP) -C $(TEST_DIR)/q3demo_raw >/dev/null
+	./$(TARGET) -x -C $(TEST_DIR)/q3demo_raw $(Q3DEMO_ZIP) >/dev/null
 	@mkdir -p $(TEST_DIR)/q3demo
 	@cp $(TEST_DIR)/q3demo_raw/Quake\ 3\ Arena\ Demo/demoq3/pak0.pk3 $(Q3DEMO_PAK0_PK3)
 	@echo "==> Q3 demo pak0.pk3 ready: $(Q3DEMO_PAK0_PK3)"

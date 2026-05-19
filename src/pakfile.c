@@ -273,7 +273,7 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
     pak->writable = writable;
 
     /* Hold an exclusive non-blocking lock for mutating opens. Two
-     * concurrent `pakka -af` invocations would otherwise both seek to
+     * concurrent `pakka -a` invocations would otherwise both seek to
      * the same byte-tail, write payloads on top of each other, and
      * race the directory rewrite. The lock is released automatically
      * when pak->fp is closed. */
