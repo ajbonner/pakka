@@ -67,8 +67,10 @@ setup_file() {
     [ -f "$BATS_TEST_TMPDIR/built.pk3" ]
 
     # First 4 bytes must be PK\003\004 (LFH) since we wrote entries.
-    # Use od (POSIX) — BSDs don't ship xxd by default.
-    sig=$(head -c 4 "$BATS_TEST_TMPDIR/built.pk3" | od -An -tx1 | tr -d ' \n')
+    # `dd bs=1 count=N` is POSIX; OpenBSD's `head` has no -c, and BSDs
+    # don't ship xxd by default.
+    sig=$(dd if="$BATS_TEST_TMPDIR/built.pk3" bs=1 count=4 2>/dev/null \
+            | od -An -tx1 | tr -d ' \n')
     [ "$sig" = "504b0304" ]
 
     # unzip understands our output — independent reader check.
@@ -217,6 +219,7 @@ PY
 }
 
 @test "pk3 format: pakka_format() returns PAKKA_FORMAT_PK3 for opened PK3" {
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH (MSYS2 / MSVC build)"
     cat > "$BATS_TEST_TMPDIR/fmt_test.c" <<'EOF'
 #include <stdio.h>
 #include "pakka.h"
@@ -361,6 +364,7 @@ PY
 }
 
 @test "pk3 c-api: max_decompressed_size cap refuses oversize entries" {
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH (MSYS2 / MSVC build)"
     # The default cap is 64 MiB; we exercise the cap from C with the
     # cap dropped to 100 bytes against an 11 KB DEFLATE entry, which
     # must be refused with PAKKA_ERR_LIMIT.

@@ -274,6 +274,7 @@ jobs:
             tar
             make
             zip
+            unzip
             python3
       # MSYS2 has no bats package; install from upstream. /usr/local/bin
       # is on the default MSYS2 PATH so no extra wiring needed.
