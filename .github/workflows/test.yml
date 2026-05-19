@@ -89,7 +89,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl python3
+          sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
   linux-glibc-arm64:
@@ -104,7 +104,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl python3
+          sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
   # Big-endian correctness canary. s390x is the cheapest BE target: a
@@ -134,7 +134,7 @@ jobs:
               set -e
               apt-get update >/dev/null
               apt-get install -y --no-install-recommends \
-                build-essential bats curl openssl ca-certificates python3 >/dev/null
+                build-essential bats curl openssl ca-certificates zip python3 >/dev/null
               cp -a /src/. /work
               cd /work
               rm -f pakka
@@ -150,7 +150,7 @@ jobs:
     steps:
       # tar + zstd are needed by actions/cache; Alpine's busybox tar can't
       # produce the archive format the cache action expects on save.
-      - run: apk add --no-cache build-base make curl openssl bats bash git tar zstd python3
+      - run: apk add --no-cache build-base make curl openssl bats bash git tar zstd zip python3
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -174,7 +174,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib build-essential bats curl openssl python3
+          sudo apt-get install -y gcc-multilib build-essential bats curl openssl zip python3
       - run: make test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
   # Host cache survives into the VM: vmactions/*-vm rsyncs the workspace
@@ -194,7 +194,7 @@ jobs:
           release: '15.0'
           usesh: true
           sync: rsync
-          prepare: pkg install -y gmake curl bats-core python3
+          prepare: pkg install -y gmake curl bats-core zip python3
           run: gmake test
 
   # 32-bit ABI build on a 64-bit FreeBSD kernel via -m32 + lib32 (ships in base).
@@ -214,7 +214,7 @@ jobs:
           release: '15.0'
           usesh: true
           sync: rsync
-          prepare: pkg install -y gmake curl bats-core python3
+          prepare: pkg install -y gmake curl bats-core zip python3
           run: gmake test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
   openbsd-amd64:
@@ -231,7 +231,7 @@ jobs:
         with:
           release: '7.8'
           sync: rsync
-          prepare: pkg_add -I gmake curl bats python3
+          prepare: pkg_add -I gmake curl bats zip python3
           run: gmake test
 
   # Windows / MSVC build. Uses CMake to drive cl.exe (the Unix Makefile
@@ -273,6 +273,7 @@ jobs:
             openssl
             tar
             make
+            zip
             python3
       # MSYS2 has no bats package; install from upstream. /usr/local/bin
       # is on the default MSYS2 PATH so no extra wiring needed.
