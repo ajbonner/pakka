@@ -1,5 +1,6 @@
 # Pakka
-A command line utility for working with quake 1 and 2 .pak files.
+A command line utility for working with Quake 1 / 2 .pak files and
+Quake 3 / Doom 3 .pk3 files.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -36,27 +37,32 @@ Developer Command Prompt (or after running `vcvarsall.bat x64`):
     > cmake --build build\cmake
 
 Produces `build\cmake\pakka.exe`. The CMake build is additive — it compiles
-the same `src/*.c` plus the vendored `src/win/wingetopt` (getopt) and
-`src/win/dirent` (opendir/readdir) polyfills under `_WIN32`.
+the same `src/*.c` (including `src/pk3file.c` and the vendored
+`src/vendor/puff/puff.c` INFLATE decoder) plus the
+`src/vendor/wingetopt` (getopt) and `src/vendor/dirent`
+(opendir/readdir) polyfills under `_WIN32`.
 
 ## Usage
-Pakka has 6 major modes (one per invocation):
+Pakka has 6 major modes (one per invocation), each working on both
+`.pak` (Quake 1 / 2) and `.pk3` (Quake 3 / Doom 3) archives:
 
-* List pak contents: `./pakka -lf <pakfile.pak>`
+* List pak contents: `./pakka -lf <archive>`
   * `--tree` renders the listing as a UTF-8 box-drawing directory tree.
-* Extract: `./pakka -xf <pakfile.pak> [-C <destination>] [path...]`
+* Extract: `./pakka -xf <archive> [-C <destination>] [path...]`
   * With no path arguments, every entry is extracted.
   * With one or more path arguments, only those entries are extracted; pakka
-    errors if any requested path isn't in the pak.
+    errors if any requested path isn't in the archive.
   * `-C` selects a destination directory; defaults to the current working
     directory.
-* Create: `./pakka -cf <pakfile.pak> [file/dir...] [--as <entry_name> <source_path> ...]`
-* Add to pak: `./pakka -af <pakfile.pak> [file/dir...] [--as <entry_name> <source_path> ...]`
+* Create: `./pakka -cf <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
+  * Format is picked from the destination extension: `.pk3` (any case) →
+    PK3, anything else → PAK.
+* Add to archive: `./pakka -af <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
-    entry name (the source path on disk and the name stored in the pak can
-    differ). Repeatable; may be mixed with plain path arguments.
-* Delete from pak: `./pakka -df <pakfile.pak> [path...]`
-* Verify: `./pakka --verify -f <pakfile.pak>`
+    entry name (the source path on disk and the name stored in the archive
+    can differ). Repeatable; may be mixed with plain path arguments.
+* Delete from archive: `./pakka -df <archive> [path...]`
+* Verify: `./pakka --verify -f <archive>`
   * Walks every entry, runs the same name-safety check used at extract
     time, streams each payload to confirm the directory's `offset`/`length`
     point at readable bytes, and flags entries that would collide after
@@ -64,6 +70,22 @@ Pakka has 6 major modes (one per invocation):
     dot/space). Exits non-zero on any error-level finding.
 
 `./pakka -h` prints a usage summary.
+
+### Format support
+
+| Format | Read | List | Extract | Create | Add | Delete | Verify |
+|---|---|---|---|---|---|---|---|
+| Quake 1 / 2 PAK | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Quake 3 / Doom 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
+
+PK3 write produces STORED-method entries only (no compression). Quake
+engines accept STORED PK3s; the output is larger than a DEFLATE-compressed
+equivalent. DEFLATE encode support is deferred.
+
+Refused for PK3 archives: ZIP64, encrypted entries, data descriptors
+(general-purpose bit 3), multi-disk archives, and compression methods
+other than STORED (0) and DEFLATE (8). Each refusal returns
+`PAKKA_ERR_UNSUPPORTED` with a clear message.
 
 ### Using libpakka from C
 
@@ -88,8 +110,14 @@ Library functions never call `exit` and never write to stdout/stderr;
 every failure returns a `pakka_status_t` and optionally populates a
 caller-provided `pakka_error_t` with structured detail (errno or Win32
 `GetLastError`, operation name, entry index, file offset, message).
-The future `PAKKA_FORMAT_PK3` is reserved in the API and currently
-returns `PAKKA_ERR_UNSUPPORTED` from open and create.
+
+For PK3 archives, `pakka_set_max_decompressed_size(archive, max_bytes,
+err)` caps the bytes any single `pakka_open_entry` /
+`pakka_read_entry_alloc` will inflate — refuses zip-bomb-style
+high-ratio entries before they hit RAM. Default 64 MiB; pass 0 to
+disable. `pakka_verify` with the `PAKKA_VERIFY_DEEP` flag adds
+per-entry CRC32 and decompression checks on top of the structural
+walk.
 
 `tests/c_api_test.c` exercises every one of those functions against
 `libpakka.a` only (no internal headers) and is the canonical example
@@ -206,6 +234,13 @@ relative path resolves wrong and every test fails to find the binary.
 
 MSYS2 packages needed alongside bats: `pacman -S --needed bash coreutils curl
 diffutils git openssl tar make`.
+
+`make slow-test` is an opt-in heavier suite. It downloads id's Q3 demo
+wrapper from archive.org (~93 MiB, SHA256-pinned), uses pakka itself to
+extract the inner 47 MiB `pak0.pk3` (1,274 real id-built entries), and
+runs the full read / list / extract / structural-verify / deep-verify
+sequence against it. Not part of `make test` because of the download
+size and archive.org's intermittent availability.
 
 `make lint` runs [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) with
 a curated check set (`.clang-tidy` at the repo root). On macOS, install via

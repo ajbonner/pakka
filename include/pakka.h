@@ -160,6 +160,12 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
                                       pakka_error_t *err);
 void pakka_free(void *ptr);
 
+/* Bit flags for pakka_verify's `flags` argument. PAKKA_VERIFY_DEEP
+ * adds per-entry decompression + CRC32 checks on PK3 archives (no
+ * effect on PAK, which has no per-entry checksum). Other bits are
+ * reserved and must be zero. */
+#define PAKKA_VERIFY_DEEP 0x1u
+
 /* Verify the archive's structural integrity. Walks every entry:
  *   - rejects names that pakka itself would refuse to extract (path
  *     traversal, drive prefix, Windows reserved name, control bytes)
@@ -168,16 +174,27 @@ void pakka_free(void *ptr);
  *   - flags collisions after portable-union normalization (case fold,
  *     slash/backslash, trailing dot/space) — extracting such a pak
  *     would silently overwrite files on Windows/HFS+
+ *   - with PAKKA_VERIFY_DEEP: also decodes every DEFLATE entry and
+ *     confirms uncompressed size + CRC32 match the central directory
  *
  * report (optional, may be NULL) is called once per finding with a
  * severity, the per-finding status, the entry name (NULL if the
  * finding is archive-wide), and a human-readable message. Returns
  * PAKKA_OK if every finding was INFO/WARNING; otherwise returns the
- * first ERROR-level status. The flags parameter is reserved for future
- * use; pass 0. */
+ * first ERROR-level status. */
 pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_report_fn report, void *userdata,
                             pakka_error_t *err);
+
+/* Cap the maximum decompressed payload size that pakka_open_entry and
+ * pakka_read_entry_alloc will accept for a PK3 archive. Set to 0 to
+ * disable the cap. Default is 64 MiB. Applies to both compressed and
+ * uncompressed sides — peak resident bytes during inflate are bounded
+ * by 2x this value per open reader. No effect on PAK archives (PAK
+ * has no compression). */
+pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
+                                               uint64_t max_bytes,
+                                               pakka_error_t *err);
 
 #ifdef __cplusplus
 }

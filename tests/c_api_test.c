@@ -89,13 +89,14 @@ static int test_null_args(void) {
         FAIL("pakka_create(bad flags) must clear *out");
     }
 
-    /* pakka_create: PK3 → UNSUPPORTED, *out cleared */
+    /* pakka_create: PK3 to /dev/null → EXISTS (file present, refuses
+     * to overwrite); confirms PK3 path is reachable. */
     a = (pakka_archive_t *)OUT_SENTINEL;
     s = pakka_create("/dev/null", PAKKA_FORMAT_PK3,
                      PAKKA_CREATE_DEFAULT, &a, &err);
-    EXPECT_EQ(s, PAKKA_ERR_UNSUPPORTED, "pakka_create PK3");
+    EXPECT_EQ(s, PAKKA_ERR_EXISTS, "pakka_create PK3 over existing file");
     if (a != NULL) {
-        FAIL("pakka_create(PK3) must clear *out");
+        FAIL("pakka_create(PK3, exists) must clear *out");
     }
 
     /* pakka_entry_at on NULL archive → INVALID_ARGUMENT, *out cleared */
@@ -843,7 +844,8 @@ static int test_add_to_readonly_fails(const char *path) {
 
 static int try_open_zip_magic(const char *scratch_dir,
                               const char *label,
-                              const unsigned char magic[4]) {
+                              const unsigned char magic[4],
+                              pakka_status_t expected_status) {
     char path[1024];
     FILE *fp;
     pakka_archive_t *a;
@@ -861,27 +863,28 @@ static int try_open_zip_magic(const char *scratch_dir,
     fclose(fp);
     a = (pakka_archive_t *)OUT_SENTINEL;
     s = pakka_open(path, PAKKA_OPEN_READ, &a, &err);
-    if (s != PAKKA_ERR_UNSUPPORTED) {
-        FAIL("ZIP magic %s should yield UNSUPPORTED (got %d)",
-             label, (int)s);
+    if (s != expected_status) {
+        FAIL("ZIP magic %s expected status %d, got %d",
+             label, (int)expected_status, (int)s);
     }
     if (a != NULL) FAIL("pakka_open(ZIP %s) must clear *out", label);
     return 0;
 }
 
-static int test_open_rejects_pk3_magic(const char *scratch_dir) {
-    /* All three common ZIP signatures — local file header (most
-     * ZIPs), end-of-central-directory only (empty ZIP), and the
-     * spanning marker. Every documented signature must return
-     * PAKKA_ERR_UNSUPPORTED, not PAKKA_ERR_FORMAT, so callers can
-     * distinguish "we recognize this but don't support it" from
-     * "we don't recognize these bytes". */
+static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
+    /* Truncated PK3 signatures (just the 4-byte magic, no EOCD)
+     * should fail with FORMAT now that PK3 is a recognized format.
+     * The spanning-marker signature is a multi-disk indicator and
+     * stays UNSUPPORTED. */
     const unsigned char m_lfh[4]  = { 'P', 'K', 0x03, 0x04 };
     const unsigned char m_eocd[4] = { 'P', 'K', 0x05, 0x06 };
     const unsigned char m_span[4] = { 'P', 'K', 0x07, 0x08 };
-    if (try_open_zip_magic(scratch_dir, "lfh",  m_lfh)  != 0) return 1;
-    if (try_open_zip_magic(scratch_dir, "eocd", m_eocd) != 0) return 1;
-    if (try_open_zip_magic(scratch_dir, "span", m_span) != 0) return 1;
+    if (try_open_zip_magic(scratch_dir, "lfh",  m_lfh,
+                           PAKKA_ERR_FORMAT)      != 0) return 1;
+    if (try_open_zip_magic(scratch_dir, "eocd", m_eocd,
+                           PAKKA_ERR_FORMAT)      != 0) return 1;
+    if (try_open_zip_magic(scratch_dir, "span", m_span,
+                           PAKKA_ERR_UNSUPPORTED) != 0) return 1;
     return 0;
 }
 
@@ -896,7 +899,7 @@ int main(int argc, char **argv) {
     if (test_reader_streaming(argv[1]) != 0) return 1;
     if (test_create_close_roundtrip(argv[2]) != 0) return 1;
     if (test_open_rejects_duplicates(argv[2]) != 0) return 1;
-    if (test_open_rejects_pk3_magic(argv[2]) != 0) return 1;
+    if (test_open_rejects_malformed_pk3(argv[2]) != 0) return 1;
     if (test_add_commit_roundtrip(argv[2]) != 0) return 1;
     if (test_delete_commit(argv[2]) != 0) return 1;
     if (test_add_to_readonly_fails(argv[1]) != 0) return 1;

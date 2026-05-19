@@ -72,6 +72,7 @@ typedef struct opts_s {
     char **paths;
     int path_count;
     int tree;
+    int deep;
     /* --as <entry_name> <source_path> pairs. Parallel arrays so a
      * caller can pass any number of --as occurrences alongside plain
      * paths. Only valid with PAK_ADD / PAK_CREATE. */
@@ -108,7 +109,7 @@ static void op_add(pakka_archive_t *pak, char **paths, int path_count,
                    char **aliased_entries, char **aliased_sources,
                    int aliased_count);
 static void op_remove(pakka_archive_t *pak, char **paths, int path_count);
-static void op_verify(pakka_archive_t *pak);
+static void op_verify(pakka_archive_t *pak, int deep);
 static void cli_add_path(pakka_archive_t *pak, char *path);
 static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth);
 
@@ -131,7 +132,21 @@ int main(int argc, char *argv[]) {
     parseopts(argc, argv, &opts);
 
     if (opts.mode == PAK_CREATE) {
-        s = pakka_create(opts.pakfile, PAKKA_FORMAT_PAK,
+        /* Format selection: .pk3 (case-insensitive) → PK3, anything
+         * else → PAK. PK3 produces only STORED entries in this build;
+         * DEFLATE encode is a future addition. */
+        pakka_format_t fmt = PAKKA_FORMAT_PAK;
+        size_t plen = strlen(opts.pakfile);
+        if (plen >= 4) {
+            const char *ext = opts.pakfile + plen - 4;
+            if ((ext[0] == '.')
+                && (ext[1] == 'p' || ext[1] == 'P')
+                && (ext[2] == 'k' || ext[2] == 'K')
+                && (ext[3] == '3')) {
+                fmt = PAKKA_FORMAT_PK3;
+            }
+        }
+        s = pakka_create(opts.pakfile, fmt,
                          PAKKA_CREATE_DEFAULT, &pak, &err);
     } else {
         pakka_open_mode_t mode =
@@ -165,7 +180,7 @@ int main(int argc, char *argv[]) {
             op_remove(pak, opts.paths, opts.path_count);
             break;
         case PAK_VERIFY:
-            op_verify(pak);
+            op_verify(pak, opts.deep);
             break;
         default:
             fprintf(stderr, "Unknown operation mode selected\n");
@@ -735,9 +750,10 @@ static void verify_report_cb(void *userdata,
     }
 }
 
-static void op_verify(pakka_archive_t *pak) {
+static void op_verify(pakka_archive_t *pak, int deep) {
     pakka_error_t err;
-    pakka_status_t s = pakka_verify(pak, 0u, verify_report_cb, NULL, &err);
+    unsigned flags = deep ? PAKKA_VERIFY_DEEP : 0u;
+    pakka_status_t s = pakka_verify(pak, flags, verify_report_cb, NULL, &err);
     if (s != PAKKA_OK) {
         /* Report callback already printed per-finding diagnostics;
          * surface a final aggregate line on stderr and exit non-zero. */
@@ -773,6 +789,9 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
             continue;
         } else if (!option_end && strcmp(argv[src], "--verify") == 0) {
             setmodetype(opts, PAK_VERIFY);
+            continue;
+        } else if (!option_end && strcmp(argv[src], "--deep") == 0) {
+            opts->deep = 1;
             continue;
         } else if (!option_end && strcmp(argv[src], "--as") == 0) {
             if (src + 2 >= argc) {

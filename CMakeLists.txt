@@ -3,7 +3,7 @@
 # This is additive: the Unix build stays on the hand-written Makefile.
 # CMake exists so cl.exe (and any IDE / build generator that consumes
 # CMake) can produce pakka.exe on Windows. The two builds share src/,
-# include/, and src/win/ but nothing else.
+# include/, and src/vendor/ but nothing else.
 
 cmake_minimum_required(VERSION 3.15)
 project(pakka VERSION 1.3.0 LANGUAGES C)
@@ -22,6 +22,8 @@ set(PAKKA_LIB_SOURCES
     src/compat.c
     src/filesystem.c
     src/pakfile.c
+    src/pk3file.c
+    src/vendor/puff/puff.c
 )
 
 set(PAKKA_CLI_SOURCES
@@ -32,7 +34,7 @@ if(WIN32)
     # tronkko/dirent is header-only; cli_add_folder_r in cli.c uses it
     # for recursive directory walking on Windows. wingetopt has a .c
     # file used by cli.c only.
-    list(APPEND PAKKA_CLI_SOURCES src/win/wingetopt/getopt.c)
+    list(APPEND PAKKA_CLI_SOURCES src/vendor/wingetopt/getopt.c)
 endif()
 
 add_library(pakka STATIC ${PAKKA_LIB_SOURCES})
@@ -52,13 +54,13 @@ target_include_directories(pakka PUBLIC include PRIVATE src)
 target_include_directories(pakka_exe PRIVATE src)
 
 if(WIN32)
-    # dirent / wingetopt are vendored under src/win/. Both ultimately
+    # dirent / wingetopt are vendored under src/vendor/. Both ultimately
     # serve cli.c (cli_add_folder_r needs dirent.h; getopt() is
     # CLI-only), but the library exposes none of them.
-    target_include_directories(pakka PRIVATE src/win/dirent)
+    target_include_directories(pakka PRIVATE src/vendor/dirent)
     target_include_directories(pakka_exe PRIVATE
-        src/win/wingetopt
-        src/win/dirent
+        src/vendor/wingetopt
+        src/vendor/dirent
     )
 endif()
 
