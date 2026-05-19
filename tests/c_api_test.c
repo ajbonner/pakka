@@ -881,6 +881,57 @@ static int try_open_zip_magic(const char *scratch_dir,
     return 0;
 }
 
+/* Helper: create a fresh ZIP-class archive at `path`, check the
+ * immediate pakka_format() label, close it, reopen it, and check the
+ * label again. The two paths exercise distinct code: the immediate
+ * check rides pakka_create's "caller owns the label" wiring, while the
+ * reopen check rides pakka_open's filename-extension labeller. */
+static int check_zip_roundtrip(const char *path, pakka_format_t want,
+                               const char *label) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    (void)remove(path);
+
+    s = pakka_create(path, want, PAKKA_CREATE_DEFAULT, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "pakka_create ZIP");
+    if (pakka_format(a) != want) {
+        int got = (int)pakka_format(a);
+        pakka_close(a, NULL);
+        FAIL("pakka_format(%s) after create returned %d, want %d",
+             label, got, (int)want);
+    }
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "pakka_close after ZIP create");
+
+    s = pakka_open(path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "pakka_open ZIP");
+    if (pakka_format(a) != want) {
+        int got = (int)pakka_format(a);
+        pakka_close(a, NULL);
+        FAIL("pakka_format(%s) after reopen returned %d, want %d",
+             label, got, (int)want);
+    }
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "pakka_close after ZIP reopen");
+    return 0;
+}
+
+/* PK3 and PK4 share every byte on disk; only the enum label differs.
+ * Confirm both create and open route the label through correctly, and
+ * that the open-side extension sniffer doesn't cross-label one as the
+ * other. */
+static int test_zip_format_label_roundtrip(const char *scratch_dir) {
+    char pk3_path[1024];
+    char pk4_path[1024];
+    snprintf(pk3_path, sizeof(pk3_path), "%s/c_api_label.pk3", scratch_dir);
+    snprintf(pk4_path, sizeof(pk4_path), "%s/c_api_label.pk4", scratch_dir);
+    if (check_zip_roundtrip(pk3_path, PAKKA_FORMAT_PK3, "pk3") != 0) return 1;
+    if (check_zip_roundtrip(pk4_path, PAKKA_FORMAT_PK4, "pk4") != 0) return 1;
+    return 0;
+}
+
 static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
     /* Truncated PK3 signatures (just the 4-byte magic, no EOCD)
      * should fail with FORMAT now that PK3 is a recognized format.
@@ -910,6 +961,7 @@ int main(int argc, char **argv) {
     if (test_create_close_roundtrip(argv[2]) != 0) return 1;
     if (test_open_rejects_duplicates(argv[2]) != 0) return 1;
     if (test_open_rejects_malformed_pk3(argv[2]) != 0) return 1;
+    if (test_zip_format_label_roundtrip(argv[2]) != 0) return 1;
     if (test_add_commit_roundtrip(argv[2]) != 0) return 1;
     if (test_delete_commit(argv[2]) != 0) return 1;
     if (test_add_to_readonly_fails(argv[1]) != 0) return 1;
