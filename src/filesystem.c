@@ -66,16 +66,16 @@ int pakka_mkdir_r(char *path) {
 }
 
 int64_t pakka_filesize(FILE *fd) {
-    long size;
+    int64_t size;
 
-    if (fseek(fd, 0L, SEEK_END) != 0) {
+    if (pakka_compat_fseek(fd, 0, SEEK_END) != 0) {
         return -1;
     }
-    size = ftell(fd);
+    size = pakka_compat_ftell(fd);
     if (size < 0) {
         return -1;
     }
     rewind(fd);
 
-    return (int64_t)size;
+    return size;
 }
