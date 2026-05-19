@@ -1,10 +1,3 @@
-/* CLI for libpakka. libpakka.a never prints and never calls exit; this
- * TU is where pakka_status_t + pakka_error_t get translated into
- * stderr lines and a non-zero exit. pakka_die / pakka_die_e /
- * pakka_fprint_sanitized / pakka_sanitize_name are file-static
- * helpers — they keep the pakka_ prefix so they read consistently
- * with the library API at call sites but are not part of libpakka.a. */
-
 #include <stdarg.h>
 
 #include "common.h"
@@ -119,9 +112,6 @@ static void op_verify(pakka_archive_t *pak);
 static void cli_add_path(pakka_archive_t *pak, char *path);
 static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth);
 
-/* Tree-print helpers live here because libpakka.a contains no printf
- * calls. The CLI builds the tree in memory from pakka_entry_at()
- * results and renders it with the box-drawing chars defined above. */
 static treenode_t *create_tree_node(const char *name, int is_dir);
 static void insert_tree_path(treenode_t *root, const char *path,
                              uint32_t *dir_count, uint32_t *file_count);
@@ -201,11 +191,6 @@ static void fail_from_err(const pakka_error_t *err) {
     }
 }
 
-/*
- * List operation. Iterates entries in directory order and prints
- * "<name> (<length> bytes)\n" for each. Empty archive prints
- * "Pak is empty\n".
- */
 static void op_list(pakka_archive_t *pak) {
     size_t count = pakka_entry_count(pak);
     size_t i;
@@ -227,11 +212,6 @@ static void op_list(pakka_archive_t *pak) {
     }
 }
 
-/*
- * --tree list. Builds an in-memory directory tree from entry names
- * (slash-separated path components), then prints with UTF-8 box
- * drawing chars.
- */
 static void op_list_tree(pakka_archive_t *pak) {
     size_t count = pakka_entry_count(pak);
     size_t i;
@@ -406,18 +386,6 @@ static void free_tree(treenode_t *node) {
     free(node);
 }
 
-/*
- * Extract operation. Two-pass so the whole pak is rejected before any
- * disk write if anything dangerous is selected:
- *   1a) match requested paths against entries
- *   1b) reject the whole pak if any selected entry has an unsafe name
- *       (traversal, drive prefix, control bytes, Windows reserved)
- *   1c) reject the whole pak if selected entries collide after
- *       portable-union normalization (case fold, slash/backslash,
- *       trailing dot/space)
- *   2)  stream each selected entry via pakka_open_entry /
- *       pakka_reader_read into pakka_compat_open_extract_target
- */
 static int name_ptr_cmp_main(const void *a, const void *b) {
     const char *const *aa = (const char *const *)a;
     const char *const *bb = (const char *const *)b;
@@ -627,11 +595,6 @@ static void op_extract(pakka_archive_t *pak, char *destination,
     free(realdest);
 }
 
-/*
- * Add operation. Each path is either a regular file (call pakka_add_file
- * with path as both source and entry name) or a directory (recurse,
- * skipping symlinks and adding each contained regular file).
- */
 static void op_add(pakka_archive_t *pak, char **paths, int path_count,
                    char **aliased_entries, char **aliased_sources,
                    int aliased_count) {
@@ -643,11 +606,8 @@ static void op_add(pakka_archive_t *pak, char **paths, int path_count,
         cli_add_path(pak, paths[i]);
     }
 
-    /* --as pairs add a single entry per pair with explicit aliasing.
-     * No directory recursion or symlink-skipping like cli_add_path
-     * does — the source path is treated as a regular-file source by
-     * pakka_add_file, which still runs the same is_reparse_or_symlink
-     * and S_ISREG checks. */
+    /* --as never recurses or auto-detects directories — pakka_add_file
+     * still enforces is_reparse_or_symlink and S_ISREG on the source. */
     for (i = 0; i < aliased_count; i++) {
         printf("Adding %s to pak as %s\n",
                aliased_sources[i], aliased_entries[i]);
@@ -735,9 +695,6 @@ static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth) {
     closedir(d);
 }
 
-/*
- * Remove operation. Walk requested names, pakka_delete each, commit.
- */
 static void op_remove(pakka_archive_t *pak, char **paths, int path_count) {
     pakka_error_t err;
     pakka_status_t s;
@@ -756,10 +713,6 @@ static void op_remove(pakka_archive_t *pak, char **paths, int path_count) {
     }
 }
 
-/*
- * Verify operation: print one line per finding (INFO to stdout, WARNING
- * and ERROR to stderr); exit non-zero if pakka_verify reports any error.
- */
 static void verify_report_cb(void *userdata,
                              pakka_report_severity_t severity,
                              pakka_status_t status,
@@ -794,10 +747,6 @@ static void op_verify(pakka_archive_t *pak) {
     }
 }
 
-/*
- * Build "<basedir>/<filename>" into dest. Returns 0 on success, non-zero
- * if the result would overflow dest_size.
- */
 static int build_filename(char *dest, size_t dest_size,
                           const char *basedir, const char *filename) {
     size_t blen = strlen(basedir);
@@ -811,9 +760,6 @@ static int build_filename(char *dest, size_t dest_size,
     return 0;
 }
 
-/*
- * Argument parsing.
- */
 static int strip_long_options(int argc, char **argv, opts_t *opts) {
     int src;
     int dst = 1;
@@ -829,8 +775,6 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
             setmodetype(opts, PAK_VERIFY);
             continue;
         } else if (!option_end && strcmp(argv[src], "--as") == 0) {
-            /* Consume the next two argv slots as <entry_name> and
-             * <source_path>. Bail if the pair is incomplete. */
             if (src + 2 >= argc) {
                 fprintf(stderr,
                         "--as requires two arguments: <entry_name> <source_path>\n");

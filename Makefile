@@ -24,12 +24,12 @@ TEST_DIR=$(BUILD_DIR)/test
 SOURCES=$(wildcard $(SRC_DIR)/*.c)
 OBJECTS=$(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-# Library is every src/*.c except main.c; main.c is CLI-only and links
+# Library is every src/*.c except cli.c; cli.c is CLI-only and links
 # against build/lib/libpakka.a. The `symbol-audit` target below enforces
 # that only pakka_*-prefixed names leave the archive.
-LIB_SOURCES=$(filter-out $(SRC_DIR)/main.c,$(SOURCES))
+LIB_SOURCES=$(filter-out $(SRC_DIR)/cli.c,$(SOURCES))
 LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
-CLI_OBJECTS=$(OBJ_DIR)/main.o
+CLI_OBJECTS=$(OBJ_DIR)/cli.o
 LIBPAKKA=$(LIB_DIR)/libpakka.a
 
 QUAKE_URL=https://www.libsdl.org/projects/quake/data/quakesw-1.0.6.tar.gz

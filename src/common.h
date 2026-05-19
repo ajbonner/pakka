@@ -25,9 +25,9 @@
  * 64 KiB regardless of input file size. */
 #define PAKFILE_COPY_CHUNK 65536u
 
-/* Tagged so it matches the opaque forward declaration in
- * include/pakka.h (`typedef struct pakka_entry pakka_entry_t;`). The
- * full definition stays internal. */
+/* These struct tags match the opaque forward declarations in
+ * include/pakka.h. Public consumers see only the tag; the full
+ * definitions stay internal. */
 struct pakka_entry {
     char filename[PAKFILE_PATH_BUF];
     uint32_t offset;
@@ -37,20 +37,15 @@ struct pakka_entry {
 
 typedef struct pakka_entry Pakfileentry_t;
 
-/* Tagged to match include/pakka.h's
- * `typedef struct pakka_reader pakka_reader_t;` forward declaration.
- * Each reader owns a re-seek position into the archive's single FILE*
- * so multiple readers on the same archive remain coherent — every
- * pakka_reader_read seeks to next_offset before fread. */
 struct pakka_reader {
     struct pakka_archive *archive;
+    /* Re-seek position into the archive's single FILE* — multiple
+     * readers stay coherent because pakka_reader_read seeks here
+     * before every fread. */
     uint64_t next_offset;
     uint64_t remaining;
 };
 
-/* Tagged so it matches the opaque forward declaration in include/pakka.h
- * (`typedef struct pakka_archive pakka_archive_t;`). The full definition
- * stays internal — consumers of the public header see only the tag. */
 struct pakka_archive {
     char signature[PAKFILE_SIGNATURE_LEN];
     uint32_t diroffset;
@@ -59,10 +54,7 @@ struct pakka_archive {
     uint64_t file_size;
     Pakfileentry_t *head;
 
-    /* Moved from src/pakfile.c file-local globals in Phase 2 of the
-     * libpakka migration. The archive handle now owns its file handle
-     * and paths; only close_pakfile and delete_entries may close fp,
-     * and both must do so before any rename — Windows CRT fopen omits
+    /* close fp before every rename — Windows CRT fopen omits
      * FILE_SHARE_DELETE, so a live handle blocks MoveFileEx. */
     FILE *fp;
     char cur_pakpath[OS_PATH_MAX];  /* set by open_pakfile */
@@ -94,12 +86,6 @@ PAKKA_STATIC_ASSERT(
 PAKKA_STATIC_ASSERT(
     PAKFILE_PATH_BUF == PAKFILE_PATH_MAX + 1,
     path_buf_has_nul_guard);
-
-/* pakka_die, pakka_die_e, pakka_fprint_sanitized, pakka_sanitize_name
- * live in src/main.c (the CLI). Their prototypes are intentionally NOT
- * declared here so library code can't accidentally call them — the
- * library returns pakka_status_t + pakka_error_t, and only the CLI
- * translates those into exit/stderr. */
 
 /* The pak header diroffset/dirlength and entry offset/length fields
  * are stored little-endian on disk. Use these to read/write them so

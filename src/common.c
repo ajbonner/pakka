@@ -1,11 +1,5 @@
 #include "common.h"
 
-/* pakka_die / pakka_die_e / pakka_fprint_sanitized / pakka_sanitize_name
- * moved to src/main.c in Phase 6: they print to stderr or call exit(1),
- * neither of which is allowed inside libpakka.a. The library returns
- * pakka_status_t + pakka_error_t; only the CLI translates those into
- * stderr + exit. */
-
 /* The on-disk pak format is canonically little-endian (Quake 1/2
  * originated on x86). A raw fread of a uint32_t works only on LE
  * hosts; on big-endian (s390x, sparc, ppc) it interprets the bytes in
