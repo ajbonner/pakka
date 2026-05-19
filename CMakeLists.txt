@@ -14,7 +14,7 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 string(TIMESTAMP PAKKA_BUILD_DATE "%b %d, %Y")
 
-# The library is every src/*.c except main.c; main.c is the CLI. Only
+# The library is every src/*.c except cli.c; cli.c is the CLI. Only
 # pakka_*-prefixed symbols leak out of the static archive (enforced by
 # make symbol-audit).
 set(PAKKA_LIB_SOURCES
@@ -25,13 +25,13 @@ set(PAKKA_LIB_SOURCES
 )
 
 set(PAKKA_CLI_SOURCES
-    src/main.c
+    src/cli.c
 )
 
 if(WIN32)
-    # tronkko/dirent is header-only; cli_add_folder_r in main.c uses it
+    # tronkko/dirent is header-only; cli_add_folder_r in cli.c uses it
     # for recursive directory walking on Windows. wingetopt has a .c
-    # file used by main.c only.
+    # file used by cli.c only.
     list(APPEND PAKKA_CLI_SOURCES src/win/wingetopt/getopt.c)
 endif()
 
@@ -53,7 +53,7 @@ target_include_directories(pakka_exe PRIVATE src)
 
 if(WIN32)
     # dirent / wingetopt are vendored under src/win/. Both ultimately
-    # serve main.c (cli_add_folder_r needs dirent.h; getopt() is
+    # serve cli.c (cli_add_folder_r needs dirent.h; getopt() is
     # CLI-only), but the library exposes none of them.
     target_include_directories(pakka PRIVATE src/win/dirent)
     target_include_directories(pakka_exe PRIVATE

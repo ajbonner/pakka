@@ -339,12 +339,9 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
 
     init_pak_header(pak);
 
-    /* Write a valid empty PACK header to disk now so a caller that does
-     * pakka_create() + pakka_close() with no payload produces a
-     * well-formed pak (12-byte PACK header, diroffset=12, dirlength=0).
-     * The CLI -c path always calls add_files() → write_pak_directory()
-     * which overwrites this same header on disk, so behavior is
-     * unchanged there. */
+    /* Write a valid empty PACK header now so pakka_create + pakka_close
+     * with no payload produces a well-formed 12-byte pak. A subsequent
+     * commit overwrites this header on disk. */
     if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1
         || pakka_write_u32_le(pak->fp, pak->diroffset) != 0
         || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
@@ -372,13 +369,12 @@ pakka_status_t pakka_close(pakka_archive_t *pak, pakka_error_t *err) {
                         "pakka_close: archive must be non-NULL");
     }
 
-    /* Implicit commit on close: callers that did pakka_add_file /
-     * pakka_delete without an explicit pakka_commit get the writes
-     * persisted (matches the legacy CLI's "add_files then close"
-     * pattern). A commit failure here is sticky: status is set so we
-     * still proceed with the fclose/free below (the handle must be
-     * released), but we MUST skip the is_new → new_pakpath rename so a
-     * broken create doesn't get published. */
+    /* Implicit commit so pakka_add_file / pakka_delete without an
+     * explicit pakka_commit still get persisted. A commit failure here
+     * is sticky: status is set so we still proceed with fclose/free
+     * (the handle must be released), but we MUST skip the
+     * is_new → new_pakpath rename so a broken create doesn't get
+     * published. */
     if (pak->dirty) {
         pakka_status_t commit_s = pakka_commit(pak, err);
         if (commit_s != PAKKA_OK) {
@@ -666,39 +662,6 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
 
 
 
-
-
-
-
-
-
-
-
-
-
-/* Write a single pak entry's payload under dest_dir. The compat
- * helper does the path join, creates missing directories, and refuses
- * to follow any existing symlink/reparse point under dest_dir — so
- * an attacker who plants `models -> /tmp/outside` in dest_dir can't
- * redirect the write. Caller has already validated current->filename
- * for path-traversal characters. */
-
-/*
- * Two-pass extract:
- *
- *   Pass 1 (preflight): walk every entry, match against requested
- *   paths, run is_unsafe_extract_path on the selected ones, verify
- *   every requested path is found in the pak. No filesystem side
- *   effects. pakka_die anywhere here leaves the destination dir
- *   untouched.
- *
- *   Pass 2 (write): walk the same entries, extract the ones flagged
- *   by pass 1.
- *
- * Pre-fix the validation was interleaved with writes, so a pak with
- * "safe/a" followed by "../etc/passwd" would write safe/a to disk
- * before bailing on the traversal entry.
- */
 
 
 Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
@@ -1840,13 +1803,6 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
     return first_error;
 }
 
-/*
- * Rebuild the pak in a temp file: copy each retained entry (in directory
- * order) by seeking to its source offset, write a fresh directory, and rename
- * the temp file over the original. This avoids any assumption about whether
- * file bytes are laid out in directory order — id's pak0.pak famously isn't.
- */
-
 /* Copy one entry's payload from ffd to tfd, returning the new byte
  * offset in tfd via *new_offset_out. The caller is responsible for
  * deciding when to commit *new_offset_out into entry->offset — leaving
@@ -1939,11 +1895,6 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
 }
 
 
-/* Bounded "basedir/filename" join. Returns 0 on success, non-zero if the
- * combined result wouldn't fit in dest_size (NUL included). Replaces the
- * old strcat-into-fixed-buffer pattern that overflowed stack buffers on
- * deep paths. */
-
 /* Windows reserved device names. Matched against the segment's base
  * (everything before the first '.') case-insensitively, regardless of
  * extension: "CON.txt" is still the console. COM0/LPT0 are accepted by
@@ -1979,26 +1930,16 @@ static int is_reserved_device_name(const char *seg, size_t seg_len) {
     return 0;
 }
 
-/* Per-segment safety check. Centralizes everything we know about a
- * single path component:
- *  - empty: rejected. Pre-fix these passed (turning "foo//bar" into
- *    "foo/bar" on disk and aliasing the two names; "foo/" failed
- *    midway through extract, defeating preflight). Rejecting also
- *    means a trailing separator is now flagged at the validator
- *    instead of mid-write.
- *  - exact "." or "..": rejected. ".." is a directory escape;
- *    pre-fix "." was a no-op normalization that aliased "./foo"
- *    with "foo".
- *  - control bytes 0x01-0x1F and DEL: rejected (terminal injection
- *    and filesystem corner cases).
- *  - colon: rejected anywhere in the segment. On Windows this is the
- *    ADS (alternate data stream) separator; subsumes the old drive-
- *    letter check at position 1.
- *  - trailing '.' or ' ': rejected. Windows silently strips both, so
- *    "foo." resolves to "foo" — pak entries must never depend on
- *    that normalization (treats "foo" and "foo." as the same file).
- *  - Windows reserved device names (CON/NUL/COM1/...): rejected on
- *    every host because paks are portable.
+/* Per-segment safety check. Rejects:
+ *  - empty (would alias "foo//bar" with "foo/bar")
+ *  - exact "." (aliases "./foo" with "foo") or ".." (directory escape)
+ *  - control bytes 0x01-0x1F and DEL
+ *  - colon anywhere in the segment (Windows ADS separator; also
+ *    subsumes drive-letter checks)
+ *  - trailing '.' or ' ' (Windows silently strips both, so "foo."
+ *    resolves to "foo")
+ *  - Windows reserved device names (CON/NUL/COM1/...); checked on
+ *    every host because paks are portable
  */
 static int is_unsafe_segment(const char *seg, size_t seg_len) {
     size_t i;
@@ -2021,21 +1962,11 @@ static int is_unsafe_segment(const char *seg, size_t seg_len) {
     return 0;
 }
 
-/* Validate a pak entry name before extracting. Pak format places no
- * constraints on entry names beyond a 56-byte upper bound, so a malicious
- * pak can name an entry "../../etc/passwd", "C:\windows\foo", "CON",
- * "foo:stream", or "trailing." and corrupt or redirect the extract.
- * Both POSIX and Windows path forms are checked here because pak
- * archives are portable across hosts. */
-/* pakka_normalize_entry_name: produce the form a pak entry name would
- * collapse to on Windows / HFS+ extraction. The portable union below
- * is applied on every host so paks remain safe across destinations:
- *   - backslash separators become forward slashes
- *   - ASCII A-Z fold to a-z
- *   - trailing '.' and ' ' bytes are stripped from each path segment
- * dst is NUL-terminated. dst must be at least as large as src + 1.
- * Used by extract preflight to reject paks where two distinct entries
- * would materialize to the same path on disk. */
+/* Collapse a pak entry name to the form Windows / HFS+ extraction would
+ * see: backslashes become forward slashes, A-Z fold to a-z, trailing
+ * '.' and ' ' are stripped from each segment. Applied on every host so
+ * paks remain safe across destinations. dst must be at least src + 1
+ * bytes; output is NUL-terminated. */
 void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz) {
     size_t in = 0;
     size_t out = 0;
@@ -2070,6 +2001,11 @@ void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz) {
     dst[out] = '\0';
 }
 
+/* Reject pak entry names that would corrupt or redirect an extract.
+ * The pak format places no constraints beyond a 56-byte upper bound,
+ * so an attacker can ship "../../etc/passwd", "C:\windows\foo", "CON",
+ * "foo:stream", or "trailing." in a directory entry. Both POSIX and
+ * Windows path forms are checked because paks are portable. */
 int pakka_unsafe_entry_name(const char *path) {
     const char *p, *seg;
 
