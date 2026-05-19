@@ -251,10 +251,16 @@ pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode,
         return status;
     }
 
-    status = load_directory(pak, err);
-    if (status != PAKKA_OK) {
-        destroy_pak(pak);
-        return status;
+    /* PK3 path: load_pakfile dispatched into pakka_pk3_open_impl which
+     * already parsed the CDR. The PAK on-disk directory loader doesn't
+     * apply. Validate-no-duplicates still runs — it operates on the
+     * in-memory entry list so it's format-agnostic. */
+    if (pak->format != PAKKA_FORMAT_PK3) {
+        status = load_directory(pak, err);
+        if (status != PAKKA_OK) {
+            destroy_pak(pak);
+            return status;
+        }
     }
 
     status = validate_no_duplicates(pak, err);
@@ -290,12 +296,9 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
                         "pakka_create: unknown flag bits 0x%x", flags);
     }
 
-    if (format == PAKKA_FORMAT_PK3) {
-        return err_fill(err, PAKKA_ERR_UNSUPPORTED, PAKKA_ERR_DOMAIN_NONE,
-                        0, "create",
-                        "PK3 format not supported in this build");
-    }
-    if (format != PAKKA_FORMAT_PAK && format != PAKKA_FORMAT_AUTO) {
+    if (format != PAKKA_FORMAT_PAK
+        && format != PAKKA_FORMAT_PK3
+        && format != PAKKA_FORMAT_AUTO) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "create",
                         "pakka_create: unknown format %d", (int)format);
@@ -337,6 +340,18 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
                         "Cannot create temp pak file for %s", path);
     }
 
+    if (format == PAKKA_FORMAT_PK3) {
+        pakka_status_t pk3_status = pakka_pk3_create_impl(pak, err);
+        if (pk3_status != PAKKA_OK) {
+            destroy_pak(pak);
+            return pk3_status;
+        }
+        *out = pak;
+        return PAKKA_OK;
+    }
+
+    /* PAK (default) path. */
+    pak->format = PAKKA_FORMAT_PAK;
     init_pak_header(pak);
 
     /* Write a valid empty PACK header now so pakka_create + pakka_close
@@ -505,28 +520,26 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
                         "Cannot read pak signature");
     }
 
-    /* Report PK3/ZIP archives with PAKKA_ERR_UNSUPPORTED rather than
-     * the generic FORMAT error so callers can distinguish "we know what
-     * this is but don't support it yet" from "we don't recognize the
-     * bytes at all". Covers the three common ZIP signatures:
-     *   PK\3\4  local file header (most ZIPs start with this)
-     *   PK\5\6  empty ZIP / end-of-central-directory only
-     *   PK\7\8  spanning marker
-     * PK3 read support is reserved-only — adding a real PK3 read path
-     * would flip these returns into an actual ZIP loader, but until
-     * then PAKKA_ERR_UNSUPPORTED is the honest answer. */
+    /* PK3/ZIP signatures: PK\3\4 = local file header (normal case),
+     * PK\5\6 = empty PK3 (EOCD only). PK\7\8 (spanning) is refused
+     * as multi-disk inside the PK3 loader. */
     if (memcmp(pak->signature, "PK\x03\x04", PAKFILE_SIGNATURE_LEN) == 0
-        || memcmp(pak->signature, "PK\x05\x06", PAKFILE_SIGNATURE_LEN) == 0
-        || memcmp(pak->signature, "PK\x07\x08", PAKFILE_SIGNATURE_LEN) == 0) {
+        || memcmp(pak->signature, "PK\x05\x06", PAKFILE_SIGNATURE_LEN) == 0) {
+        /* Hand off to the PK3 loader. It owns format detection from
+         * here on, including the EOCD scan + CDR parse. */
+        return pakka_pk3_open_impl(pak, err);
+    }
+    if (memcmp(pak->signature, "PK\x07\x08", PAKFILE_SIGNATURE_LEN) == 0) {
         return err_fill(err, PAKKA_ERR_UNSUPPORTED,
                         PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                        "PK3/ZIP archives are not supported in this build");
+                        "Multi-disk PK3/ZIP archives are not supported");
     }
 
     if (memcmp(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN) != 0) {
         return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                         "open", "Not a pak file (bad signature)");
     }
+    pak->format = PAKKA_FORMAT_PAK;
 
     if (pakka_read_u32_le(pak->fp, &pak->diroffset) != 0
         || pakka_read_u32_le(pak->fp, &pak->dirlength) != 0) {
@@ -684,13 +697,11 @@ Pakfileentry_t *find_entry(Pak_t *pak, char *path) {
 
 pakka_format_t pakka_format(const pakka_archive_t *archive) {
     /* NULL archive returns AUTO as a sentinel — callers should check for
-     * AUTO before treating the result as authoritative. Any successfully
-     * opened archive is PAK in V1: PK3 returns PAKKA_ERR_UNSUPPORTED
-     * from pakka_create / pakka_open before any archive_t exists. */
+     * AUTO before treating the result as authoritative. */
     if (archive == NULL) {
         return PAKKA_FORMAT_AUTO;
     }
-    return PAKKA_FORMAT_PAK;
+    return archive->format;
 }
 
 size_t pakka_entry_count(const pakka_archive_t *archive) {
@@ -820,6 +831,15 @@ pakka_status_t pakka_open_entry(pakka_archive_t *archive,
     reader->next_offset = (uint64_t)entry->offset;
     reader->remaining = (uint64_t)entry->length;
 
+    if (archive->format == PAKKA_FORMAT_PK3) {
+        pakka_status_t pk3_status = pakka_pk3_open_entry_impl(
+            archive, reader, (pakka_entry_t *)entry, err);
+        if (pk3_status != PAKKA_OK) {
+            free(reader);
+            return pk3_status;
+        }
+    }
+
     *out = reader;
     return PAKKA_OK;
 }
@@ -849,6 +869,11 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
 
     if (reader->remaining == 0 || len == 0) {
         return PAKKA_OK;            /* clean EOF (or no-op read) */
+    }
+
+    /* PK3 reader (inflated buffer for DEFLATE, otherwise STORED stream). */
+    if (reader->archive->format == PAKKA_FORMAT_PK3) {
+        return pakka_pk3_reader_read_impl(reader, buf, len, nread, err);
     }
 
     chunk = (len < reader->remaining) ? len : (size_t)reader->remaining;
@@ -888,9 +913,26 @@ void pakka_reader_close(pakka_reader_t *reader) {
     if (reader == NULL) {
         return;
     }
+    /* PK3 readers may hold a malloc'd inflated buffer for DEFLATE
+     * entries; release it before freeing the reader struct. */
+    pakka_pk3_reader_close_impl(reader);
     /* The archive owns the FILE*; the reader only holds a re-seek
      * position. No fclose here. */
     free(reader);
+}
+
+pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
+                                               uint64_t max_bytes,
+                                               pakka_error_t *err) {
+    if (archive == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0,
+                        "set_max_decompressed_size",
+                        "pakka_set_max_decompressed_size: archive must "
+                        "be non-NULL");
+    }
+    archive->pk3_max_decompressed = max_bytes;
+    return PAKKA_OK;
 }
 
 pakka_status_t pakka_add_file(pakka_archive_t *archive,
@@ -918,6 +960,26 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                         PAKKA_ERR_DOMAIN_NONE, 0, "add_file",
                         "pakka_add_file: archive not writable "
                         "or no live file handle");
+    }
+
+    if (archive->format == PAKKA_FORMAT_PK3) {
+        if (pakka_unsafe_entry_name(entry_name)) {
+            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "add_file", "Refusing unsafe entry name %s",
+                     entry_name);
+            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_UNSAFE_NAME;
+        }
+        /* Reject duplicate entry name — same handling as PAK. */
+        if (find_entry(archive, (char *)entry_name) != NULL) {
+            err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "add_file",
+                     "Refusing duplicate entry name %s", entry_name);
+            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_DUPLICATE;
+        }
+        return pakka_pk3_add_file_impl(archive, source_path, entry_name,
+                                       err);
     }
 
     /* On-disk filename field is PAKFILE_PATH_MAX bytes; longest legal
@@ -1121,6 +1183,25 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                         PAKKA_ERR_DOMAIN_NONE, 0, "add_memory",
                         "pakka_add_memory: archive not writable "
                         "or no live file handle");
+    }
+
+    if (archive->format == PAKKA_FORMAT_PK3) {
+        if (pakka_unsafe_entry_name(entry_name)) {
+            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "add_memory", "Refusing unsafe entry name %s",
+                     entry_name);
+            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_UNSAFE_NAME;
+        }
+        if (find_entry(archive, (char *)entry_name) != NULL) {
+            err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "add_memory",
+                     "Refusing duplicate entry name %s", entry_name);
+            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_DUPLICATE;
+        }
+        return pakka_pk3_add_memory_impl(archive, entry_name, data, len,
+                                         err);
     }
 
     name_len = strlen(entry_name);
@@ -1373,6 +1454,10 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "commit",
                         "pakka_commit: archive not writable or fp closed");
+    }
+
+    if (archive->format == PAKKA_FORMAT_PK3) {
+        return pakka_pk3_commit_impl(archive, err);
     }
 
     if (!archive->needs_rebuild) {
@@ -1655,7 +1740,8 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                         PAKKA_ERR_DOMAIN_NONE, 0, "verify",
                         "pakka_verify: archive must be non-NULL");
     }
-    if (flags != 0u) {
+    /* PAKKA_VERIFY_DEEP is the only defined flag bit. */
+    if ((flags & ~(unsigned)PAKKA_VERIFY_DEEP) != 0u) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "verify",
                         "pakka_verify: unknown flag bits 0x%x", flags);
@@ -1693,55 +1779,91 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
             continue;
         }
 
-        if (fseek(archive->fp, (long)current->offset, SEEK_SET) != 0) {
-            int seek_errno = errno;
-            verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                          PAKKA_ERR_IO, current->filename,
-                          "Cannot seek to entry payload at offset %"
-                          PRIu32, current->offset);
-            if (first_error == PAKKA_OK) {
-                err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                         (uint32_t)seek_errno, "verify",
-                         "Cannot seek to entry payload");
-                err_set_entry(err, current->filename, (size_t)-1,
-                              (uint64_t)current->offset,
-                              (uint64_t)current->length);
-                first_error = PAKKA_ERR_IO;
-            }
-            continue;
-        }
+        /* PK3 entries: on-disk payload is pk3_compressed_size bytes
+         * at pk3_payload_offset; entry->length is the UNCOMPRESSED
+         * size (which the PAK reads-stream-length convention doesn't
+         * match for DEFLATE entries). */
         {
-            uint64_t remaining = (uint64_t)current->length;
-            int io_failed = 0;
-            while (remaining > 0) {
-                size_t chunk = remaining > sizeof(buf)
-                             ? sizeof(buf) : (size_t)remaining;
-                if (fread(buf, 1, chunk, archive->fp) != chunk) {
-                    int read_errno = errno;
-                    uint64_t at = (uint64_t)current->offset
-                                + ((uint64_t)current->length - remaining);
-                    verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                                  PAKKA_ERR_IO, current->filename,
-                                  "Cannot read entry payload "
-                                  "(short read at offset %" PRIu64 ")",
-                                  at);
-                    if (first_error == PAKKA_OK) {
-                        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                                 (uint32_t)read_errno, "verify",
-                                 "Short read on entry payload");
-                        err_set_entry(err, current->filename, (size_t)-1,
-                                      at, (uint64_t)current->length);
-                        first_error = PAKKA_ERR_IO;
-                    }
-                    io_failed = 1;
-                    break;
-                }
-                remaining -= chunk;
+            uint32_t verify_offset = current->offset;
+            uint32_t verify_length = current->length;
+            if (archive->format == PAKKA_FORMAT_PK3) {
+                verify_offset = current->pk3_payload_offset;
+                verify_length = current->pk3_compressed_size;
             }
-            if (!io_failed) {
-                verify_report(report, userdata, PAKKA_REPORT_INFO,
-                              PAKKA_OK, current->filename,
-                              "OK (%" PRIu32 " bytes)", current->length);
+            if (fseek(archive->fp, (long)verify_offset, SEEK_SET) != 0) {
+                int seek_errno = errno;
+                verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                              PAKKA_ERR_IO, current->filename,
+                              "Cannot seek to entry payload at offset %"
+                              PRIu32, verify_offset);
+                if (first_error == PAKKA_OK) {
+                    err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                             (uint32_t)seek_errno, "verify",
+                             "Cannot seek to entry payload");
+                    err_set_entry(err, current->filename, (size_t)-1,
+                                  (uint64_t)verify_offset,
+                                  (uint64_t)verify_length);
+                    first_error = PAKKA_ERR_IO;
+                }
+                continue;
+            }
+            {
+                uint64_t remaining = (uint64_t)verify_length;
+                int io_failed = 0;
+                while (remaining > 0) {
+                    size_t chunk = remaining > sizeof(buf)
+                                 ? sizeof(buf) : (size_t)remaining;
+                    if (fread(buf, 1, chunk, archive->fp) != chunk) {
+                        int read_errno = errno;
+                        uint64_t at = (uint64_t)verify_offset
+                                    + ((uint64_t)verify_length - remaining);
+                        verify_report(report, userdata, PAKKA_REPORT_ERROR,
+                                      PAKKA_ERR_IO, current->filename,
+                                      "Cannot read entry payload "
+                                      "(short read at offset %" PRIu64 ")",
+                                      at);
+                        if (first_error == PAKKA_OK) {
+                            err_fill(err, PAKKA_ERR_IO,
+                                     PAKKA_ERR_DOMAIN_ERRNO,
+                                     (uint32_t)read_errno, "verify",
+                                     "Short read on entry payload");
+                            err_set_entry(err, current->filename, (size_t)-1,
+                                          at, (uint64_t)verify_length);
+                            first_error = PAKKA_ERR_IO;
+                        }
+                        io_failed = 1;
+                        break;
+                    }
+                    remaining -= chunk;
+                }
+                if (!io_failed) {
+                    /* Deep verify (PK3 only): decompress + CRC32 check.
+                     * Structural read above already confirmed the
+                     * compressed bytes are readable; this catches
+                     * bit-rot in the payload, CRC mismatch, and
+                     * trailing junk in the deflate stream. */
+                    if (archive->format == PAKKA_FORMAT_PK3
+                        && (flags & PAKKA_VERIFY_DEEP)) {
+                        pakka_error_t deep_err;
+                        pakka_status_t dv = pakka_pk3_deep_verify_entry(
+                            archive, current, &deep_err);
+                        if (dv != PAKKA_OK) {
+                            verify_report(report, userdata,
+                                          PAKKA_REPORT_ERROR, dv,
+                                          current->filename,
+                                          "%s", deep_err.message);
+                            if (first_error == PAKKA_OK) {
+                                if (err != NULL) *err = deep_err;
+                                first_error = dv;
+                            }
+                            continue;
+                        }
+                    }
+                    verify_report(report, userdata, PAKKA_REPORT_INFO,
+                                  PAKKA_OK, current->filename,
+                                  "OK (%" PRIu32 " bytes)",
+                                  current->length);
+                }
             }
         }
     }

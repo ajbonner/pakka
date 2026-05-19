@@ -6,33 +6,66 @@
 
 #include "compat.h"
 #include "filesystem.h"
+#include "pakka.h"
 
 #define OS_PATH_MAX PATH_MAX
 #define OS_NAME_MAX NAME_MAX
 #define PAKFILE_SIGNATURE_LEN 4
-/* On-disk filename field is 56 bytes. The in-memory buffer is one byte
- * larger so we can force a NUL terminator after fread() — names that fill
- * all 56 bytes on disk would otherwise overread into adjacent struct
- * fields when handed to strlen/strcmp/printf("%s"). */
+/* On-disk PAK filename field is 56 bytes. The in-memory buffer is sized
+ * to PAKKA_ENTRY_NAME_SIZE (256) to also accommodate PK3 entry names,
+ * which can be up to that limit. PAK code paths use only the first 57
+ * bytes (PAKFILE_PATH_BUF) and leave the rest zero; the static assert
+ * below guards against undersizing. */
 #define PAKFILE_PATH_MAX 56
 #define PAKFILE_PATH_BUF 57
 #define PAKFILE_DIR_ENTRY_SIZE 64
 #define PAKFILE_HEADER_SIZE 12
 /* Sanity cap on directory entry count. id's pak0.pak has 339 entries;
- * a million is generous and prevents calloc-loop DoS on crafted headers. */
+ * a million is generous and prevents calloc-loop DoS on crafted headers.
+ * PK3 reuses the same cap. */
 #define PAKFILE_MAX_ENTRIES 1048576u
 /* Buffer size for streaming file copies during add. Bounds peak RSS at
  * 64 KiB regardless of input file size. */
 #define PAKFILE_COPY_CHUNK 65536u
 
+/* PK3 (ZIP container) constants. */
+#define PK3_LFH_SIGNATURE  "PK\003\004"
+#define PK3_CDR_SIGNATURE  "PK\001\002"
+#define PK3_EOCD_SIGNATURE "PK\005\006"
+#define PK3_LFH_SIZE        30u   /* fixed prefix of a local file header */
+#define PK3_CDR_SIZE        46u   /* fixed prefix of a central directory record */
+#define PK3_EOCD_SIZE       22u   /* fixed size of the end-of-central-directory record */
+/* EOCD can be preceded by up to 64 KiB of comment bytes; scan window
+ * is comment_max + EOCD_SIZE + a 1-byte slack. */
+#define PK3_EOCD_SCAN_MAX   65557u
+/* DEFLATE / STORED — pakka accepts only these two methods. */
+#define PK3_METHOD_STORED   0u
+#define PK3_METHOD_DEFLATE  8u
+/* Unix file-type bits in CDR external-attrs (upper 16 bits encode the
+ * Unix mode). Use raw octal masks so the headers don't need <sys/stat.h>
+ * (which doesn't define S_IFLNK on MSVC). */
+#define PK3_UNIX_IFMT       0170000u
+#define PK3_UNIX_IFLNK      0120000u
+/* Default cap on per-entry decompressed bytes — see
+ * pakka_set_max_decompressed_size. 64 MiB has headroom for legitimate
+ * Q3 content (largest demo asset is ~5 MiB) while bounding peak RSS. */
+#define PK3_DEFAULT_MAX_DECOMPRESSED ((uint64_t)64u * 1024u * 1024u)
+
 /* These struct tags match the opaque forward declarations in
  * include/pakka.h. Public consumers see only the tag; the full
  * definitions stay internal. */
 struct pakka_entry {
-    char filename[PAKFILE_PATH_BUF];
+    char filename[PAKKA_ENTRY_NAME_SIZE];
     uint32_t offset;
     uint32_t length;
     struct pakka_entry *next;
+
+    /* PK3-only fields. Zero for PAK entries. */
+    uint32_t pk3_compressed_size;   /* bytes between LFH and CDR */
+    uint32_t pk3_payload_offset;    /* cached lfh_offset + 30 + name + extra */
+    uint32_t pk3_lfh_offset;        /* offset of LFH for verify cross-check */
+    uint32_t pk3_crc32;
+    uint16_t pk3_method;            /* PK3_METHOD_STORED or PK3_METHOD_DEFLATE */
 };
 
 typedef struct pakka_entry Pakfileentry_t;
@@ -44,9 +77,17 @@ struct pakka_reader {
      * before every fread. */
     uint64_t next_offset;
     uint64_t remaining;
+
+    /* PK3 DEFLATE path only. NULL for PAK and STORED PK3 entries. The
+     * compressed payload is read once, inflated through pakka_inflate,
+     * and inflated_buf serves bytes through reader_read. */
+    unsigned char *inflated_buf;
+    size_t         inflated_len;
+    size_t         inflated_cursor;
 };
 
 struct pakka_archive {
+    pakka_format_t format;          /* PAKKA_FORMAT_PAK or PAKKA_FORMAT_PK3 */
     char signature[PAKFILE_SIGNATURE_LEN];
     uint32_t diroffset;
     uint32_t dirlength;
@@ -64,6 +105,14 @@ struct pakka_archive {
     int writable;                   /* 1 if pak->fp is r+b (PAKKA_OPEN_READ_WRITE or create) */
     int dirty;                      /* 1 if pakka_add/delete have unflushed changes */
     int needs_rebuild;              /* 1 if any pakka_delete touched the entry list — commit must rebuild via temp */
+
+    /* PK3-only. The central directory starts here in the file. New
+     * LFHs are written from this offset (replacing any prior CDR +
+     * EOCD), with the new CDR + EOCD rewritten at commit. */
+    uint32_t pk3_cdr_offset;
+    /* Cap on per-entry decompressed bytes for pakka_open_entry and
+     * pakka_read_entry_alloc. 0 disables the cap. */
+    uint64_t pk3_max_decompressed;
 };
 
 typedef struct pakka_archive Pak_t;
@@ -86,6 +135,9 @@ PAKKA_STATIC_ASSERT(
 PAKKA_STATIC_ASSERT(
     PAKFILE_PATH_BUF == PAKFILE_PATH_MAX + 1,
     path_buf_has_nul_guard);
+PAKKA_STATIC_ASSERT(
+    PAKKA_ENTRY_NAME_SIZE >= PAKFILE_PATH_BUF,
+    entry_name_size_fits_pak_path);
 
 /* The pak header diroffset/dirlength and entry offset/length fields
  * are stored little-endian on disk. Use these to read/write them so
@@ -99,3 +151,38 @@ int pakka_write_u32_le(FILE *fp, uint32_t value);
  * the symbol-audit gate passes. */
 int pakka_unsafe_entry_name(const char *path);
 void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz);
+
+/* Internal PK3 dispatch helpers — called from src/pakfile.c when the
+ * public pakka_* functions detect a PK3 archive. Defined in
+ * src/pk3file.c. Not part of include/pakka.h; pakka_-prefixed so they
+ * pass symbol-audit. */
+pakka_status_t pakka_pk3_open_impl(struct pakka_archive *pak,
+                                   pakka_error_t *err);
+pakka_status_t pakka_pk3_open_entry_impl(struct pakka_archive *pak,
+                                         struct pakka_reader *reader,
+                                         struct pakka_entry *entry,
+                                         pakka_error_t *err);
+pakka_status_t pakka_pk3_reader_read_impl(struct pakka_reader *reader,
+                                          void *buf, size_t len,
+                                          size_t *nread,
+                                          pakka_error_t *err);
+void pakka_pk3_reader_close_impl(struct pakka_reader *reader);
+pakka_status_t pakka_pk3_create_impl(struct pakka_archive *pak,
+                                     pakka_error_t *err);
+pakka_status_t pakka_pk3_add_file_impl(struct pakka_archive *pak,
+                                       const char *source_path,
+                                       const char *entry_name,
+                                       pakka_error_t *err);
+pakka_status_t pakka_pk3_add_memory_impl(struct pakka_archive *pak,
+                                         const char *entry_name,
+                                         const void *data, size_t len,
+                                         pakka_error_t *err);
+pakka_status_t pakka_pk3_commit_impl(struct pakka_archive *pak,
+                                     pakka_error_t *err);
+/* Deep verify: decompress an entry through pakka_inflate (or read as
+ * STORED), confirm the uncompressed bytes hash to entry->pk3_crc32 and
+ * total entry->length bytes. Returns OK or a populated err on
+ * mismatch. */
+pakka_status_t pakka_pk3_deep_verify_entry(struct pakka_archive *pak,
+                                           struct pakka_entry *entry,
+                                           pakka_error_t *err);

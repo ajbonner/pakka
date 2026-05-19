@@ -22,13 +22,20 @@ LIB_DIR=$(BUILD_DIR)/lib
 TEST_DIR=$(BUILD_DIR)/test
 
 SOURCES=$(wildcard $(SRC_DIR)/*.c)
+# Vendored sources live under src/vendor/. Kept out of $(SOURCES) so
+# the lint target (clang-tidy WarningsAsErrors:'*') skips them — patches
+# against upstream are out of scope. The objects still land in
+# libpakka.a via LIB_OBJECTS.
+VENDOR_SOURCES=$(wildcard $(SRC_DIR)/vendor/puff/*.c)
 OBJECTS=$(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 
-# Library is every src/*.c except cli.c; cli.c is CLI-only and links
-# against build/lib/libpakka.a. The `symbol-audit` target below enforces
-# that only pakka_*-prefixed names leave the archive.
+# Library is every src/*.c except cli.c (CLI-only) plus the vendored
+# objects. `symbol-audit` below enforces only pakka_*-prefixed names
+# leave the archive — vendored puff was renamed `puff` -> `pakka_inflate`
+# at vendor time so it passes the same gate.
 LIB_SOURCES=$(filter-out $(SRC_DIR)/cli.c,$(SOURCES))
-LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o) \
+            $(VENDOR_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CLI_OBJECTS=$(OBJ_DIR)/cli.o
 LIBPAKKA=$(LIB_DIR)/libpakka.a
 
@@ -36,6 +43,15 @@ QUAKE_URL=https://www.libsdl.org/projects/quake/data/quakesw-1.0.6.tar.gz
 QUAKE_SHA256=d173e9f828b932a8160d4c65927281d0c28131cd922f0bf0d69e92a35185b499
 QUAKE_TARBALL=$(TEST_DIR)/quakesw.tar.gz
 PAK0=$(TEST_DIR)/pak0.pak
+
+# Q3 demo wrapper from archive.org (redistribution of id's freely
+# distributable demo). Used by the optional `slow-test` target only —
+# not pulled by default `make test`. archive.org's CDN is occasionally
+# 503; if the fetch fails, slow-test fails but normal CI is unaffected.
+Q3DEMO_URL=https://archive.org/download/Q3A-Demo/Quake%203%20Arena%20Demo.zip
+Q3DEMO_SHA256=e9f89ef064317634aab3b3a3add131887967fc04744526bd624e1914b1e25b3e
+Q3DEMO_ZIP=$(TEST_DIR)/q3demo.zip
+Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 
 CLANG_TIDY ?= clang-tidy
 NM ?= nm
@@ -45,7 +61,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test verify-tarball fixture
+.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test verify-tarball verify-q3demo fixture slow-test
 
 all: $(TARGET)
 
@@ -139,3 +155,34 @@ fixture: $(PAK0)
 
 test: $(TARGET) $(PAK0) $(C_API_TEST) symbol-audit
 	bats tests/
+
+# Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
+# re-compute SHA256 once at vendor time and pin that here.
+$(Q3DEMO_ZIP):
+	@mkdir -p $(TEST_DIR)
+	@echo "==> Downloading Q3 demo wrapper ($(Q3DEMO_URL))"
+	@curl -fsSL -o $(Q3DEMO_ZIP) "$(Q3DEMO_URL)"
+
+verify-q3demo: $(Q3DEMO_ZIP)
+	@actual=`openssl dgst -sha256 $(Q3DEMO_ZIP) | awk '{print $$NF}'`; \
+	if [ "$$actual" != "$(Q3DEMO_SHA256)" ]; then \
+		echo "==> SHA256 mismatch on Q3 demo: expected $(Q3DEMO_SHA256), got $$actual"; \
+		rm -f $(Q3DEMO_ZIP); \
+		exit 1; \
+	fi
+
+# Extract the inner pak0.pk3 from the wrapper using pakka itself —
+# tests pakka's PK3 reader against a real id-made archive on the way
+# to producing the fixture.
+$(Q3DEMO_PAK0_PK3): $(TARGET) verify-q3demo
+	@mkdir -p $(TEST_DIR)/q3demo_raw
+	./$(TARGET) -xf $(Q3DEMO_ZIP) -C $(TEST_DIR)/q3demo_raw >/dev/null
+	@mkdir -p $(TEST_DIR)/q3demo
+	@cp $(TEST_DIR)/q3demo_raw/Quake\ 3\ Arena\ Demo/demoq3/pak0.pk3 $(Q3DEMO_PAK0_PK3)
+	@echo "==> Q3 demo pak0.pk3 ready: $(Q3DEMO_PAK0_PK3)"
+
+# Optional: full PK3 suite against id's real Q3 demo pak0.pk3. Pulls
+# 93 MiB from archive.org, so kept out of `make test`. CI can opt in
+# by running `make slow-test` on a single representative job.
+slow-test: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
+	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats tests/pk3_q3demo.bats
