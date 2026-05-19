@@ -1,11 +1,16 @@
-/* PK3 / ZIP container support for pakka.
+/* PK3 / PK4 / ZIP container support for pakka.
  *
- * The on-disk format is RFC-equivalent ZIP. This module handles the
- * container layer; DEFLATE decompression goes through the vendored
- * `pakka_inflate` (Mark Adler's puff) at src/vendor/puff/puff.c.
+ * The on-disk format is a constrained subset of PKWARE APPNOTE ZIP.
+ * PK3 (Quake 3) and PK4
+ * (Doom 3) are byte-identical and share this entire implementation;
+ * the only difference is the filename extension and the pakka_format_t
+ * label the caller sees back. This module handles the container layer;
+ * DEFLATE decompression goes through the vendored `pakka_inflate`
+ * (Mark Adler's puff) at src/vendor/puff/puff.c.
  *
- * Public pakka_* entry points live in src/pakfile.c and dispatch to
- * the pakka_pk3_* helpers below when archive->format == PAKKA_FORMAT_PK3.
+ * Public pakka_* entry points live in src/pakfile.c and dispatch here
+ * via the pakka_pk3_* helpers below when pakka_format_is_zip() is true
+ * (i.e. format is PK3 or PK4). The pakka_pk3_ name prefix is historical.
  *
  * What's supported: STORED (method 0) and DEFLATE (method 8) entries.
  * Read works for both. Write produces STORED only. ZIP64, encryption,
@@ -265,7 +270,7 @@ static pakka_status_t pk3_validate_eocd(Pak_t *pak,
     if (disk_num != 0 || disk_with_cdr != 0) {
         return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                             PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                            "Multi-disk PK3 archives are not supported");
+                            "Multi-disk ZIP archives are not supported");
     }
     if (entries_on_disk != total_entries) {
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -286,12 +291,12 @@ static pakka_status_t pk3_validate_eocd(Pak_t *pak,
     if ((uint64_t)cdr_offset + (uint64_t)cdr_size > eocd_offset) {
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 central directory extends past EOCD");
+                            "ZIP central directory extends past EOCD");
     }
     if ((uint32_t)total_entries > PAKFILE_MAX_ENTRIES) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 has too many entries (%u, max %u)",
+                            "ZIP has too many entries (%u, max %u)",
                             (unsigned)total_entries, PAKFILE_MAX_ENTRIES);
     }
 
@@ -346,13 +351,13 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
     if (lfh_flags & 0x1u) {
         return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                             PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                            "Encrypted PK3 entries are not supported (%s)",
+                            "Encrypted ZIP entries are not supported (%s)",
                             entry->filename);
     }
     if (lfh_flags & 0x8u) {
         return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                             PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                            "PK3 data descriptors are not supported (%s)",
+                            "ZIP data descriptors are not supported (%s)",
                             entry->filename);
     }
 
@@ -396,7 +401,7 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
         if (payload64 > 0xFFFFFFFFu) {
             return pk3_err_fill(err, PAKKA_ERR_FORMAT,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "PK3 LFH offset+name+extra overflows "
+                                "ZIP LFH offset+name+extra overflows "
                                 "u32 for entry %s", entry->filename);
         }
         entry->pk3_payload_offset = (uint32_t)payload64;
@@ -409,7 +414,7 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
         + (uint64_t)entry->pk3_compressed_size > (uint64_t)pak->pk3_cdr_offset) {
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 entry %s payload extends into CDR",
+                            "ZIP entry %s payload extends into CDR",
                             entry->filename);
     }
 
@@ -435,7 +440,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
     if ((entry_count == 0) != (cdr_size == 0)) {
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 EOCD entry_count and cdr_size disagree "
+                            "ZIP EOCD entry_count and cdr_size disagree "
                             "(entries=%u, cdr_size=%u)",
                             (unsigned)entry_count, (unsigned)cdr_size);
     }
@@ -451,14 +456,14 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
         free(cdr);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
-                            "Cannot seek to PK3 central directory");
+                            "Cannot seek to ZIP central directory");
     }
     if (fread(cdr, 1, cdr_size, pak->fp) != cdr_size) {
         saved_errno = errno;
         free(cdr);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
-                            "Cannot read PK3 central directory");
+                            "Cannot read ZIP central directory");
     }
 
     for (i = 0; i < entry_count; i++) {
@@ -470,7 +475,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open",
-                                "PK3 CDR truncated at entry %zu", i);
+                                "ZIP CDR truncated at entry %zu", i);
         }
         if (memcmp(&cdr[pos], PK3_CDR_SIGNATURE,
                    PAKFILE_SIGNATURE_LEN) != 0) {
@@ -496,7 +501,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open",
-                                "PK3 CDR entry %zu extends past CDR end",
+                                "ZIP CDR entry %zu extends past CDR end",
                                 i);
         }
 
@@ -506,13 +511,13 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "Encrypted PK3 entries are not supported");
+                                "Encrypted ZIP entries are not supported");
         }
         if (flags & 0x8u) {
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "PK3 data descriptors are not supported");
+                                "ZIP data descriptors are not supported");
         }
         /* ZIP64 sentinels in per-entry fields */
         if (csize == 0xFFFFFFFFu || usize == 0xFFFFFFFFu
@@ -526,20 +531,20 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "PK3 compression method %u is not supported",
+                                "ZIP compression method %u is not supported",
                                 (unsigned)method);
         }
         if (name_len == 0) {
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open",
-                                "PK3 entry %zu has empty filename", i);
+                                "ZIP entry %zu has empty filename", i);
         }
         if (name_len >= PAKKA_ENTRY_NAME_SIZE) {
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open",
-                                "PK3 entry %zu name too long (%u bytes, max %u)",
+                                "ZIP entry %zu name too long (%u bytes, max %u)",
                                 i, (unsigned)name_len,
                                 (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
         }
@@ -548,12 +553,12 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "PK3 entry %zu is a symlink", i);
+                                "ZIP entry %zu is a symlink", i);
         }
 
         /* Directory entries (name ends in '/', size == 0): silently
          * skipped. ZIP tools commonly emit them; rejecting would break
-         * real-world PK3s. */
+         * real-world PK3/PK4 archives. */
         if (cdr[pos + PK3_CDR_SIZE + name_len - 1] == '/'
             && usize == 0 && csize == 0) {
             skipped_dirs++;
@@ -566,7 +571,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             free(cdr);
             return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open",
-                                "Cannot allocate PK3 entry");
+                                "Cannot allocate ZIP entry");
         }
         memcpy(entry->filename, &cdr[pos + PK3_CDR_SIZE], name_len);
         entry->filename[name_len] = '\0';
@@ -592,7 +597,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
         free(cdr);
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 CDR has %zu trailing bytes after %u "
+                            "ZIP CDR has %zu trailing bytes after %u "
                             "parsed entries",
                             cdr_size - pos, (unsigned)entry_count);
     }
@@ -626,7 +631,9 @@ pakka_status_t pakka_pk3_open_impl(Pak_t *pak, pakka_error_t *err) {
     pakka_status_t s;
     int saved_errno;
 
-    pak->format = PAKKA_FORMAT_PK3;
+    /* pak->format is set by the caller in src/pakfile.c (PK3 or PK4
+     * depending on the filename extension); we share the rest of the
+     * open path between the two formats. */
     pak->pk3_max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
 
     if (pk3_find_eocd(pak->fp, pak->file_size, &eocd_offset) != 0) {
@@ -634,11 +641,11 @@ pakka_status_t pakka_pk3_open_impl(Pak_t *pak, pakka_error_t *err) {
         if (saved_errno != 0) {
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "open",
-                                "Cannot scan for PK3 EOCD");
+                                "Cannot scan for ZIP EOCD");
         }
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open",
-                            "PK3 end-of-central-directory not found");
+                            "ZIP end-of-central-directory not found");
     }
 
     s = pk3_validate_eocd(pak, eocd_offset, &cdr_offset, &cdr_size,
@@ -672,7 +679,7 @@ static pakka_status_t pk3_load_compressed(Pak_t *pak,
         free(buf);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open_entry",
-                            "Cannot seek to PK3 payload for %s",
+                            "Cannot seek to ZIP payload for %s",
                             entry->filename);
     }
     if (fread(buf, 1, entry->pk3_compressed_size, pak->fp)
@@ -681,7 +688,7 @@ static pakka_status_t pk3_load_compressed(Pak_t *pak,
         free(buf);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open_entry",
-                            "Cannot read PK3 payload for %s",
+                            "Cannot read ZIP payload for %s",
                             entry->filename);
     }
     *out_buf = buf;
@@ -711,7 +718,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
             || (uint64_t)entry->pk3_compressed_size > pak->pk3_max_decompressed) {
             return pk3_err_fill(err, PAKKA_ERR_LIMIT,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
-                                "PK3 entry %s exceeds max_decompressed_size "
+                                "ZIP entry %s exceeds max_decompressed_size "
                                 "(uncompressed=%u, compressed=%u, cap=%"
                                 PRIu64 ")",
                                 entry->filename,
@@ -733,7 +740,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
          * zero compressed bytes is malformed. */
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open_entry",
-                            "PK3 DEFLATE entry %s has zero compressed bytes",
+                            "ZIP DEFLATE entry %s has zero compressed bytes",
                             entry->filename);
     }
     s = pk3_load_compressed(pak, entry, &compressed, err);
@@ -751,7 +758,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
             || srclen != (unsigned long)entry->pk3_compressed_size) {
             return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
                                 0, "open_entry",
-                                "PK3 DEFLATE decode failed for empty "
+                                "ZIP DEFLATE decode failed for empty "
                                 "entry %s (rc=%d, consumed=%lu/%u)",
                                 entry->filename, rc, srclen,
                                 (unsigned)entry->pk3_compressed_size);
@@ -782,7 +789,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
         reader->inflated_buf = NULL;
         return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "open_entry",
-                            "PK3 DEFLATE decode failed for %s "
+                            "ZIP DEFLATE decode failed for %s "
                             "(rc=%d, got=%lu/%u, consumed=%lu/%u)",
                             entry->filename, rc,
                             destlen, (unsigned)entry->length,
@@ -825,7 +832,7 @@ pakka_status_t pakka_pk3_reader_read_impl(struct pakka_reader *reader,
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "reader_read",
-                            "Cannot seek to PK3 STORED payload");
+                            "Cannot seek to ZIP STORED payload");
     }
     want = len;
     if ((uint64_t)want > reader->remaining) {
@@ -837,7 +844,7 @@ pakka_status_t pakka_pk3_reader_read_impl(struct pakka_reader *reader,
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "reader_read",
-                                "Short read from PK3 STORED entry");
+                                "Short read from ZIP STORED entry");
         }
         reader->next_offset += want;
         reader->remaining -= want;
@@ -857,7 +864,7 @@ void pakka_pk3_reader_close_impl(struct pakka_reader *reader) {
     }
 }
 
-/* Deep verify of a single PK3 entry: read the on-disk bytes,
+/* Deep verify of a single ZIP entry (PK3/PK4): read the on-disk bytes,
  * decompress if DEFLATE, compute CRC32 of the uncompressed payload,
  * compare against the entry's CDR-recorded CRC32 and uncompressed
  * size. */
@@ -876,7 +883,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
         if (entry->pk3_crc32 != 0u) {
             return pk3_err_fill(err, PAKKA_ERR_FORMAT,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                                "PK3 entry %s has CRC32 0x%08x but is "
+                                "ZIP entry %s has CRC32 0x%08x but is "
                                 "zero bytes (expected CRC32 0)",
                                 entry->filename, entry->pk3_crc32);
         }
@@ -903,7 +910,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
                 || srclen != (unsigned long)entry->pk3_compressed_size) {
                 return pk3_err_fill(err, PAKKA_ERR_FORMAT,
                                     PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                                    "PK3 DEFLATE decode failed for empty "
+                                    "ZIP DEFLATE decode failed for empty "
                                     "entry %s (rc=%d, consumed=%lu/%u)",
                                     entry->filename, rc, srclen,
                                     (unsigned)entry->pk3_compressed_size);
@@ -912,7 +919,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
                 ? PAKKA_OK
                 : pk3_err_fill(err, PAKKA_ERR_FORMAT,
                                PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                               "PK3 entry %s declares zero uncompressed "
+                               "ZIP entry %s declares zero uncompressed "
                                "bytes but CRC32 = 0x%08x",
                                entry->filename, entry->pk3_crc32);
         }
@@ -934,7 +941,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
             free(inflated);
             return pk3_err_fill(err, PAKKA_ERR_FORMAT,
                                 PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                                "PK3 DEFLATE decode failed for %s "
+                                "ZIP DEFLATE decode failed for %s "
                                 "(rc=%d, got=%lu/%u, consumed=%lu/%u)",
                                 entry->filename, rc,
                                 destlen, (unsigned)entry->length,
@@ -947,7 +954,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
     if (crc != entry->pk3_crc32) {
         return pk3_err_fill(err, PAKKA_ERR_FORMAT,
                             PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                            "PK3 entry %s CRC32 mismatch "
+                            "ZIP entry %s CRC32 mismatch "
                             "(computed 0x%08x, declared 0x%08x)",
                             entry->filename, crc, entry->pk3_crc32);
     }
@@ -1014,12 +1021,13 @@ static void pk3_build_cdr(unsigned char cdr[PK3_CDR_SIZE],
     pk3_put_u32(&cdr[42], lfh_offset);
 }
 
-/* Write an empty EOCD at offset 0 of a freshly created PK3. */
+/* Write an empty EOCD at offset 0 of a freshly created PK3 or PK4. */
 pakka_status_t pakka_pk3_create_impl(Pak_t *pak, pakka_error_t *err) {
     unsigned char eocd[PK3_EOCD_SIZE];
     int saved_errno;
 
-    pak->format = PAKKA_FORMAT_PK3;
+    /* pak->format is set by the caller in src/pakfile.c (PK3 or PK4
+     * depending on the requested format). */
     pak->pk3_max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
     pak->pk3_cdr_offset = 0;
     pak->num_entries = 0;
@@ -1030,13 +1038,13 @@ pakka_status_t pakka_pk3_create_impl(Pak_t *pak, pakka_error_t *err) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "create",
-                            "Cannot write initial empty PK3 EOCD");
+                            "Cannot write initial empty ZIP EOCD");
     }
     if (fflush(pak->fp) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "create",
-                            "Cannot flush initial empty PK3");
+                            "Cannot flush initial empty ZIP");
     }
     return PAKKA_OK;
 }
@@ -1067,7 +1075,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
     if (payload_len > 0xFFFFFFFFu) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "add",
-                            "PK3 entry %s payload (%" PRIu64 " bytes) "
+                            "ZIP entry %s payload (%" PRIu64 " bytes) "
                             "exceeds 4 GiB ZIP non-ZIP64 limit",
                             entry_name, payload_len);
     }
@@ -1076,7 +1084,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
     if (new_eof > 0xFFFFFFFFu) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "add",
-                            "PK3 would grow past 4 GiB non-ZIP64 limit");
+                            "ZIP would grow past 4 GiB non-ZIP64 limit");
     }
 
     /* Allocate before any file mutation so an ENOMEM here doesn't
@@ -1084,7 +1092,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
     entry = calloc(1, sizeof(*entry));
     if (entry == NULL) {
         return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
-                            "add", "Cannot allocate PK3 entry struct");
+                            "add", "Cannot allocate ZIP entry struct");
     }
     memcpy(entry->filename, entry_name, name_len);
     entry->filename[name_len] = '\0';
@@ -1101,7 +1109,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
         free(entry);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "add",
-                            "Cannot seek to PK3 CDR start for LFH write");
+                            "Cannot seek to ZIP CDR start for LFH write");
     }
 
     pk3_build_lfh(lfh, crc, (uint32_t)payload_len, (uint32_t)payload_len,
@@ -1117,7 +1125,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
          * commit a broken archive on top of this failure. */
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "add",
-                            "Cannot write PK3 LFH for %s", entry_name);
+                            "Cannot write ZIP LFH for %s", entry_name);
     }
 
     *out_entry = entry;
@@ -1156,7 +1164,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
     if (name_len >= PAKKA_ENTRY_NAME_SIZE) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "add",
-                            "PK3 entry name too long (%zu bytes, max %u)",
+                            "ZIP entry name too long (%zu bytes, max %u)",
                             name_len, (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
     }
 
@@ -1214,7 +1222,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
             fclose(src);
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "add",
-                                "Cannot stream payload to PK3");
+                                "Cannot stream payload to ZIP");
         }
     }
     if (ferror(src)) {
@@ -1245,7 +1253,7 @@ pakka_status_t pakka_pk3_add_memory_impl(Pak_t *pak,
     if (name_len >= PAKKA_ENTRY_NAME_SIZE) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "add",
-                            "PK3 entry name too long (%zu bytes, max %u)",
+                            "ZIP entry name too long (%zu bytes, max %u)",
                             name_len, (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
     }
 
@@ -1262,7 +1270,7 @@ pakka_status_t pakka_pk3_add_memory_impl(Pak_t *pak,
         free(entry);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "add",
-                            "Cannot write PK3 memory payload");
+                            "Cannot write ZIP memory payload");
     }
     pk3_commit_stored_entry(pak, entry);
     return PAKKA_OK;
@@ -1290,7 +1298,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
     if (pak->num_entries > 0xFFFFu) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                             "commit",
-                            "PK3 entry count (%u) exceeds 64 K "
+                            "ZIP entry count (%u) exceeds 64 K "
                             "non-ZIP64 limit",
                             (unsigned)pak->num_entries);
     }
@@ -1318,7 +1326,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot create PK3 rebuild temp file");
+                                "Cannot create ZIP rebuild temp file");
         }
 
         cur_offset = 0;
@@ -1403,7 +1411,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             remove(tmp_path);
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot close PK3 rebuild temp before rename");
+                                "Cannot close ZIP rebuild temp before rename");
         }
         if (fclose(pak->fp) != 0) {
             saved_errno = errno;
@@ -1411,7 +1419,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             pak->fp = NULL;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot close original PK3 before rename");
+                                "Cannot close original ZIP before rename");
         }
         pak->fp = NULL;
         {
@@ -1432,7 +1440,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                     win32_code ? win32_code
                                                : (uint32_t)saved_errno,
                                     "commit",
-                                    "Cannot rename PK3 rebuild temp");
+                                    "Cannot rename ZIP rebuild temp");
             }
         }
         /* Re-open the renamed file for further reads. */
@@ -1442,7 +1450,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot reopen committed PK3");
+                                "Cannot reopen committed ZIP");
         }
         /* Seek to where CDR will be written below. */
         if (pakka_compat_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
@@ -1460,7 +1468,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot seek to PK3 CDR start");
+                                "Cannot seek to ZIP CDR start");
         }
     }
 
@@ -1478,7 +1486,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                 return pk3_err_fill(err, PAKKA_ERR_LIMIT,
                                     PAKKA_ERR_DOMAIN_NONE, 0,
                                     "commit",
-                                    "PK3 CDR + EOCD would push file "
+                                    "ZIP CDR + EOCD would push file "
                                     "past 4 GiB");
             }
         }
@@ -1494,7 +1502,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
-                                "Cannot write PK3 CDR entry %s",
+                                "Cannot write ZIP CDR entry %s",
                                 e->filename);
         }
         cdr_size += PK3_CDR_SIZE + name_len;
@@ -1507,13 +1515,13 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "commit",
-                            "Cannot write PK3 EOCD");
+                            "Cannot write ZIP EOCD");
     }
     if (fflush(pak->fp) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "commit",
-                            "Cannot flush PK3 commit");
+                            "Cannot flush ZIP commit");
     }
 
     /* Update file_size cache for any subsequent reads. */

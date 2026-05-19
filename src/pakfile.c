@@ -106,6 +106,25 @@ static pakka_status_t copy_between_paks(Pakfileentry_t *entry,
                                         uint32_t *new_offset_out,
                                         pakka_error_t *err);
 
+/* Pick PK3 vs PK4 from the archive path's extension. The on-disk
+ * content is byte-identical for both formats, so the filename is the
+ * only available signal at open time. Case-insensitive match on `.pk4`
+ * (mirrors the CLI's create-side sniffer); anything else is PK3. */
+static pakka_format_t pakka_zip_format_from_path(const char *path) {
+    size_t n;
+    if (path == NULL) {
+        return PAKKA_FORMAT_PK3;
+    }
+    n = strlen(path);
+    if (n >= 4 && path[n - 4] == '.'
+        && (path[n - 3] == 'p' || path[n - 3] == 'P')
+        && (path[n - 2] == 'k' || path[n - 2] == 'K')
+        && path[n - 1] == '4') {
+        return PAKKA_FORMAT_PK4;
+    }
+    return PAKKA_FORMAT_PK3;
+}
+
 /* qsort comparator for an array of `const char *` (which qsort passes
  * as pointers-to-pointers). */
 static int name_ptr_cmp(const void *a, const void *b) {
@@ -251,11 +270,12 @@ pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode,
         return status;
     }
 
-    /* PK3 path: load_pakfile dispatched into pakka_pk3_open_impl which
-     * already parsed the CDR. The PAK on-disk directory loader doesn't
-     * apply. Validate-no-duplicates still runs — it operates on the
-     * in-memory entry list so it's format-agnostic. */
-    if (pak->format != PAKKA_FORMAT_PK3) {
+    /* ZIP-class path (PK3/PK4): load_pakfile dispatched into
+     * pakka_pk3_open_impl which already parsed the CDR. The PAK on-disk
+     * directory loader doesn't apply. Validate-no-duplicates still
+     * runs — it operates on the in-memory entry list so it's
+     * format-agnostic. */
+    if (!pakka_format_is_zip(pak->format)) {
         status = load_directory(pak, err);
         if (status != PAKKA_OK) {
             destroy_pak(pak);
@@ -298,6 +318,7 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
 
     if (format != PAKKA_FORMAT_PAK
         && format != PAKKA_FORMAT_PK3
+        && format != PAKKA_FORMAT_PK4
         && format != PAKKA_FORMAT_AUTO) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "create",
@@ -340,8 +361,13 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
                         "Cannot create temp pak file for %s", path);
     }
 
-    if (format == PAKKA_FORMAT_PK3) {
-        pakka_status_t pk3_status = pakka_pk3_create_impl(pak, err);
+    if (pakka_format_is_zip(format)) {
+        pakka_status_t pk3_status;
+        /* Caller owns the label: stamp PK3 vs PK4 here so pakka_format()
+         * reports back what the caller asked for. pakka_pk3_create_impl
+         * is shared between the two and does not touch pak->format. */
+        pak->format = format;
+        pk3_status = pakka_pk3_create_impl(pak, err);
         if (pk3_status != PAKKA_OK) {
             destroy_pak(pak);
             return pk3_status;
@@ -520,19 +546,19 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
                         "Cannot read pak signature");
     }
 
-    /* PK3/ZIP signatures: PK\3\4 = local file header (normal case),
-     * PK\5\6 = empty PK3 (EOCD only). PK\7\8 (spanning) is refused
-     * as multi-disk inside the PK3 loader. */
+    /* ZIP-class signatures: PK\3\4 = local file header (normal case),
+     * PK\5\6 = empty ZIP (EOCD only). PK\7\8 (spanning) is refused
+     * as multi-disk inside the ZIP loader. PK3 vs PK4 is decided by
+     * the filename extension — the bytes are identical. */
     if (memcmp(pak->signature, "PK\x03\x04", PAKFILE_SIGNATURE_LEN) == 0
         || memcmp(pak->signature, "PK\x05\x06", PAKFILE_SIGNATURE_LEN) == 0) {
-        /* Hand off to the PK3 loader. It owns format detection from
-         * here on, including the EOCD scan + CDR parse. */
+        pak->format = pakka_zip_format_from_path(pak->cur_pakpath);
         return pakka_pk3_open_impl(pak, err);
     }
     if (memcmp(pak->signature, "PK\x07\x08", PAKFILE_SIGNATURE_LEN) == 0) {
         return err_fill(err, PAKKA_ERR_UNSUPPORTED,
                         PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                        "Multi-disk PK3/ZIP archives are not supported");
+                        "Multi-disk PK3/PK4 archives are not supported");
     }
 
     if (memcmp(pak->signature, "PACK", PAKFILE_SIGNATURE_LEN) != 0) {
@@ -831,7 +857,7 @@ pakka_status_t pakka_open_entry(pakka_archive_t *archive,
     reader->next_offset = (uint64_t)entry->offset;
     reader->remaining = (uint64_t)entry->length;
 
-    if (archive->format == PAKKA_FORMAT_PK3) {
+    if (pakka_format_is_zip(archive->format)) {
         pakka_status_t pk3_status = pakka_pk3_open_entry_impl(
             archive, reader, (pakka_entry_t *)entry, err);
         if (pk3_status != PAKKA_OK) {
@@ -871,8 +897,8 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
         return PAKKA_OK;            /* clean EOF (or no-op read) */
     }
 
-    /* PK3 reader (inflated buffer for DEFLATE, otherwise STORED stream). */
-    if (reader->archive->format == PAKKA_FORMAT_PK3) {
+    /* ZIP reader (inflated buffer for DEFLATE, otherwise STORED stream). */
+    if (pakka_format_is_zip(reader->archive->format)) {
         return pakka_pk3_reader_read_impl(reader, buf, len, nread, err);
     }
 
@@ -913,7 +939,7 @@ void pakka_reader_close(pakka_reader_t *reader) {
     if (reader == NULL) {
         return;
     }
-    /* PK3 readers may hold a malloc'd inflated buffer for DEFLATE
+    /* ZIP readers may hold a malloc'd inflated buffer for DEFLATE
      * entries; release it before freeing the reader struct. */
     pakka_pk3_reader_close_impl(reader);
     /* The archive owns the FILE*; the reader only holds a re-seek
@@ -962,7 +988,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                         "or no live file handle");
     }
 
-    if (archive->format == PAKKA_FORMAT_PK3) {
+    if (pakka_format_is_zip(archive->format)) {
         if (pakka_unsafe_entry_name(entry_name)) {
             err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
                      "add_file", "Refusing unsafe entry name %s",
@@ -1185,7 +1211,7 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                         "or no live file handle");
     }
 
-    if (archive->format == PAKKA_FORMAT_PK3) {
+    if (pakka_format_is_zip(archive->format)) {
         if (pakka_unsafe_entry_name(entry_name)) {
             err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
                      "add_memory", "Refusing unsafe entry name %s",
@@ -1456,7 +1482,7 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
                         "pakka_commit: archive not writable or fp closed");
     }
 
-    if (archive->format == PAKKA_FORMAT_PK3) {
+    if (pakka_format_is_zip(archive->format)) {
         return pakka_pk3_commit_impl(archive, err);
     }
 
@@ -1779,14 +1805,14 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
             continue;
         }
 
-        /* PK3 entries: on-disk payload is pk3_compressed_size bytes
+        /* ZIP entries (PK3/PK4): on-disk payload is pk3_compressed_size bytes
          * at pk3_payload_offset; entry->length is the UNCOMPRESSED
          * size (which the PAK reads-stream-length convention doesn't
          * match for DEFLATE entries). */
         {
             uint32_t verify_offset = current->offset;
             uint32_t verify_length = current->length;
-            if (archive->format == PAKKA_FORMAT_PK3) {
+            if (pakka_format_is_zip(archive->format)) {
                 verify_offset = current->pk3_payload_offset;
                 verify_length = current->pk3_compressed_size;
             }
@@ -1837,12 +1863,12 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                     remaining -= chunk;
                 }
                 if (!io_failed) {
-                    /* Deep verify (PK3 only): decompress + CRC32 check.
+                    /* Deep verify (ZIP only): decompress + CRC32 check.
                      * Structural read above already confirmed the
                      * compressed bytes are readable; this catches
                      * bit-rot in the payload, CRC mismatch, and
                      * trailing junk in the deflate stream. */
-                    if (archive->format == PAKKA_FORMAT_PK3
+                    if (pakka_format_is_zip(archive->format)
                         && (flags & PAKKA_VERIFY_DEEP)) {
                         pakka_error_t deep_err;
                         pakka_status_t dv = pakka_pk3_deep_verify_entry(

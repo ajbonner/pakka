@@ -23,7 +23,8 @@ typedef struct pakka_error pakka_error_t;
 typedef enum {
     PAKKA_FORMAT_AUTO = 0,
     PAKKA_FORMAT_PAK,
-    PAKKA_FORMAT_PK3
+    PAKKA_FORMAT_PK3,
+    PAKKA_FORMAT_PK4
 } pakka_format_t;
 
 typedef enum {
@@ -108,8 +109,10 @@ pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
 
 /* Accessors for the opaque entry handle. Names are NUL-terminated and
  * remain valid until the owning pakka_archive_t is closed. Offsets and
- * sizes are uint64_t for forward compatibility with PK3 (which can
- * exceed the PAK 4 GiB ceiling); PAK entries always fit in 32 bits. */
+ * sizes are uint64_t so the API can grow into ZIP64-sized archives in
+ * the future without an ABI change; today every supported format (PAK,
+ * PK3, PK4) stays inside the 32-bit ceiling and pakka explicitly refuses
+ * ZIP64 sentinels. */
 const char *pakka_entry_name(const pakka_entry_t *entry);
 uint64_t    pakka_entry_size(const pakka_entry_t *entry);
 uint64_t    pakka_entry_offset(const pakka_entry_t *entry);
@@ -161,9 +164,9 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
 void pakka_free(void *ptr);
 
 /* Bit flags for pakka_verify's `flags` argument. PAKKA_VERIFY_DEEP
- * adds per-entry decompression + CRC32 checks on PK3 archives (no
- * effect on PAK, which has no per-entry checksum). Other bits are
- * reserved and must be zero. */
+ * adds per-entry decompression + CRC32 checks on ZIP-class archives
+ * (PK3/PK4); no effect on PAK, which has no per-entry checksum. Other
+ * bits are reserved and must be zero. */
 #define PAKKA_VERIFY_DEEP 0x1u
 
 /* Verify the archive's structural integrity. Walks every entry:
@@ -187,11 +190,11 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_error_t *err);
 
 /* Cap the maximum decompressed payload size that pakka_open_entry and
- * pakka_read_entry_alloc will accept for a PK3 archive. Set to 0 to
- * disable the cap. Default is 64 MiB. Applies to both compressed and
- * uncompressed sides — peak resident bytes during inflate are bounded
- * by 2x this value per open reader. No effect on PAK archives (PAK
- * has no compression). */
+ * pakka_read_entry_alloc will accept for a ZIP-class archive (PK3/PK4).
+ * Set to 0 to disable the cap. Default is 64 MiB. Applies to both
+ * compressed and uncompressed sides — peak resident bytes during
+ * inflate are bounded by 2x this value per open reader. No effect on
+ * PAK archives (PAK has no compression). */
 pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
                                                uint64_t max_bytes,
                                                pakka_error_t *err);

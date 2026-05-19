@@ -132,18 +132,22 @@ int main(int argc, char *argv[]) {
     parseopts(argc, argv, &opts);
 
     if (opts.mode == PAK_CREATE) {
-        /* Format selection: .pk3 (case-insensitive) → PK3, anything
-         * else → PAK. PK3 produces only STORED entries in this build;
-         * DEFLATE encode is a future addition. */
+        /* Format selection from extension (case-insensitive):
+         * .pk3 → PK3 (Quake 3), .pk4 → PK4 (Doom 3), anything else
+         * → PAK. PK3/PK4 produce only STORED entries in this build;
+         * DEFLATE encode is a future addition shared between both. */
         pakka_format_t fmt = PAKKA_FORMAT_PAK;
         size_t plen = strlen(opts.pakfile);
         if (plen >= 4) {
             const char *ext = opts.pakfile + plen - 4;
             if ((ext[0] == '.')
                 && (ext[1] == 'p' || ext[1] == 'P')
-                && (ext[2] == 'k' || ext[2] == 'K')
-                && (ext[3] == '3')) {
-                fmt = PAKKA_FORMAT_PK3;
+                && (ext[2] == 'k' || ext[2] == 'K')) {
+                if (ext[3] == '3') {
+                    fmt = PAKKA_FORMAT_PK3;
+                } else if (ext[3] == '4') {
+                    fmt = PAKKA_FORMAT_PK4;
+                }
             }
         }
         s = pakka_create(opts.pakfile, fmt,

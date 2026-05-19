@@ -1,6 +1,6 @@
 # Pakka
-A command line utility for working with Quake 1 / 2 .pak files and
-Quake 3 / Doom 3 .pk3 files.
+A command line utility for working with Quake 1 / 2 .pak files,
+Quake 3 .pk3 files, and Doom 3 .pk4 files.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -43,8 +43,10 @@ the same `src/*.c` (including `src/pk3file.c` and the vendored
 (opendir/readdir) polyfills under `_WIN32`.
 
 ## Usage
-Pakka has 6 major modes (one per invocation), each working on both
-`.pak` (Quake 1 / 2) and `.pk3` (Quake 3 / Doom 3) archives:
+Pakka has 6 major modes (one per invocation), each working on `.pak`
+(Quake 1 / 2), `.pk3` (Quake 3), and `.pk4` (Doom 3) archives. PK3 and
+PK4 are byte-identical ZIP containers; the extension only changes the
+label returned by `pakka_format()`.
 
 * List pak contents: `./pakka -lf <archive>`
   * `--tree` renders the listing as a UTF-8 box-drawing directory tree.
@@ -55,8 +57,8 @@ Pakka has 6 major modes (one per invocation), each working on both
   * `-C` selects a destination directory; defaults to the current working
     directory.
 * Create: `./pakka -cf <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
-  * Format is picked from the destination extension: `.pk3` (any case) →
-    PK3, anything else → PAK.
+  * Format is picked from the destination extension (case-insensitive):
+    `.pk3` → PK3, `.pk4` → PK4, anything else → PAK.
 * Add to archive: `./pakka -af <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
     entry name (the source path on disk and the name stored in the archive
@@ -76,13 +78,15 @@ Pakka has 6 major modes (one per invocation), each working on both
 | Format | Read | List | Extract | Create | Add | Delete | Verify |
 |---|---|---|---|---|---|---|---|
 | Quake 1 / 2 PAK | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Quake 3 / Doom 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
+| Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
+| Doom 3 PK4 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
 
-PK3 write produces STORED-method entries only (no compression). Quake
-engines accept STORED PK3s; the output is larger than a DEFLATE-compressed
-equivalent. DEFLATE encode support is deferred.
+PK3/PK4 write produces STORED-method entries only (no compression).
+Quake and Doom 3 engines accept STORED archives; the output is larger
+than a DEFLATE-compressed equivalent. DEFLATE encode support is deferred
+for both formats.
 
-Refused for PK3 archives: ZIP64, encrypted entries, data descriptors
+Refused for PK3/PK4 archives: ZIP64, encrypted entries, data descriptors
 (general-purpose bit 3), multi-disk archives, and compression methods
 other than STORED (0) and DEFLATE (8). Each refusal returns
 `PAKKA_ERR_UNSUPPORTED` with a clear message.
@@ -111,7 +115,7 @@ every failure returns a `pakka_status_t` and optionally populates a
 caller-provided `pakka_error_t` with structured detail (errno or Win32
 `GetLastError`, operation name, entry index, file offset, message).
 
-For PK3 archives, `pakka_set_max_decompressed_size(archive, max_bytes,
+For PK3/PK4 archives, `pakka_set_max_decompressed_size(archive, max_bytes,
 err)` caps the bytes any single `pakka_open_entry` /
 `pakka_read_entry_alloc` will inflate — refuses zip-bomb-style
 high-ratio entries before they hit RAM. Default 64 MiB; pass 0 to

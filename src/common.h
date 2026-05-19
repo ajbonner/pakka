@@ -12,23 +12,24 @@
 #define OS_NAME_MAX NAME_MAX
 #define PAKFILE_SIGNATURE_LEN 4
 /* On-disk PAK filename field is 56 bytes. The in-memory buffer is sized
- * to PAKKA_ENTRY_NAME_SIZE (256) to also accommodate PK3 entry names,
- * which can be up to that limit. PAK code paths use only the first 57
- * bytes (PAKFILE_PATH_BUF) and leave the rest zero; the static assert
- * below guards against undersizing. */
+ * to PAKKA_ENTRY_NAME_SIZE (256) to also accommodate ZIP entry names
+ * (PK3/PK4), which can be up to that limit. PAK code paths use only
+ * the first 57 bytes (PAKFILE_PATH_BUF) and leave the rest zero; the
+ * static assert below guards against undersizing. */
 #define PAKFILE_PATH_MAX 56
 #define PAKFILE_PATH_BUF 57
 #define PAKFILE_DIR_ENTRY_SIZE 64
 #define PAKFILE_HEADER_SIZE 12
 /* Sanity cap on directory entry count. id's pak0.pak has 339 entries;
  * a million is generous and prevents calloc-loop DoS on crafted headers.
- * PK3 reuses the same cap. */
+ * PK3/PK4 reuse the same cap. */
 #define PAKFILE_MAX_ENTRIES 1048576u
 /* Buffer size for streaming file copies during add. Bounds peak RSS at
  * 64 KiB regardless of input file size. */
 #define PAKFILE_COPY_CHUNK 65536u
 
-/* PK3 (ZIP container) constants. */
+/* ZIP container constants — shared between PK3 and PK4. The PK3_*
+ * macro prefix is historical; the values are pure ZIP. */
 #define PK3_LFH_SIGNATURE  "PK\003\004"
 #define PK3_CDR_SIGNATURE  "PK\001\002"
 #define PK3_EOCD_SIGNATURE "PK\005\006"
@@ -60,7 +61,7 @@ struct pakka_entry {
     uint32_t length;
     struct pakka_entry *next;
 
-    /* PK3-only fields. Zero for PAK entries. */
+    /* ZIP-class fields (PK3/PK4). Zero for PAK entries. */
     uint32_t pk3_compressed_size;   /* bytes between LFH and CDR */
     uint32_t pk3_payload_offset;    /* cached lfh_offset + 30 + name + extra */
     uint32_t pk3_lfh_offset;        /* offset of LFH for verify cross-check */
@@ -78,16 +79,24 @@ struct pakka_reader {
     uint64_t next_offset;
     uint64_t remaining;
 
-    /* PK3 DEFLATE path only. NULL for PAK and STORED PK3 entries. The
-     * compressed payload is read once, inflated through pakka_inflate,
-     * and inflated_buf serves bytes through reader_read. */
+    /* ZIP-class DEFLATE path only (PK3/PK4). NULL for PAK and for
+     * STORED ZIP entries. The compressed payload is read once,
+     * inflated through pakka_inflate, and inflated_buf serves bytes
+     * through reader_read. */
     unsigned char *inflated_buf;
     size_t         inflated_len;
     size_t         inflated_cursor;
 };
 
+/* True when `f` names a ZIP-container format (PK3 or PK4). PK4 is
+ * byte-identical to PK3 on disk — Doom 3's archive — and both share
+ * every internal dispatch into src/pk3file.c. */
+static inline int pakka_format_is_zip(pakka_format_t f) {
+    return f == PAKKA_FORMAT_PK3 || f == PAKKA_FORMAT_PK4;
+}
+
 struct pakka_archive {
-    pakka_format_t format;          /* PAKKA_FORMAT_PAK or PAKKA_FORMAT_PK3 */
+    pakka_format_t format;          /* PAKKA_FORMAT_PAK, _PK3, or _PK4 */
     char signature[PAKFILE_SIGNATURE_LEN];
     uint32_t diroffset;
     uint32_t dirlength;
@@ -106,9 +115,9 @@ struct pakka_archive {
     int dirty;                      /* 1 if pakka_add/delete have unflushed changes */
     int needs_rebuild;              /* 1 if any pakka_delete touched the entry list — commit must rebuild via temp */
 
-    /* PK3-only. The central directory starts here in the file. New
-     * LFHs are written from this offset (replacing any prior CDR +
-     * EOCD), with the new CDR + EOCD rewritten at commit. */
+    /* ZIP-class (PK3/PK4). The central directory starts here in the
+     * file. New LFHs are written from this offset (replacing any prior
+     * CDR + EOCD), with the new CDR + EOCD rewritten at commit. */
     uint32_t pk3_cdr_offset;
     /* Cap on per-entry decompressed bytes for pakka_open_entry and
      * pakka_read_entry_alloc. 0 disables the cap. */
@@ -152,10 +161,11 @@ int pakka_write_u32_le(FILE *fp, uint32_t value);
 int pakka_unsafe_entry_name(const char *path);
 void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz);
 
-/* Internal PK3 dispatch helpers — called from src/pakfile.c when the
- * public pakka_* functions detect a PK3 archive. Defined in
- * src/pk3file.c. Not part of include/pakka.h; pakka_-prefixed so they
- * pass symbol-audit. */
+/* Internal ZIP dispatch helpers — called from src/pakfile.c when the
+ * public pakka_* functions detect a ZIP-class archive (PK3 or PK4).
+ * Both formats share the same implementation; the pakka_pk3_ prefix is
+ * historical. Defined in src/pk3file.c. Not part of include/pakka.h;
+ * pakka_-prefixed so they pass symbol-audit. */
 pakka_status_t pakka_pk3_open_impl(struct pakka_archive *pak,
                                    pakka_error_t *err);
 pakka_status_t pakka_pk3_open_entry_impl(struct pakka_archive *pak,

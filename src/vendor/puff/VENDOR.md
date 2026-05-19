@@ -47,8 +47,8 @@ means they don't appear in `nm -g`).
    future zlib release.
 2. Re-apply the `puff` → `pakka_inflate` rename.
 3. Bump the SHA pin and zlib version above.
-4. Verify `make symbol-audit` still passes and the existing PK3 bats
-   suite green.
+4. Verify `make symbol-audit` still passes and the existing PK3 and
+   PK4 bats suites are green.
 
 ## Files in this directory
 
