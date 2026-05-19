@@ -40,6 +40,16 @@ endif()
 add_library(pakka STATIC ${PAKKA_LIB_SOURCES})
 add_executable(pakka_exe ${PAKKA_CLI_SOURCES})
 
+# Vendored sources are not pakka's code — they ship with the warnings
+# their upstream is willing to live with. Suppress /W4 and similar for
+# them so MSVC's "warnings as errors" policy doesn't reject Mark Adler's
+# puff.c (C4324 alignment padding, C4244 int->short conversions, etc.)
+# or any future vendor that's clean on gcc but noisy on cl.exe.
+if(MSVC)
+    set_source_files_properties(src/vendor/puff/puff.c PROPERTIES
+        COMPILE_FLAGS "/W0")
+endif()
+
 # Preserve build/cmake/pakka.exe path for the Windows CI job; renaming the
 # CMake target to pakka_exe lets the static library hold the canonical
 # `pakka` target name (libpakka.a / pakka.lib).
