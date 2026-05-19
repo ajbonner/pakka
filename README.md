@@ -344,5 +344,16 @@ dead, but I followed
 [Quake PAK File Format](https://web.archive.org/web/20160711041711/https://debian.fmi.uni-sofia.bg/~sergei/cgsr/docs/pak.txt)
 in building this utility.
 
+The [Yamagi Quake II](https://www.yamagi.org/) team's
+[pakextract](https://github.com/yquake2/pakextract) (BSD-2-Clause) is
+the canonical reference for the SiN and Daikatana on-disk formats —
+SiN's SPAK + 120-byte filename layout, Daikatana's 72-byte directory
+entry, and especially Daikatana's custom byte-codec compression
+(documented opcode-by-opcode at
+[`src/dk_codec.c`](src/dk_codec.c)). Pakka's decoder is an
+independent reimplementation, but every behavioural choice
+(termination semantics, overlap handling, opcode 0xFE rejection) was
+informed by pakextract's source.
+
 ## License
 MIT
