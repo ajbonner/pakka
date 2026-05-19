@@ -25,6 +25,18 @@
 #include <fcntl.h>
 #include <sys/locking.h>
 
+/* Typedef-array static assert — _Static_assert is C11 and pakka holds
+ * a gcc 3.x legacy floor. */
+typedef char pakka_compat_assert_int64_size[(sizeof(__int64) >= 8) ? 1 : -1];
+
+int pakka_compat_fseek(FILE *fp, int64_t offset, int whence) {
+    return _fseeki64(fp, (__int64)offset, whence);
+}
+
+int64_t pakka_compat_ftell(FILE *fp) {
+    return (int64_t)_ftelli64(fp);
+}
+
 char *pakka_compat_realpath(const char *path, char *resolved) {
     return _fullpath(resolved, path, _MAX_PATH);
 }
@@ -304,6 +316,20 @@ FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_pat
 
 #include <fcntl.h>
 #include <errno.h>
+
+/* Typedef-array static assert — _Static_assert is C11, codebase keeps
+ * a gcc 3.x legacy floor. Fires if -D_FILE_OFFSET_BITS=64 stops
+ * reaching this TU on 32-bit glibc; off_t silently reverts to 32-bit
+ * and the 2 GiB ceiling comes back. */
+typedef char pakka_compat_assert_off_t_size[(sizeof(off_t) >= 8) ? 1 : -1];
+
+int pakka_compat_fseek(FILE *fp, int64_t offset, int whence) {
+    return fseeko(fp, (off_t)offset, whence);
+}
+
+int64_t pakka_compat_ftell(FILE *fp) {
+    return (int64_t)ftello(fp);
+}
 
 /* glibc 2.3 doesn't expose these under _XOPEN_SOURCE=700 (POSIX-2008
  * hadn't standardized them yet), but they've been Linux kernel ABI

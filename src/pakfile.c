@@ -487,19 +487,19 @@ pakka_status_t pakka_close(pakka_archive_t *pak, pakka_error_t *err) {
 }
 
 pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
-    long size;
+    int64_t size;
     int saved_errno;
 
     /* Capture the actual file size up front so every bounds check below
      * compares against ground truth rather than self-reported header
      * values. */
-    if (fseek(pak->fp, 0L, SEEK_END) != 0) {
+    if (pakka_compat_fseek(pak->fp, 0, SEEK_END) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "open",
                         "Cannot seek pak file");
     }
-    size = ftell(pak->fp);
+    size = pakka_compat_ftell(pak->fp);
     if (size < 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -602,7 +602,7 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
         entry_pos = (uint64_t)pak->diroffset + (uint64_t)pak->dirlength
                     - (uint64_t)i * PAKFILE_DIR_ENTRY_SIZE;
 
-        if (fseek(pak->fp, (long)entry_pos, SEEK_SET) != 0) {
+        if (pakka_compat_fseek(pak->fp, (int64_t)entry_pos, SEEK_SET) != 0) {
             saved_errno = errno;
             err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                      (uint32_t)saved_errno, "open",
@@ -882,7 +882,7 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
      * single FILE *, so a different reader's seek between calls would
      * otherwise leave this one mispositioned. fseek is cheap; coherence
      * is the priority. */
-    if (fseek(reader->archive->fp, (long)reader->next_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(reader->archive->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "reader_read",
@@ -1104,7 +1104,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     entry->offset = (uint32_t)append_offset;
     entry->length = (uint32_t)src_size;
 
-    if (fseek(archive->fp, (long)append_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         fclose(src_fp);
         free(entry);
@@ -1260,7 +1260,7 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     entry->offset = (uint32_t)append_offset;
     entry->length = (uint32_t)len;
 
-    if (fseek(archive->fp, (long)append_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -1540,7 +1540,7 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
                             "Cannot create rebuild scratch near %s",
                             dir_hint);
         }
-        if (fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
+        if (pakka_compat_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
             saved_errno = errno;
             fclose(tfd);
             (void)remove(rebuild_scratch);
@@ -1790,7 +1790,7 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                 verify_offset = current->pk3_payload_offset;
                 verify_length = current->pk3_compressed_size;
             }
-            if (fseek(archive->fp, (long)verify_offset, SEEK_SET) != 0) {
+            if (pakka_compat_fseek(archive->fp, (int64_t)verify_offset, SEEK_SET) != 0) {
                 int seek_errno = errno;
                 verify_report(report, userdata, PAKKA_REPORT_ERROR,
                               PAKKA_ERR_IO, current->filename,
@@ -1934,11 +1934,11 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                                  uint32_t *new_offset_out,
                                  pakka_error_t *err) {
     char *buffer;
-    long new_offset;
+    int64_t new_offset;
     uint32_t src_offset = entry->offset;
     int saved_errno;
 
-    if (fseek(ffd, (long)src_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                  (uint32_t)saved_errno, "commit",
@@ -1948,7 +1948,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
         return PAKKA_ERR_IO;
     }
 
-    new_offset = ftell(tfd);
+    new_offset = pakka_compat_ftell(tfd);
     if (new_offset < 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -2253,13 +2253,15 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *tail;
     pakka_status_t s;
     int saved_errno;
+    uint64_t total_dirlength;
+    Pakfileentry_t *count_it;
 
     /* Empty pak still needs a valid PACK header so the file isn't malformed.
      * This happens after a delete that removes every entry. */
     if (current == NULL) {
         pak->diroffset = PAKFILE_HEADER_SIZE;
         pak->dirlength = 0;
-        if (fseek(pak->fp, 0L, SEEK_SET) != 0) {
+        if (pakka_compat_fseek(pak->fp, 0, SEEK_SET) != 0) {
             saved_errno = errno;
             return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "commit",
@@ -2269,9 +2271,24 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
     }
 
     tail = find_tail(pak);
+    /* Per-entry add and rebuild-copy paths already cap each entry's
+     * offset+length at UINT32_MAX, so tail->offset+tail->length fits.
+     * The remaining overflow is diroffset + dirlength crossing 4 GiB
+     * once the directory is appended; reject before any write. */
+    total_dirlength = 0;
+    for (count_it = current; count_it != NULL; count_it = count_it->next) {
+        total_dirlength += PAKFILE_DIR_ENTRY_SIZE;
+    }
+    if ((uint64_t)tail->offset + (uint64_t)tail->length + total_dirlength
+            > UINT32_MAX) {
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "commit",
+                        "Pak directory would push file past 4 GiB");
+    }
+
     pak->diroffset = tail->offset + tail->length;
     pak->dirlength = 0;
-    if (fseek(pak->fp, (long)pak->diroffset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)pak->diroffset, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "commit",
@@ -2286,7 +2303,7 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
         pak->dirlength += PAKFILE_DIR_ENTRY_SIZE;
     } while ((current = current->next) != NULL);
 
-    if (fseek(pak->fp, 0L, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, 0, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "commit",

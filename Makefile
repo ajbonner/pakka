@@ -9,7 +9,9 @@ TARGET=pakka
 # _XOPEN_SOURCE=700 (POSIX.1-2008 + XSI) — needed for realpath():
 # glibc gates it on __USE_XOPEN_EXTENDED, musl on _XOPEN_SOURCE, neither
 # on _POSIX_C_SOURCE.
-CPPFLAGS = -Iinclude -D_XOPEN_SOURCE=700 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+# _FILE_OFFSET_BITS=64 — widens off_t / fseeko / ftello on 32-bit glibc
+# so pakka_compat_fseek/ftell can address the [2 GiB, 4 GiB) range.
+CPPFLAGS = -Iinclude -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 CC=cc $(CPPFLAGS)
 CFLAGS=-g -Wall --std=c99 --pedantic
 AR ?= ar

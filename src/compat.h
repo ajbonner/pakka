@@ -12,6 +12,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
+#include <sys/types.h>
 
 #ifdef _WIN32
   #include <direct.h>
@@ -47,6 +48,13 @@
 
 char *pakka_compat_realpath(const char *path, char *resolved);
 char *pakka_compat_getcwd(char *buf, size_t size);
+
+/* Wide-offset fseek/ftell. Raw fseek/ftell use `long`, which is 32-bit
+ * on LLP64 Windows and 32-bit POSIX — paks in [2 GiB, 4 GiB) silently
+ * truncate. Forwards to fseeko/ftello (POSIX) or _fseeki64/_ftelli64
+ * (MSVC). The pak wire format still caps offsets at 4 GiB (u32). */
+int     pakka_compat_fseek(FILE *fp, int64_t offset, int whence);
+int64_t pakka_compat_ftell(FILE *fp);
 
 /* Open a fresh temp file in binary read/write mode ("w+b") and write
  * the resolved path into out_path (capacity out_path_size). The

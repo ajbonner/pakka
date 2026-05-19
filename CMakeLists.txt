@@ -98,7 +98,9 @@ foreach(_t pakka pakka_exe)
     else()
         target_compile_options(${_t} PRIVATE -Wall -pedantic)
         # realpath() is gated on _XOPEN_SOURCE under glibc/musl. Matches Makefile.
-        target_compile_definitions(${_t} PRIVATE _XOPEN_SOURCE=700)
+        # _FILE_OFFSET_BITS=64 widens off_t on 32-bit glibc so pakka_compat_fseek
+        # can address paks in [2 GiB, 4 GiB). No-op elsewhere.
+        target_compile_definitions(${_t} PRIVATE _XOPEN_SOURCE=700 _FILE_OFFSET_BITS=64)
     endif()
 endforeach()
 

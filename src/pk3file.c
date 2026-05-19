@@ -199,7 +199,7 @@ static int pk3_find_eocd(FILE *fp, uint64_t file_size,
         : (size_t)file_size;
     scan_start = file_size - (uint64_t)scan_len;
 
-    if (fseek(fp, (long)scan_start, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(fp, (int64_t)scan_start, SEEK_SET) != 0) {
         return -1;
     }
     if (fread(buf, 1, scan_len, fp) != scan_len) {
@@ -242,7 +242,7 @@ static pakka_status_t pk3_validate_eocd(Pak_t *pak,
     uint32_t cdr_size, cdr_offset;
     int saved_errno;
 
-    if (fseek(pak->fp, (long)eocd_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)eocd_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
@@ -313,7 +313,7 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
     uint32_t lfh_crc, lfh_csize, lfh_usize;
     int saved_errno;
 
-    if (fseek(pak->fp, (long)entry->pk3_lfh_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)entry->pk3_lfh_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
@@ -446,7 +446,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
                             "open", "Cannot allocate CDR buffer (%u bytes)",
                             (unsigned)cdr_size);
     }
-    if (fseek(pak->fp, (long)cdr_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)cdr_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(cdr);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -667,7 +667,7 @@ static pakka_status_t pk3_load_compressed(Pak_t *pak,
                             "Cannot allocate compressed buffer (%u bytes)",
                             (unsigned)entry->pk3_compressed_size);
     }
-    if (fseek(pak->fp, (long)entry->pk3_payload_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)entry->pk3_payload_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(buf);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -821,7 +821,7 @@ pakka_status_t pakka_pk3_reader_read_impl(struct pakka_reader *reader,
     }
 
     /* STORED path: seek + fread, just like the PAK reader. */
-    if (fseek(pak->fp, (long)reader->next_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "reader_read",
@@ -1096,7 +1096,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
     entry->pk3_payload_offset = lfh_offset + PK3_LFH_SIZE + (uint32_t)name_len;
     entry->offset = entry->pk3_payload_offset;
 
-    if (fseek(pak->fp, (long)lfh_offset, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(pak->fp, (int64_t)lfh_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(entry);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -1199,7 +1199,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
 
     /* Second pass: stream payload from start of source. The prepare
      * helper left the file pointer at the payload offset. */
-    if (fseek(src, 0L, SEEK_SET) != 0) {
+    if (pakka_compat_fseek(src, 0, SEEK_SET) != 0) {
         saved_errno = errno;
         free(entry);
         fclose(src);
@@ -1345,7 +1345,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             }
 
             /* Stream payload bytes from the original file. */
-            if (fseek(pak->fp, (long)e->pk3_payload_offset, SEEK_SET) != 0) {
+            if (pakka_compat_fseek(pak->fp, (int64_t)e->pk3_payload_offset, SEEK_SET) != 0) {
                 saved_errno = errno;
                 fclose(tmpfp);
                 remove(tmp_path);
@@ -1445,7 +1445,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                 "Cannot reopen committed PK3");
         }
         /* Seek to where CDR will be written below. */
-        if (fseek(pak->fp, (long)pak->pk3_cdr_offset, SEEK_SET) != 0) {
+        if (pakka_compat_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
@@ -1456,11 +1456,31 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         /* Add-only path: file already has fresh LFHs at the correct
          * offsets. Just seek to pk3_cdr_offset to overwrite any stale
          * CDR+EOCD. */
-        if (fseek(pak->fp, (long)pak->pk3_cdr_offset, SEEK_SET) != 0) {
+        if (pakka_compat_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
                                 "Cannot seek to PK3 CDR start");
+        }
+    }
+
+    /* Earlier LFH/payload placement checks bound each entry, but
+     * commit appends CDR + 22-byte EOCD on top. Reject before any CDR
+     * byte hits disk; a half-written CDR would leave the EOCD scanner
+     * pointing at garbage. */
+    {
+        uint64_t total = (uint64_t)pak->pk3_cdr_offset
+                         + (uint64_t)PK3_EOCD_SIZE;
+        for (e = pak->head; e != NULL; e = e->next) {
+            total += (uint64_t)PK3_CDR_SIZE
+                     + (uint64_t)strlen(e->filename);
+            if (total > UINT32_MAX) {
+                return pk3_err_fill(err, PAKKA_ERR_LIMIT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0,
+                                    "commit",
+                                    "PK3 CDR + EOCD would push file "
+                                    "past 4 GiB");
+            }
         }
     }
 
@@ -1497,8 +1517,8 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
     }
 
     /* Update file_size cache for any subsequent reads. */
-    if (fseek(pak->fp, 0L, SEEK_END) == 0) {
-        long n = ftell(pak->fp);
+    if (pakka_compat_fseek(pak->fp, 0, SEEK_END) == 0) {
+        int64_t n = pakka_compat_ftell(pak->fp);
         if (n > 0) pak->file_size = (uint64_t)n;
     }
 
