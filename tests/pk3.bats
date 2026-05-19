@@ -20,7 +20,7 @@ setup_file() {
 }
 
 @test "pk3 list: enumerates entries" {
-    run "$PAKKA" -lf "$BATS_FILE_TMPDIR/mixed.pk3"
+    run "$PAKKA" -l "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
     [[ "$output" == *"hello.txt"* ]]
     [[ "$output" == *"sub/nested.txt"* ]]
@@ -28,7 +28,7 @@ setup_file() {
 }
 
 @test "pk3 list --tree: renders hierarchy" {
-    run "$PAKKA" -lf --tree "$BATS_FILE_TMPDIR/mixed.pk3"
+    run "$PAKKA" -l --tree "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
     cleaned="${output//$'\r'/}"
     [[ "$cleaned" == *"sub"* ]]
@@ -38,7 +38,7 @@ setup_file() {
 @test "pk3 extract: STORED + DEFLATE entries match source bytes" {
     rm -rf "$BATS_TEST_TMPDIR/out"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_FILE_TMPDIR/mixed.pk3" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
     diff -r "$BATS_FILE_TMPDIR/src" "$BATS_TEST_TMPDIR/out"
 }
@@ -46,7 +46,7 @@ setup_file() {
 @test "pk3 extract: selective by entry name" {
     rm -rf "$BATS_TEST_TMPDIR/sel"
     mkdir -p "$BATS_TEST_TMPDIR/sel"
-    run "$PAKKA" -xf "$BATS_FILE_TMPDIR/mixed.pk3" -C "$BATS_TEST_TMPDIR/sel" hello.txt
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/sel" "$BATS_FILE_TMPDIR/mixed.pk3" hello.txt
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/sel/hello.txt" ]
     # No other entries extracted
@@ -61,7 +61,7 @@ setup_file() {
     echo "b nested" > "$BATS_TEST_TMPDIR/build_src/d/b.txt"
 
     pushd "$BATS_TEST_TMPDIR/build_src" >/dev/null
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/built.pk3" a.txt d
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/built.pk3" a.txt d
     popd >/dev/null
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/built.pk3" ]
@@ -79,19 +79,19 @@ setup_file() {
     [[ "$output" == *"No errors detected"* ]]
 
     # Pakka extracts what pakka built.
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/built.pk3" -C "$BATS_TEST_TMPDIR/build_out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/build_out" "$BATS_TEST_TMPDIR/built.pk3"
     [ "$status" -eq 0 ]
     diff -r "$BATS_TEST_TMPDIR/build_src" "$BATS_TEST_TMPDIR/build_out"
 }
 
 @test "pk3 create: empty .pk3 is a 22-byte EOCD-only archive" {
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/empty.pk3"
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/empty.pk3"
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/empty.pk3" ]
     # 22 bytes = PK\005\006 + 18 zero bytes
     size=$(wc -c < "$BATS_TEST_TMPDIR/empty.pk3")
     [ "$size" -eq 22 ]
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/empty.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/empty.pk3"
     [ "$status" -eq 0 ]
     [[ "$output" == *"empty"* ]] || [ -z "$output" ]
 }
@@ -99,7 +99,7 @@ setup_file() {
 @test "pk3 open: rejects multi-disk spanning marker" {
     # PK\007\008 alone is enough; we don't even need a valid archive.
     printf 'PK\007\010' > "$BATS_TEST_TMPDIR/span.pk3"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/span.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/span.pk3"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Multi-disk"* ]] || [[ "$stderr" == *"Multi-disk"* ]]
 }
@@ -131,7 +131,7 @@ with open(path, "wb") as f:
 PY
     rm -rf "$BATS_TEST_TMPDIR/out_evil"
     mkdir -p "$BATS_TEST_TMPDIR/out_evil"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/traversal.pk3" -C "$BATS_TEST_TMPDIR/out_evil"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out_evil" "$BATS_TEST_TMPDIR/traversal.pk3"
     [ "$status" -ne 0 ]
     # Confirm nothing escaped
     [ ! -f "$BATS_TEST_TMPDIR/escape.txt" ]
@@ -155,7 +155,7 @@ with open(path, "wb") as f:
 PY
     rm -rf "$BATS_TEST_TMPDIR/out_res"
     mkdir -p "$BATS_TEST_TMPDIR/out_res"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/reserved.pk3" -C "$BATS_TEST_TMPDIR/out_res"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out_res" "$BATS_TEST_TMPDIR/reserved.pk3"
     [ "$status" -ne 0 ]
 }
 
@@ -169,7 +169,7 @@ eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
 with open(path, "wb") as f:
     f.write(eocd)
 PY
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/z64.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/z64.pk3"
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"ZIP64"* ]] || [[ "$output$stderr" == *"not supported"* ]]
 }
@@ -191,7 +191,7 @@ eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
 with open(path, "wb") as f:
     f.write(lfh + cdr + eocd)
 PY
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/enc.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/enc.pk3"
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"Encrypted"* ]]
 }
@@ -213,7 +213,7 @@ eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
 with open(path, "wb") as f:
     f.write(lfh + cdr + eocd)
 PY
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bz.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/bz.pk3"
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"method"* ]]
 }
@@ -271,10 +271,10 @@ with open(path, "wb") as f:
     f.write(lfh + cdr + eocd)
 PY
     # Structural verify must pass (CRC isn't checked).
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/bad_crc.pk3"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/bad_crc.pk3"
     [ "$status" -eq 0 ]
     # Deep verify must fail.
-    run "$PAKKA" --verify --deep -f "$BATS_TEST_TMPDIR/bad_crc.pk3"
+    run "$PAKKA" --verify --deep "$BATS_TEST_TMPDIR/bad_crc.pk3"
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"CRC32 mismatch"* ]]
 }
@@ -296,7 +296,7 @@ eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
 with open(path, "wb") as f:
     f.write(lfh + cdr + eocd)
 PY
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/stored_mismatch.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/stored_mismatch.pk3"
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"csize != usize"* ]]
 }
@@ -321,7 +321,7 @@ eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
 with open(path, "wb") as f:
     f.write(lfh + cdr + eocd)
 PY
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/overlap.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/overlap.pk3"
     [ "$status" -ne 0 ]
     # Pakka should reject either with csize != usize (caught earlier),
     # CDR-overlap, or LFH-disagrees-with-CDR. All are correct refusals.
@@ -331,11 +331,11 @@ PY
     rm -f "$BATS_TEST_TMPDIR/dup.pk3"
     cd "$BATS_TEST_TMPDIR"
     echo "first" > a.txt
-    "$PAKKA" -cf dup.pk3 a.txt
-    [ -f dup.pk3 ]
+    "$PAKKA" -c dup.pk3 a.txt
+    [ dup.pk3 ]
     # Try to add the same entry again.
     echo "second" > a.txt
-    run "$PAKKA" -af dup.pk3 a.txt
+    run "$PAKKA" -a dup.pk3 a.txt
     [ "$status" -ne 0 ]
     [[ "$output$stderr" == *"duplicate"* ]] || [[ "$output$stderr" == *"Duplicate"* ]]
 }
@@ -347,18 +347,18 @@ PY
     echo "remove" > "$BATS_TEST_TMPDIR/del_src/remove.txt"
 
     pushd "$BATS_TEST_TMPDIR/del_src" >/dev/null
-    "$PAKKA" -cf "$BATS_TEST_TMPDIR/del.pk3" keep.txt remove.txt
+    "$PAKKA" -c "$BATS_TEST_TMPDIR/del.pk3" keep.txt remove.txt
     popd >/dev/null
 
-    "$PAKKA" -df "$BATS_TEST_TMPDIR/del.pk3" remove.txt
+    "$PAKKA" -d "$BATS_TEST_TMPDIR/del.pk3" remove.txt
     [ "$?" -eq 0 ]
 
     # pakka's own --verify confirms structural integrity post-delete.
     # (Avoids depending on `unzip`, which isn't in every BSD base.)
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/del.pk3"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/del.pk3"
     [ "$status" -eq 0 ]
 
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/del.pk3" -C "$BATS_TEST_TMPDIR/del_out"
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/del_out" "$BATS_TEST_TMPDIR/del.pk3"
     [ -f "$BATS_TEST_TMPDIR/del_out/keep.txt" ]
     [ ! -f "$BATS_TEST_TMPDIR/del_out/remove.txt" ]
 }
@@ -405,7 +405,7 @@ EOF
     (cd "$BATS_TEST_TMPDIR/dirsrc" && zip -q "$BATS_TEST_TMPDIR/dirs.pk3" -r .)
 
     # CDR claims 2 entries (real.txt + empty_dir/); pakka should expose only 1.
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/dirs.pk3"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/dirs.pk3"
     [ "$status" -eq 0 ]
     [[ "$output" == *"real.txt"* ]]
     # No "empty_dir/" in listing

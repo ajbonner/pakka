@@ -64,7 +64,7 @@ setup() {
 }
 
 @test "large file: lists the single high-offset entry" {
-    run "$PAKKA" -lf "$LARGE_PAK"
+    run "$PAKKA" -l "$LARGE_PAK"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 1 ]
     echo "$output" | grep -q '^tiny '
@@ -72,7 +72,7 @@ setup() {
 
 @test "large file: extract recovers the payload bytes" {
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$LARGE_PAK" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$LARGE_PAK"
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/out/tiny" ]
     [ "$(wc -c < "$BATS_TEST_TMPDIR/out/tiny" | tr -d ' ')" -eq 4 ]
@@ -80,6 +80,6 @@ setup() {
 }
 
 @test "large file: --verify passes" {
-    run "$PAKKA" --verify -f "$LARGE_PAK"
+    run "$PAKKA" --verify "$LARGE_PAK"
     [ "$status" -eq 0 ]
 }

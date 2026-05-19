@@ -20,7 +20,7 @@ setup_file() {
 }
 
 @test "pk4 list: enumerates entries in a /usr/bin/zip-built .pk4" {
-    run "$PAKKA" -lf "$BATS_FILE_TMPDIR/mixed.pk4"
+    run "$PAKKA" -l "$BATS_FILE_TMPDIR/mixed.pk4"
     [ "$status" -eq 0 ]
     [[ "$output" == *"hello.txt"* ]]
     [[ "$output" == *"sub/nested.txt"* ]]
@@ -30,13 +30,13 @@ setup_file() {
 @test "pk4 extract: DEFLATE round-trips through pakka's reader" {
     rm -rf "$BATS_TEST_TMPDIR/out"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_FILE_TMPDIR/mixed.pk4" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_FILE_TMPDIR/mixed.pk4"
     [ "$status" -eq 0 ]
     diff -r "$BATS_FILE_TMPDIR/src" "$BATS_TEST_TMPDIR/out"
 }
 
 @test "pk4 verify: synthetic PK4 passes deep checks" {
-    run "$PAKKA" --verify -f "$BATS_FILE_TMPDIR/mixed.pk4"
+    run "$PAKKA" --verify "$BATS_FILE_TMPDIR/mixed.pk4"
     [ "$status" -eq 0 ]
 }
 
@@ -47,7 +47,7 @@ setup_file() {
     echo "b nested" > "$BATS_TEST_TMPDIR/build_src/d/b.txt"
 
     pushd "$BATS_TEST_TMPDIR/build_src" >/dev/null
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/built.pk4" a.txt d
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/built.pk4" a.txt d
     popd >/dev/null
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/built.pk4" ]
@@ -63,7 +63,7 @@ setup_file() {
     [ "$status" -eq 0 ]
     [[ "$output" == *"No errors detected"* ]]
 
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/built.pk4" -C "$BATS_TEST_TMPDIR/build_out"
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/build_out" "$BATS_TEST_TMPDIR/built.pk4"
     diff -r "$BATS_TEST_TMPDIR/build_src" "$BATS_TEST_TMPDIR/build_out"
 }
 
@@ -73,7 +73,7 @@ setup_file() {
     echo "x" > "$BATS_TEST_TMPDIR/upper_src/x.txt"
 
     pushd "$BATS_TEST_TMPDIR/upper_src" >/dev/null
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/UPPER.PK4" x.txt
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/UPPER.PK4" x.txt
     popd >/dev/null
     [ "$status" -eq 0 ]
     sig=$(dd if="$BATS_TEST_TMPDIR/UPPER.PK4" bs=1 count=4 2>/dev/null \
@@ -91,16 +91,16 @@ setup_file() {
     echo "remove" > "$BATS_TEST_TMPDIR/del_src/remove.txt"
 
     pushd "$BATS_TEST_TMPDIR/del_src" >/dev/null
-    "$PAKKA" -cf "$BATS_TEST_TMPDIR/del.pk4" keep.txt remove.txt
+    "$PAKKA" -c "$BATS_TEST_TMPDIR/del.pk4" keep.txt remove.txt
     popd >/dev/null
 
-    "$PAKKA" -df "$BATS_TEST_TMPDIR/del.pk4" remove.txt
+    "$PAKKA" -d "$BATS_TEST_TMPDIR/del.pk4" remove.txt
     [ "$?" -eq 0 ]
 
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/del.pk4"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/del.pk4"
     [ "$status" -eq 0 ]
 
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/del.pk4" -C "$BATS_TEST_TMPDIR/del_out"
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/del_out" "$BATS_TEST_TMPDIR/del.pk4"
     [ -f "$BATS_TEST_TMPDIR/del_out/keep.txt" ]
     [ ! -f "$BATS_TEST_TMPDIR/del_out/remove.txt" ]
 }
@@ -114,11 +114,11 @@ setup_file() {
     echo "pak content" > "$BATS_TEST_TMPDIR/pak_src/p.txt"
 
     pushd "$BATS_TEST_TMPDIR/pak_src" >/dev/null
-    "$PAKKA" -cf "$BATS_TEST_TMPDIR/real.pak" p.txt
+    "$PAKKA" -c "$BATS_TEST_TMPDIR/real.pak" p.txt
     popd >/dev/null
 
     cp "$BATS_TEST_TMPDIR/real.pak" "$BATS_TEST_TMPDIR/disguised.pk4"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/disguised.pk4"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/disguised.pk4"
     [ "$status" -eq 0 ]
     [[ "$output" == *"p.txt"* ]]
 }

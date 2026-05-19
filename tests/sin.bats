@@ -44,7 +44,7 @@ write_sin_one_entry() {
 @test "sin open: SPAK magic + 120-byte names is recognised" {
     pak="$BATS_TEST_TMPDIR/demo.sin"
     write_sin_one_entry "$pak" "maps/sintest.bsp" "hello-sin"
-    run "$PAKKA" -lf "$pak"
+    run "$PAKKA" -l "$pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "maps/sintest.bsp"
 }
@@ -53,7 +53,7 @@ write_sin_one_entry() {
     pak="$BATS_TEST_TMPDIR/demo.sin"
     write_sin_one_entry "$pak" "maps/sintest.bsp" "hello-sin-roundtrip"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$pak"
     [ "$status" -eq 0 ]
     [ -f "$BATS_TEST_TMPDIR/out/maps/sintest.bsp" ]
     [ "$(cat "$BATS_TEST_TMPDIR/out/maps/sintest.bsp")" = "hello-sin-roundtrip" ]
@@ -64,7 +64,7 @@ write_sin_one_entry() {
     mkdir -p "$src"
     echo "payload" > "$src/file.txt"
     pak="$BATS_TEST_TMPDIR/created.sin"
-    (cd "$src" && "$PAKKA" -cf "$pak" file.txt) >/dev/null
+    (cd "$src" && "$PAKKA" -c "$pak" file.txt) >/dev/null
     [ -f "$pak" ]
     # POSIX-portable byte-prefix check: OpenBSD's head(1) has no -c, so
     # use dd to extract the first 4 bytes and compare directly.
@@ -76,7 +76,7 @@ write_sin_one_entry() {
     mkdir -p "$src"
     echo "payload" > "$src/file.txt"
     pak="$BATS_TEST_TMPDIR/created.pak"
-    (cd "$src" && "$PAKKA" -cf "$pak" --format sin file.txt) >/dev/null
+    (cd "$src" && "$PAKKA" -c "$pak" --format sin file.txt) >/dev/null
     [ -f "$pak" ]
     # POSIX-portable byte-prefix check: OpenBSD's head(1) has no -c, so
     # use dd to extract the first 4 bytes and compare directly.
@@ -89,34 +89,34 @@ write_sin_one_entry() {
     echo "level data" > "$src/maps/e1m1.bsp"
     echo "model bytes" > "$src/p_blast.mdl"
     pak="$BATS_TEST_TMPDIR/full.sin"
-    (cd "$src" && "$PAKKA" -cf "$pak" maps p_blast.mdl) >/dev/null
-    run "$PAKKA" -lf "$pak"
+    (cd "$src" && "$PAKKA" -c "$pak" maps p_blast.mdl) >/dev/null
+    run "$PAKKA" -l "$pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "maps/e1m1.bsp"
     echo "$output" | grep -qF "p_blast.mdl"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$pak" >/dev/null
     diff -rq "$src" "$BATS_TEST_TMPDIR/out"
 }
 
 @test "sin add: accepts a 119-byte entry name (one short of cap)" {
     pak="$BATS_TEST_TMPDIR/init.sin"
-    "$PAKKA" -cf "$pak" --format sin </dev/null >/dev/null
+    "$PAKKA" -c "$pak" --format sin </dev/null >/dev/null
     # 119 bytes of 'a' — the longest legal SiN entry name.
     src="$BATS_TEST_TMPDIR/payload.txt"
     echo "p" > "$src"
     longname=$(python3 -c "print('a' * 119)")
-    run "$PAKKA" -af "$pak" --as "$longname" "$src"
+    run "$PAKKA" -a "$pak" --as "$longname" "$src"
     [ "$status" -eq 0 ]
 }
 
 @test "sin add: rejects a 120-byte entry name (at the cap)" {
     pak="$BATS_TEST_TMPDIR/init.sin"
-    "$PAKKA" -cf "$pak" --format sin </dev/null >/dev/null
+    "$PAKKA" -c "$pak" --format sin </dev/null >/dev/null
     src="$BATS_TEST_TMPDIR/payload.txt"
     echo "p" > "$src"
     toolong=$(python3 -c "print('a' * 120)")
-    run "$PAKKA" -af "$pak" --as "$toolong" "$src"
+    run "$PAKKA" -a "$pak" --as "$toolong" "$src"
     [ "$status" -ne 0 ]
     echo "$output" | grep -qi "too long"
 }
@@ -126,18 +126,18 @@ write_sin_one_entry() {
     mkdir -p "$src"
     echo "p" > "$src/x.txt"
     pak="$BATS_TEST_TMPDIR/fmt.sin"
-    (cd "$src" && "$PAKKA" -cf "$pak" x.txt) >/dev/null
-    # Listing via -lf must succeed for the freshly-created SPAK archive
+    (cd "$src" && "$PAKKA" -c "$pak" x.txt) >/dev/null
+    # Listing via -l must succeed for the freshly-created SPAK archive
     # — that's the user-visible signal that the format is recognised on
     # the read side.
-    run "$PAKKA" -lf "$pak"
+    run "$PAKKA" -l "$pak"
     [ "$status" -eq 0 ]
 }
 
 @test "sin open: --format pak rejects an SPAK archive (hint mismatch)" {
     pak="$BATS_TEST_TMPDIR/demo.sin"
     write_sin_one_entry "$pak" "x" "y"
-    run "$PAKKA" -lf "$pak" --format pak
+    run "$PAKKA" -l "$pak" --format pak
     [ "$status" -ne 0 ]
     echo "$output" | grep -qi "format_hint"
 }
@@ -149,9 +149,9 @@ write_sin_one_entry() {
     echo "drop"  > "$src/b.txt"
     echo "keep2" > "$src/c.txt"
     pak="$BATS_TEST_TMPDIR/del.sin"
-    (cd "$src" && "$PAKKA" -cf "$pak" a.txt b.txt c.txt) >/dev/null
-    "$PAKKA" -df "$pak" b.txt >/dev/null
-    run "$PAKKA" -lf "$pak"
+    (cd "$src" && "$PAKKA" -c "$pak" a.txt b.txt c.txt) >/dev/null
+    "$PAKKA" -d "$pak" b.txt >/dev/null
+    run "$PAKKA" -l "$pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "a.txt"
     ! echo "$output" | grep -qF "b.txt"

@@ -52,26 +52,32 @@ ZIP containers; the extension only changes the label returned by
 probes both directory layouts at open time, and `--format daikatana`
 pins the decision when the archive is ambiguous.
 
-* List pak contents: `./pakka -lf <archive>`
+The archive path is the first positional argument; any further
+positionals are entry names (for `-x` / `-d`) or source files (for `-a`
+/ `-c`). All option flags (including `-C <dest>`) must come before the
+archive — pakka's getopt is POSIX-strict and stops scanning at the
+first positional.
+
+* List pak contents: `./pakka -l <archive>`
   * `--tree` renders the listing as a UTF-8 box-drawing directory tree.
-* Extract: `./pakka -xf <archive> [-C <destination>] [path...]`
+* Extract: `./pakka -x [-C <destination>] <archive> [path...]`
   * With no path arguments, every entry is extracted.
   * With one or more path arguments, only those entries are extracted; pakka
     errors if any requested path isn't in the archive.
   * `-C` selects a destination directory; defaults to the current working
     directory.
-* Create: `./pakka -cf <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
+* Create: `./pakka -c <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * Format is picked from the destination extension (case-insensitive):
     `.pk3` → PK3, `.pk4` → PK4, `.sin` → SiN, anything else → PAK.
     `--format <name>` (`pak`, `sin`, `pk3`, `pk4`) overrides the
     extension. `--format daikatana` is rejected on `-c` (Daikatana
     archives are read-only).
-* Add to archive: `./pakka -af <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
+* Add to archive: `./pakka -a <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
     entry name (the source path on disk and the name stored in the archive
     can differ). Repeatable; may be mixed with plain path arguments.
-* Delete from archive: `./pakka -df <archive> [path...]`
-* Verify: `./pakka --verify -f <archive>`
+* Delete from archive: `./pakka -d <archive> [path...]`
+* Verify: `./pakka --verify <archive>`
   * Walks every entry, runs the same name-safety check used at extract
     time, streams each payload to confirm the directory's `offset`/`length`
     point at readable bytes, and flags entries that would collide after
