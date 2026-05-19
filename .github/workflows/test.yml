@@ -231,7 +231,10 @@ jobs:
         with:
           release: '7.8'
           sync: rsync
-          prepare: pkg_add -I gmake curl bats zip unzip python3
+          # OpenBSD pkg_add disambiguation: `unzip--` picks the default
+          # (non-iconv) flavor; `python%3` picks the latest python 3.x.
+          # Plain `unzip` / `python3` fail with "Ambiguous" / "Can't find".
+          prepare: pkg_add -I gmake curl bats zip 'unzip--' 'python%3'
           run: gmake test
 
   # Windows / MSVC build. Uses CMake to drive cl.exe (the Unix Makefile
