@@ -963,7 +963,7 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
 static void pk3_build_eocd(unsigned char eocd[PK3_EOCD_SIZE],
                            uint32_t cdr_offset, uint32_t cdr_size,
                            uint16_t entry_count) {
-    memcpy(eocd, PK3_EOCD_SIGNATURE, PAKFILE_SIGNATURE_LEN);
+    eocd[0] = 'P'; eocd[1] = 'K'; eocd[2] = 5; eocd[3] = 6;
     pk3_put_u16(&eocd[4], 0);                /* disk number */
     pk3_put_u16(&eocd[6], 0);                /* disk with CDR start */
     pk3_put_u16(&eocd[8], entry_count);      /* entries on this disk */
@@ -978,7 +978,7 @@ static void pk3_build_eocd(unsigned char eocd[PK3_EOCD_SIZE],
 static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
                           uint32_t crc, uint32_t csize, uint32_t usize,
                           uint16_t name_len) {
-    memcpy(lfh, PK3_LFH_SIGNATURE, PAKFILE_SIGNATURE_LEN);
+    lfh[0] = 'P'; lfh[1] = 'K'; lfh[2] = 3; lfh[3] = 4;
     pk3_put_u16(&lfh[4], 20);                /* version needed: 2.0 */
     pk3_put_u16(&lfh[6], 0);                 /* general purpose flags */
     pk3_put_u16(&lfh[8], PK3_METHOD_STORED); /* compression method */
@@ -995,7 +995,7 @@ static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
 static void pk3_build_cdr(unsigned char cdr[PK3_CDR_SIZE],
                           uint32_t crc, uint32_t csize, uint32_t usize,
                           uint16_t name_len, uint32_t lfh_offset) {
-    memcpy(cdr, PK3_CDR_SIGNATURE, PAKFILE_SIGNATURE_LEN);
+    cdr[0] = 'P'; cdr[1] = 'K'; cdr[2] = 1; cdr[3] = 2;
     pk3_put_u16(&cdr[4], 20);                /* version made by: 2.0 */
     pk3_put_u16(&cdr[6], 20);                /* version needed: 2.0 */
     pk3_put_u16(&cdr[8], 0);                 /* general purpose flags */

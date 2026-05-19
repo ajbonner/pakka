@@ -16,8 +16,8 @@
 #ifdef _WIN32
   #include <direct.h>
   #include <io.h>
-  #include "win/wingetopt/getopt.h"
-  #include "win/dirent/dirent.h"
+  #include "vendor/wingetopt/getopt.h"
+  #include "vendor/dirent/dirent.h"
 
   /* MSVC's POSIX-named CRT entry points carry a leading underscore.
    * dirent.h above defines PATH_MAX/NAME_MAX from MAX_PATH if absent. */
