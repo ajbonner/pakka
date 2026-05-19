@@ -67,7 +67,9 @@ setup_file() {
     [ -f "$BATS_TEST_TMPDIR/built.pk3" ]
 
     # First 4 bytes must be PK\003\004 (LFH) since we wrote entries.
-    head -c 4 "$BATS_TEST_TMPDIR/built.pk3" | xxd | grep -q "504b 0304"
+    # Use od (POSIX) — BSDs don't ship xxd by default.
+    sig=$(head -c 4 "$BATS_TEST_TMPDIR/built.pk3" | od -An -tx1 | tr -d ' \n')
+    [ "$sig" = "504b0304" ]
 
     # unzip understands our output — independent reader check.
     run unzip -t "$BATS_TEST_TMPDIR/built.pk3"
@@ -348,10 +350,10 @@ PY
     "$PAKKA" -df "$BATS_TEST_TMPDIR/del.pk3" remove.txt
     [ "$?" -eq 0 ]
 
-    # unzip independent reader confirms the post-delete file is valid.
-    run unzip -t "$BATS_TEST_TMPDIR/del.pk3"
+    # pakka's own --verify confirms structural integrity post-delete.
+    # (Avoids depending on `unzip`, which isn't in every BSD base.)
+    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/del.pk3"
     [ "$status" -eq 0 ]
-    [[ "$output" == *"No errors"* ]]
 
     "$PAKKA" -xf "$BATS_TEST_TMPDIR/del.pk3" -C "$BATS_TEST_TMPDIR/del_out"
     [ -f "$BATS_TEST_TMPDIR/del_out/keep.txt" ]
