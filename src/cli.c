@@ -98,6 +98,7 @@ static char *g_argv0;
 static void usage(void);
 static void usage_banner(void);
 static void help(void);
+static void version(void);
 static int parseopts(int argc, char **argv, opts_t *opts);
 static int strip_long_options(int argc, char **argv, opts_t *opts);
 static void setmodetype(opts_t *opts, short mode);
@@ -815,6 +816,10 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
     for (src = 1; src < argc; src++) {
         if (!option_end && strcmp(argv[src], "--") == 0) {
             option_end = 1;
+        } else if (!option_end && strcmp(argv[src], "--help") == 0) {
+            help();         /* exits */
+        } else if (!option_end && strcmp(argv[src], "--version") == 0) {
+            version();      /* exits */
         } else if (!option_end && strcmp(argv[src], "--tree") == 0) {
             opts->tree = 1;
             continue;
@@ -899,7 +904,7 @@ static int parseopts(int argc, char *argv[], opts_t *opts) {
         usage();
     }
 
-    while ((c = getopt(argc, argv, "lxcadhf:C:")) != -1) {
+    while ((c = getopt(argc, argv, "lxcadhVf:C:")) != -1) {
         switch (c) {
             case 'l': setmodetype(opts, PAK_LIST); break;
             case 'x': setmodetype(opts, PAK_EXTRACT); break;
@@ -909,6 +914,7 @@ static int parseopts(int argc, char *argv[], opts_t *opts) {
             case 'f': opts->pakfile = optarg; break;
             case 'C': opts->destination = optarg; break;
             case 'h': help(); break;
+            case 'V': version(); break;
             default: usage();
         }
     }
@@ -966,8 +972,31 @@ static void setmodetype(opts_t *opts, short mode) {
 
 static void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h [-lxcad] [--tree] [--verify] [--as <entry> <source>] -f [pak file] -C [destination path] [path(s)]\n",
+    fprintf(stderr, "Usage: %s -h | -V | [-lxcad] [--tree] [--verify] [--deep] [--format <name>] [--as <entry> <source>] -f <pak> [-C <dest>] [path(s)]\n",
             g_argv0);
+}
+
+/* `--version` / `-V` output. Writes to stdout (the user asked for this
+ * data and may pipe it elsewhere) and exits 0, unlike usage()/help()
+ * which target stderr and exit 1 because they're shown on misuse. */
+static void version(void) {
+    printf("%s %s (%s)\n", APP_NAME, VERSION, BUILD_DATE);
+    printf("libpakka %s (linked)\n", pakka_version());
+    printf("\n");
+    printf("Supported formats:\n");
+    printf("  pak         Quake 1 / 2          read + write\n");
+    printf("  sin         Ritual SiN (1998)    read + write\n");
+    printf("  daikatana   Ion Storm (2000)     read-only (custom codec, no encoder)\n");
+    printf("  pk3         Quake 3 / ZIP        read + write (STORED on write; STORED + DEFLATE on read)\n");
+    printf("  pk4         Doom 3 / ZIP         read + write (STORED on write; STORED + DEFLATE on read)\n");
+    printf("\n");
+    printf("Use --format <name> to pin the format on open or override the\n");
+    printf("create-time extension sniffer. PACK magic is shared between\n");
+    printf("Quake and Daikatana; pakka probes both layouts and asks for\n");
+    printf("an explicit --format on an ambiguous match.\n");
+    printf("\n");
+    printf("https://github.com/ajbonner/pakka\n");
+    exit(0);
 }
 
 static void usage(void) {
@@ -986,7 +1015,8 @@ static void help(void) {
     fprintf(stderr, " -d         remove files from pak file\n");
     fprintf(stderr, " --verify   walk every entry, check name safety and payload readability,\n");
     fprintf(stderr, "            and flag entries that would collide after extraction normalization\n");
-    fprintf(stderr, " -h         this help\n");
+    fprintf(stderr, " -h, --help     this help\n");
+    fprintf(stderr, " -V, --version  print app + libpakka version and supported formats\n");
     fprintf(stderr, "\nModifiers:\n");
     fprintf(stderr, " --tree                          list pak contents as a directory tree (only with -l)\n");
     fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");

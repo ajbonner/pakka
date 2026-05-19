@@ -78,7 +78,9 @@ pins the decision when the archive is ambiguous.
     portable-union normalization (case fold, slash/backslash, trailing
     dot/space). Exits non-zero on any error-level finding.
 
-`./pakka -h` prints a usage summary.
+`./pakka -h` (or `--help`) prints a usage summary; `./pakka -V` (or
+`--version`) prints the linked libpakka version, build date, and the
+supported-format matrix.
 
 ### Format support
 
@@ -108,9 +110,12 @@ other than STORED (0) and DEFLATE (8). Each refusal returns
 
 ### Using libpakka from C
 
-`include/pakka.h` exposes 22 functions for opening, inspecting,
+`include/pakka.h` exposes 23 functions for opening, inspecting,
 extracting from, and mutating pak archives:
 
+* Version: `pakka_version` returns the linked libpakka version string
+  (e.g. `"1.3.0"`), useful for bindings that want to feature-gate on
+  the loaded library.
 * Archive lifecycle: `pakka_open` / `pakka_open_ex` (lets the caller
   pin the format) / `pakka_create` / `pakka_close` (close implicitly
   commits on dirty)

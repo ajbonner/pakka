@@ -1029,6 +1029,32 @@ static int test_open_ex_hint_mismatch(const char *scratch_dir) {
     return 0;
 }
 
+/* pakka_version returns the compile-time VERSION string, never NULL.
+ * Sanity check format ("N.N.N" — major.minor.patch) without pinning the
+ * exact value here. */
+static int test_version(void) {
+    const char *v = pakka_version();
+    int dots = 0;
+    const char *p;
+    if (v == NULL) {
+        FAIL("pakka_version() returned NULL");
+    }
+    if (v[0] == '\0') {
+        FAIL("pakka_version() returned empty string");
+    }
+    for (p = v; *p != '\0'; p++) {
+        if (*p == '.') {
+            dots++;
+        } else if (*p < '0' || *p > '9') {
+            FAIL("pakka_version() contains non-digit non-dot: %s", v);
+        }
+    }
+    if (dots != 2) {
+        FAIL("pakka_version() not in N.N.N form: %s", v);
+    }
+    return 0;
+}
+
 static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
     /* Truncated PK3 signatures (just the 4-byte magic, no EOCD)
      * should fail with FORMAT now that PK3 is a recognized format.
@@ -1053,6 +1079,7 @@ int main(int argc, char **argv) {
     }
 
     if (test_null_args() != 0) return 1;
+    if (test_version() != 0) return 1;
     if (test_open_pak0(argv[1]) != 0) return 1;
     if (test_reader_streaming(argv[1]) != 0) return 1;
     if (test_create_close_roundtrip(argv[2]) != 0) return 1;

@@ -1,5 +1,13 @@
 #include "common.h"
 
+/* VERSION is supplied as a -D flag by the build system (Makefile +
+ * CMakeLists.txt). Reading it through a function rather than a macro
+ * means downstream consumers of libpakka.a get the version compiled
+ * into the library, not whatever their own translation unit sees. */
+const char *pakka_version(void) {
+    return VERSION;
+}
+
 /* The on-disk pak format is canonically little-endian (Quake 1/2
  * originated on x86). A raw fread of a uint32_t works only on LE
  * hosts; on big-endian (s390x, sparc, ppc) it interprets the bytes in

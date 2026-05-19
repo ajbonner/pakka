@@ -534,6 +534,32 @@ EOF
     echo "$output" | grep -q "pakfile name"
 }
 
+@test "cli: -V prints version banner with libpakka info and supported formats" {
+    run "$PAKKA" -V
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qE "Pakka [0-9]+\.[0-9]+\.[0-9]+"
+    echo "$output" | grep -qE "libpakka [0-9]+\.[0-9]+\.[0-9]+"
+    echo "$output" | grep -q "Supported formats"
+    echo "$output" | grep -q "pak"
+    echo "$output" | grep -q "sin"
+    echo "$output" | grep -q "daikatana"
+    echo "$output" | grep -q "pk3"
+    echo "$output" | grep -q "pk4"
+}
+
+@test "cli: --version is an alias for -V" {
+    run "$PAKKA" --version
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -qE "libpakka [0-9]+\.[0-9]+\.[0-9]+"
+}
+
+@test "cli: --help prints the same banner as -h" {
+    run "$PAKKA" --help
+    [ "$status" -ne 0 ]   # help() exits 1, same as -h
+    echo "$output" | grep -q "Operation Modes"
+    echo "$output" | grep -q -- "-V, --version"
+}
+
 @test "extract: refuses -C target that is a regular file" {
     printf 'hi\n' > "$BATS_TEST_TMPDIR/not-a-dir"
     mkdir -p "$BATS_TEST_TMPDIR/out"
