@@ -42,19 +42,19 @@ write_pak_one_entry() {
 
 setup_file() {
     mkdir -p "$BATS_FILE_TMPDIR/extracted"
-    "$PAKKA" -xf "$PAK0" -C "$BATS_FILE_TMPDIR/extracted" >/dev/null
-    (cd "$BATS_FILE_TMPDIR/extracted" && "$PAKKA" -cf "$BATS_FILE_TMPDIR/rebuilt.pak" *) >/dev/null
+    "$PAKKA" -x -C "$BATS_FILE_TMPDIR/extracted" "$PAK0" >/dev/null
+    (cd "$BATS_FILE_TMPDIR/extracted" && "$PAKKA" -c "$BATS_FILE_TMPDIR/rebuilt.pak" *) >/dev/null
 }
 
 @test "list: pak0.pak contains 339 entries" {
-    run "$PAKKA" -lf "$PAK0"
+    run "$PAKKA" -l "$PAK0"
     [ "$status" -eq 0 ]
     [ "$(echo "$output" | wc -l | tr -d ' ')" -eq 339 ]
 }
 
 @test "round-trip: extract -> repack -> re-extract is content-identical" {
     mkdir -p "$BATS_TEST_TMPDIR/re_extracted"
-    "$PAKKA" -xf "$BATS_FILE_TMPDIR/rebuilt.pak" -C "$BATS_TEST_TMPDIR/re_extracted" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/re_extracted" "$BATS_FILE_TMPDIR/rebuilt.pak" >/dev/null
     diff -rq "$BATS_FILE_TMPDIR/extracted" "$BATS_TEST_TMPDIR/re_extracted"
 }
 
@@ -69,7 +69,7 @@ setup_file() {
 
 @test "extract: specific files only" {
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$PAK0" -C "$BATS_TEST_TMPDIR/out" default.cfg quake.rc >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$PAK0" default.cfg quake.rc >/dev/null
     [ "$(find "$BATS_TEST_TMPDIR/out" -type f | wc -l | tr -d ' ')" -eq 2 ]
     cmp -s "$BATS_FILE_TMPDIR/extracted/default.cfg" "$BATS_TEST_TMPDIR/out/default.cfg"
     cmp -s "$BATS_FILE_TMPDIR/extracted/quake.rc" "$BATS_TEST_TMPDIR/out/quake.rc"
@@ -78,41 +78,41 @@ setup_file() {
 @test "add: new entry appears in listing and round-trips" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     echo "pakka crud test payload" > "$BATS_TEST_TMPDIR/added.txt"
-    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak added.txt) >/dev/null
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -a work.pak added.txt) >/dev/null
 
-    "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | grep -q '^added\.txt '
+    "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | grep -q '^added\.txt '
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" added.txt >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/work.pak" added.txt >/dev/null
     cmp -s "$BATS_TEST_TMPDIR/added.txt" "$BATS_TEST_TMPDIR/out/added.txt"
 }
 
 @test "delete: head entry + tail entry, untouched files survive intact" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
 
-    head_entry=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | head -1 | awk '{print $1}')
-    tail_entry=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | tail -1 | awk '{print $1}')
+    head_entry=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | head -1 | awk '{print $1}')
+    tail_entry=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | tail -1 | awk '{print $1}')
     [ -n "$head_entry" ]
     [ -n "$tail_entry" ]
     [ "$head_entry" != "$tail_entry" ]
 
-    before=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | wc -l | tr -d ' ')
+    before=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | wc -l | tr -d ' ')
 
-    "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak" "$head_entry" "$tail_entry" >/dev/null
+    "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pak" "$head_entry" "$tail_entry" >/dev/null
 
-    after=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | wc -l | tr -d ' ')
+    after=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | wc -l | tr -d ' ')
     [ $((before - after)) -eq 2 ]
 
     # Use awk for literal filename comparison; filenames could theoretically
     # contain regex metacharacters (.+ etc.) that would mislead grep.
-    "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" \
+    "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" \
         | awk -v name="$head_entry" '$1 == name {found=1} END {exit found}'
-    "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" \
+    "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" \
         | awk -v name="$tail_entry" '$1 == name {found=1} END {exit found}'
 
     # An untouched file should still extract byte-identically.
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/work.pak" >/dev/null
     cmp -s "$BATS_FILE_TMPDIR/extracted/demo1.dem" "$BATS_TEST_TMPDIR/out/demo1.dem"
 }
 
@@ -123,9 +123,9 @@ setup_file() {
 
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
 
-    all_paths=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
+    all_paths=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
     # shellcheck disable=SC2086  # intentional word-splitting for the path list
-    "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
+    "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
 
     [ "$(wc -c < "$BATS_TEST_TMPDIR/work.pak" | tr -d ' ')" -eq "$PAK_HEADER_SIZE" ]
     # OpenBSD head(1) has no -c; dd is the portable byte-count read.
@@ -133,7 +133,7 @@ setup_file() {
 
     # diroffset (LE u32) sits immediately after the signature and must point
     # to the end of the (empty) header. dirlength == 0 is implied by the
-    # file being exactly header-sized (and confirmed via -lf below).
+    # file being exactly header-sized (and confirmed via -l below).
     # Read four bytes as hex and reassemble LE -> decimal in bash so the
     # check is correct regardless of host endianness (s390x) and is
     # robust across GNU/BSD/busybox `od` formatting differences (`-tu1`
@@ -143,22 +143,22 @@ setup_file() {
     [ "$diroffset" -eq "$PAK_HEADER_SIZE" ]
 
     # Listing should succeed and report empty rather than crashing.
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "Pak is empty"
 
     mkdir -p "$BATS_TEST_TMPDIR/empty_out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/empty_out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/empty_out" "$BATS_TEST_TMPDIR/work.pak"
     [ "$status" -eq 0 ]
     echo "$output" | grep -q "Pak is empty"
     [ "$(find "$BATS_TEST_TMPDIR/empty_out" -type f | wc -l | tr -d ' ')" -eq 0 ]
 
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/empty_out" any-file
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/empty_out" "$BATS_TEST_TMPDIR/work.pak" any-file
     [ "$status" -ne 0 ]
 }
 
 @test "extract: requesting a missing path errors out" {
-    run "$PAKKA" -xf "$PAK0" -C "$BATS_TEST_TMPDIR/out" no-such-file-in-pak
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$PAK0" no-such-file-in-pak
     [ "$status" -ne 0 ]
 }
 
@@ -167,7 +167,7 @@ setup_file() {
     # duplicate. The earlier path-match loop broke after the first hit,
     # leaving path_matched[1] zero and triggering a false "not found".
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$PAK0" -C "$BATS_TEST_TMPDIR/out" default.cfg default.cfg >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$PAK0" default.cfg default.cfg >/dev/null
     [ -f "$BATS_TEST_TMPDIR/out/default.cfg" ]
     cmp -s "$BATS_FILE_TMPDIR/extracted/default.cfg" "$BATS_TEST_TMPDIR/out/default.cfg"
 }
@@ -177,7 +177,7 @@ setup_file() {
     # those checks a short read would leave diroffset/dirlength at zero and
     # the file would parse as a (bogus) empty pak instead of erroring.
     printf 'PACK' > "$BATS_TEST_TMPDIR/truncated.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/truncated.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/truncated.pak"
     [ "$status" -ne 0 ]
 }
 
@@ -191,9 +191,9 @@ setup_file() {
     printf 'start\n'  > "$BATS_TEST_TMPDIR/src/maps/start.bsp"
     printf 'quake\n'  > "$BATS_TEST_TMPDIR/src/quake.rc"
 
-    (cd "$BATS_TEST_TMPDIR/src" && "$PAKKA" -cf "$BATS_TEST_TMPDIR/tree.pak" default.cfg gfx maps quake.rc) >/dev/null
+    (cd "$BATS_TEST_TMPDIR/src" && "$PAKKA" -c "$BATS_TEST_TMPDIR/tree.pak" default.cfg gfx maps quake.rc) >/dev/null
 
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/tree.pak" --tree
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/tree.pak" --tree
     [ "$status" -eq 0 ]
 
     expected=$(cat <<'EOF'
@@ -219,11 +219,11 @@ EOF
 
 @test "list --tree: empty pak prints root and zero summary" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
-    all_paths=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
+    all_paths=$("$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | awk '{print $1}')
     # shellcheck disable=SC2086  # intentional word-splitting for the path list
-    "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
+    "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pak" $all_paths >/dev/null
 
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" --tree
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" --tree
     [ "$status" -eq 0 ]
 
     expected=$(printf '.\n\n0 directories, 0 files')
@@ -231,7 +231,7 @@ EOF
 }
 
 @test "list --tree: rejected when combined with a non-list mode" {
-    run "$PAKKA" -xf "$PAK0" --tree -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x --tree -C "$BATS_TEST_TMPDIR/out" "$PAK0"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -- "--tree may only be used with -l"
 }
@@ -240,7 +240,7 @@ EOF
     # Sanity: "--" should end option parsing so a path literally named
     # "--tree" can still be matched as a pak entry.
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" -- --tree
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/work.pak" -- --tree
     # --tree is not in the pak; we expect a not-found error, NOT the
     # "--tree may only be used with -l" message that fires when --tree
     # is consumed as an option.
@@ -254,7 +254,7 @@ EOF
     # read and error_exit instead of silently producing a zeroed entry.
     # Bytes: 'PACK' + diroffset=12 (LE u32) + dirlength=64 (LE u32) = 12 bytes total.
     printf 'PACK\014\000\000\000\100\000\000\000' > "$BATS_TEST_TMPDIR/short_dir.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/short_dir.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/short_dir.pak"
     [ "$status" -ne 0 ]
 }
 
@@ -268,7 +268,7 @@ EOF
 @test "extract: refuses Windows reserved device name (CON)" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'CON'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -276,7 +276,7 @@ EOF
 @test "extract: refuses Windows reserved device name with extension (NUL.txt)" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'NUL.txt'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -284,7 +284,7 @@ EOF
 @test "extract: refuses reserved device in subdirectory (foo/COM1)" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo/COM1'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -292,7 +292,7 @@ EOF
 @test "extract: refuses ADS colon in name (file:stream)" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'file:stream'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -300,7 +300,7 @@ EOF
 @test "extract: refuses trailing dot on segment (foo.)" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo.'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -308,7 +308,7 @@ EOF
 @test "extract: refuses trailing space on segment (foo )" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'foo '
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -318,7 +318,7 @@ EOF
     name=$(printf 'esc\033inj')
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" "$name"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -333,7 +333,7 @@ EOF
         printf '\114\000\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/safe.pak"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/safe.pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/safe.pak" >/dev/null
     [ -f "$BATS_TEST_TMPDIR/out/COM10" ]
 }
 
@@ -357,7 +357,7 @@ EOF
     mkdir -p "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/outside"
     ln -s "$BATS_TEST_TMPDIR/outside" "$BATS_TEST_TMPDIR/out/models"
 
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/ok.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/ok.pak"
     [ "$status" -ne 0 ]
     # The escape target must remain untouched.
     [ ! -e "$BATS_TEST_TMPDIR/outside/x" ]
@@ -387,7 +387,7 @@ EOF
     } > "$BATS_TEST_TMPDIR/case_collide.pak"
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/case_collide.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/case_collide.pak"
     [ "$status" -ne 0 ]
     [[ "$output" == *"collide after normalization"* ]] \
         || [[ "${stderr:-$output}" == *"collide after normalization"* ]]
@@ -410,7 +410,7 @@ EOF
     } > "$BATS_TEST_TMPDIR/sep_collide.pak"
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/sep_collide.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/sep_collide.pak"
     [ "$status" -ne 0 ]
     [[ "$output" == *"collide after normalization"* ]] \
         || [[ "${stderr:-$output}" == *"collide after normalization"* ]]
@@ -436,7 +436,7 @@ EOF
     } > "$BATS_TEST_TMPDIR/mixed.pak"
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/mixed.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/mixed.pak"
     [ "$status" -ne 0 ]
     # The earlier "safe/a" must not have been materialized.
     [ ! -e "$BATS_TEST_TMPDIR/out/safe/a" ]
@@ -454,9 +454,9 @@ EOF
     printf 'OFF-LIMITS\n' > "$BATS_TEST_TMPDIR/elsewhere/secret.txt"
     ln -s "$BATS_TEST_TMPDIR/elsewhere/secret.txt" "$BATS_TEST_TMPDIR/src/sub/leak"
 
-    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -cf out.pak src) >/dev/null
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -c out.pak src) >/dev/null
 
-    listing=$("$PAKKA" -lf "$BATS_TEST_TMPDIR/out.pak")
+    listing=$("$PAKKA" -l "$BATS_TEST_TMPDIR/out.pak")
     echo "$listing" | grep -q 'src/sub/real\.txt'
     # The symlink must not be in the pak.
     ! echo "$listing" | grep -q 'leak'
@@ -470,7 +470,7 @@ EOF
     ln -s "$BATS_TEST_TMPDIR/real.txt" "$BATS_TEST_TMPDIR/link.txt"
 
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
-    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/link.txt"
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/link.txt"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "symlink"
 }
@@ -480,11 +480,11 @@ EOF
 @test "add: rejects duplicate name within the same pak" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     printf 'first\n' > "$BATS_TEST_TMPDIR/dupe.txt"
-    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak dupe.txt) >/dev/null
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -a work.pak dupe.txt) >/dev/null
 
     # Same name, second time — must refuse.
     printf 'second\n' > "$BATS_TEST_TMPDIR/dupe.txt"
-    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -af work.pak dupe.txt"
+    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -a work.pak dupe.txt"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "already exists"
 }
@@ -504,8 +504,8 @@ EOF
     # fires in the race window).
     printf 'do not clobber me\n' > "$BATS_TEST_TMPDIR/target.pak"
     printf 'payload\n' > "$BATS_TEST_TMPDIR/payload"
-    (cd "$BATS_TEST_TMPDIR" && run "$PAKKA" -cf target.pak payload) || true
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/target.pak" "$BATS_TEST_TMPDIR/payload"
+    (cd "$BATS_TEST_TMPDIR" && run "$PAKKA" -c target.pak payload) || true
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/target.pak" "$BATS_TEST_TMPDIR/payload"
     [ "$status" -ne 0 ]
     # Original content survived.
     [ "$(cat "$BATS_TEST_TMPDIR/target.pak")" = "do not clobber me" ]
@@ -516,22 +516,22 @@ EOF
 
 @test "cli: rejects -d with no path arguments" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
-    run "$PAKKA" -df "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "requires at least one path"
 }
 
 @test "cli: rejects -a with no path arguments" {
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
-    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak"
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "requires at least one path"
 }
 
-@test "cli: rejects empty -f pakfile name" {
-    run "$PAKKA" -lf ""
+@test "cli: rejects empty pakfile name" {
+    run "$PAKKA" -l ""
     [ "$status" -ne 0 ]
-    echo "$output" | grep -q "pakfile name"
+    echo "$output" | grep -q "pakfile"
 }
 
 @test "cli: -V prints version banner with libpakka info and supported formats" {
@@ -563,7 +563,7 @@ EOF
 @test "extract: refuses -C target that is a regular file" {
     printf 'hi\n' > "$BATS_TEST_TMPDIR/not-a-dir"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$PAK0" -C "$BATS_TEST_TMPDIR/not-a-dir"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/not-a-dir" "$PAK0"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "not a directory"
 }
@@ -577,7 +577,7 @@ EOF
 
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     printf 'evil\n' > "$BATS_TEST_TMPDIR/CON"
-    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -af work.pak CON"
+    run bash -c "cd '$BATS_TEST_TMPDIR' && '$PAKKA' -a work.pak CON"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "not safe to extract"
 }
@@ -586,7 +586,7 @@ EOF
     case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/ro.pak"
     chmod a-w "$BATS_TEST_TMPDIR/ro.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/ro.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/ro.pak"
     [ "$status" -eq 0 ]
     # Restore so bats cleanup can rm it.
     chmod u+w "$BATS_TEST_TMPDIR/ro.pak"
@@ -597,7 +597,7 @@ EOF
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/ro.pak"
     chmod a-w "$BATS_TEST_TMPDIR/ro.pak"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/ro.pak" -C "$BATS_TEST_TMPDIR/out" default.cfg >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/ro.pak" default.cfg >/dev/null
     [ -f "$BATS_TEST_TMPDIR/out/default.cfg" ]
     chmod u+w "$BATS_TEST_TMPDIR/ro.pak"
 }
@@ -608,7 +608,7 @@ EOF
     # let the raw byte through to the terminal.
     name=$(printf 'naughty\033name')
     write_pak_one_entry "$BATS_TEST_TMPDIR/inj.pak" "$name"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/inj.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/inj.pak"
     [ "$status" -eq 0 ]
     # Raw ESC must not appear in output; '?' must.
     ! printf '%s' "$output" | grep -q -- $'\033'
@@ -624,7 +624,7 @@ EOF
 @test "extract: refuses '..' path traversal in POSIX-style entry name" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '../etc/passwd'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
     [ ! -e "$BATS_TEST_TMPDIR/etc" ]
@@ -633,7 +633,7 @@ EOF
 @test "extract: refuses absolute POSIX path in entry name" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '/etc/passwd'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -641,7 +641,7 @@ EOF
 @test "extract: refuses '..' traversal using backslash separator" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '..\windows\foo'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -649,7 +649,7 @@ EOF
 @test "extract: refuses leading-backslash absolute path" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '\windows\foo'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -657,7 +657,7 @@ EOF
 @test "extract: refuses Windows drive-letter prefix" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" 'C:\windows\foo'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -665,7 +665,7 @@ EOF
 @test "extract: refuses UNC \\\\server\\share path" {
     write_pak_one_entry "$BATS_TEST_TMPDIR/evil.pak" '\\server\share\foo'
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
@@ -677,18 +677,18 @@ EOF
         printf '\114\000\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/evil.pak"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$BATS_TEST_TMPDIR/evil.pak" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/evil.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q "Refusing to extract"
 }
 
 @test "add: --as stores source under requested virtual entry name" {
     echo "hello" > "$BATS_TEST_TMPDIR/src.bin"
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/aliased.pak" \
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/aliased.pak" \
         --as "renamed/hi.txt" "$BATS_TEST_TMPDIR/src.bin"
     [ "$status" -eq 0 ]
 
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/aliased.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/aliased.pak"
     [ "$status" -eq 0 ]
     [[ "$output" == *"renamed/hi.txt"* ]]
     # The source file's name (src.bin) must NOT be the entry name.
@@ -698,18 +698,18 @@ EOF
 @test "add: --as supports multiple aliased pairs in one invocation" {
     echo "a" > "$BATS_TEST_TMPDIR/a.bin"
     echo "bb" > "$BATS_TEST_TMPDIR/b.bin"
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/multi.pak" \
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/multi.pak" \
         --as "virt/a.txt" "$BATS_TEST_TMPDIR/a.bin" \
         --as "virt/b.txt" "$BATS_TEST_TMPDIR/b.bin"
     [ "$status" -eq 0 ]
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/multi.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/multi.pak"
     [[ "$output" == *"virt/a.txt"* ]]
     [[ "$output" == *"virt/b.txt"* ]]
 }
 
 @test "add: --as rejected outside -a/-c" {
     echo "x" > "$BATS_TEST_TMPDIR/x.bin"
-    run "$PAKKA" -lf build/test/pak0.pak \
+    run "$PAKKA" -l build/test/pak0.pak \
         --as "v/x.txt" "$BATS_TEST_TMPDIR/x.bin"
     [ "$status" -ne 0 ]
     [[ "$output" == *"--as may only be used with -a or -c"* ]] \
@@ -717,19 +717,19 @@ EOF
 }
 
 @test "add: --as rejects incomplete pair" {
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/inc.pak" --as "virt/only.txt"
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/inc.pak" --as "virt/only.txt"
     [ "$status" -ne 0 ]
     [[ "$output" == *"--as requires two arguments"* ]] \
         || [[ "${stderr:-$output}" == *"--as requires two arguments"* ]]
 }
 
 @test "verify: succeeds on valid pak0.pak" {
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/../pak0.pak"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/../pak0.pak"
     [ "$status" -eq 0 ] || true
     # The exact path under BATS_TEST_TMPDIR may not exist — fall back
     # to the build/test fixture directly.
     if [ "$status" -ne 0 ]; then
-        run "$PAKKA" --verify -f build/test/pak0.pak
+        run "$PAKKA" --verify build/test/pak0.pak
     fi
     [ "$status" -eq 0 ]
     [[ "$output" == *"OK"* ]]
@@ -749,7 +749,7 @@ EOF
 
     # pakka_open itself rejects exact duplicates, so --verify never
     # gets to run — the open failure surfaces with PAKKA_ERR_DUPLICATE.
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/dup.pak"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/dup.pak"
     [ "$status" -ne 0 ]
     [[ "$output" == *"duplicate"* ]] \
         || [[ "${stderr:-$output}" == *"duplicate"* ]]
@@ -769,7 +769,7 @@ EOF
         printf '\214\000\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/casecollide.pak"
 
-    run "$PAKKA" --verify -f "$BATS_TEST_TMPDIR/casecollide.pak"
+    run "$PAKKA" --verify "$BATS_TEST_TMPDIR/casecollide.pak"
     [ "$status" -ne 0 ]
     [[ "$output" == *"Normalized collision"* ]] \
         || [[ "${stderr:-$output}" == *"Normalized collision"* ]]
@@ -781,7 +781,7 @@ EOF
     {
         printf 'NOPE\014\000\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/badmagic.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/badmagic.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/badmagic.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "signature"
 }
@@ -792,7 +792,7 @@ EOF
     {
         printf 'PACK\347\003\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/bad_diroffset.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_diroffset.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/bad_diroffset.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "directory"
 }
@@ -803,7 +803,7 @@ EOF
     {
         printf 'PACK\014\000\000\000\300\377\377\377'
     } > "$BATS_TEST_TMPDIR/bad_dirlength.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_dirlength.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/bad_dirlength.pak"
     [ "$status" -ne 0 ]
 }
 
@@ -817,7 +817,7 @@ EOF
         dd if=/dev/zero bs=1 count=$((56 - 5)) 2>/dev/null
         printf '\014\000\000\000\347\003\000\000'
     } > "$BATS_TEST_TMPDIR/bad_entry.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/bad_entry.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/bad_entry.pak"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "out of range"
 }
@@ -831,7 +831,7 @@ EOF
         dd if=/dev/zero bs=1 count=$((56 - 6)) 2>/dev/null
         printf '\004\000\000\000\000\000\000\000'
     } > "$BATS_TEST_TMPDIR/inside_header.pak"
-    run "$PAKKA" -lf "$BATS_TEST_TMPDIR/inside_header.pak"
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/inside_header.pak"
     [ "$status" -ne 0 ]
 }
 
@@ -841,7 +841,7 @@ EOF
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     long_name=$(printf 'a%.0s' $(seq 1 70))
     echo "x" > "$BATS_TEST_TMPDIR/$long_name"
-    run "$PAKKA" -af "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/$long_name"
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pak" "$BATS_TEST_TMPDIR/$long_name"
     [ "$status" -ne 0 ]
     echo "$output" | grep -q -i "too long"
 }
@@ -851,12 +851,12 @@ EOF
     # empty files. Now the size==0 branch skips read/write entirely.
     cp "$BATS_FILE_TMPDIR/rebuilt.pak" "$BATS_TEST_TMPDIR/work.pak"
     : > "$BATS_TEST_TMPDIR/empty.txt"
-    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak empty.txt) >/dev/null
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -a work.pak empty.txt) >/dev/null
 
-    "$PAKKA" -lf "$BATS_TEST_TMPDIR/work.pak" | grep -q '^empty\.txt '
+    "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pak" | grep -q '^empty\.txt '
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/out" empty.txt >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/work.pak" empty.txt >/dev/null
     [ -f "$BATS_TEST_TMPDIR/out/empty.txt" ]
     [ "$(wc -c < "$BATS_TEST_TMPDIR/out/empty.txt" | tr -d ' ')" -eq 0 ]
 }
@@ -894,17 +894,17 @@ EOF
 
     # Sanity: both entries extract correctly from the original.
     mkdir -p "$BATS_TEST_TMPDIR/pre"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/non_linear.pak" -C "$BATS_TEST_TMPDIR/pre" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/pre" "$BATS_TEST_TMPDIR/non_linear.pak" >/dev/null
     [ "$(cat "$BATS_TEST_TMPDIR/pre/afile")" = "hello" ]
     [ "$(cat "$BATS_TEST_TMPDIR/pre/bfile")" = "world" ]
 
     cp "$BATS_TEST_TMPDIR/non_linear.pak" "$BATS_TEST_TMPDIR/work.pak"
     echo "new content" > "$BATS_TEST_TMPDIR/cfile"
-    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -af work.pak cfile) >/dev/null
+    (cd "$BATS_TEST_TMPDIR" && "$PAKKA" -a work.pak cfile) >/dev/null
 
     # Both pre-existing payloads must survive; the new one must be there.
     mkdir -p "$BATS_TEST_TMPDIR/post"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/work.pak" -C "$BATS_TEST_TMPDIR/post" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/post" "$BATS_TEST_TMPDIR/work.pak" >/dev/null
     [ "$(cat "$BATS_TEST_TMPDIR/post/afile")" = "hello" ]
     [ "$(cat "$BATS_TEST_TMPDIR/post/bfile")" = "world" ]
     [ "$(cat "$BATS_TEST_TMPDIR/post/cfile")" = "new content" ]
@@ -925,7 +925,7 @@ EOF
     } > "$BATS_TEST_TMPDIR/legit.pak"
 
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    "$PAKKA" -xf "$BATS_TEST_TMPDIR/legit.pak" -C "$BATS_TEST_TMPDIR/out" >/dev/null
+    "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/legit.pak" >/dev/null
     [ -f "$BATS_TEST_TMPDIR/out/foo..bar" ]
     [ "$(cat "$BATS_TEST_TMPDIR/out/foo..bar")" = "hello" ]
 }

@@ -904,14 +904,13 @@ static int parseopts(int argc, char *argv[], opts_t *opts) {
         usage();
     }
 
-    while ((c = getopt(argc, argv, "lxcadhVf:C:")) != -1) {
+    while ((c = getopt(argc, argv, "lxcadhVC:")) != -1) {
         switch (c) {
             case 'l': setmodetype(opts, PAK_LIST); break;
             case 'x': setmodetype(opts, PAK_EXTRACT); break;
             case 'c': setmodetype(opts, PAK_CREATE); break;
             case 'a': setmodetype(opts, PAK_ADD); break;
             case 'd': setmodetype(opts, PAK_REMOVE); break;
-            case 'f': opts->pakfile = optarg; break;
             case 'C': opts->destination = optarg; break;
             case 'h': help(); break;
             case 'V': version(); break;
@@ -919,6 +918,26 @@ static int parseopts(int argc, char *argv[], opts_t *opts) {
         }
     }
 
+    /* First non-option argument is the archive; everything after is
+     * paths (entry names for -x/-d, source paths for -a/-c). BSD/macOS
+     * getopt is POSIX-strict and stops at the first non-option, so
+     * callers must put all option flags (including -C <dir>) before
+     * the archive name. Long options are handled by the strip pre-pass
+     * so their position is unconstrained.
+     *
+     * getopt consumes "--" when it appears between option flags, but
+     * if it appears between positionals (e.g. "pakka -x pak.pak --
+     * --weird-entry"), it stays in argv. Skip both possible positions
+     * so "--" never lands in pakfile or paths. */
+    if (optind < argc && strcmp(argv[optind], "--") == 0) {
+        optind++;
+    }
+    if (optind < argc) {
+        opts->pakfile = argv[optind++];
+    }
+    if (optind < argc && strcmp(argv[optind], "--") == 0) {
+        optind++;
+    }
     if (optind < argc) {
         opts->paths = malloc(sizeof(char *) * (argc - optind));
         if (opts->paths == NULL) {
@@ -934,7 +953,8 @@ static int parseopts(int argc, char *argv[], opts_t *opts) {
         usage();
     }
     if (!opts->pakfile || opts->pakfile[0] == '\0') {
-        fprintf(stderr, "You must specify a pakfile name with -f\n");
+        fprintf(stderr,
+                "You must name the pakfile as the first positional argument\n");
         usage();
     }
     if (opts->tree && opts->mode != PAK_LIST) {
@@ -972,7 +992,7 @@ static void setmodetype(opts_t *opts, short mode) {
 
 static void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h | -V | [-lxcad] [--tree] [--verify] [--deep] [--format <name>] [--as <entry> <source>] -f <pak> [-C <dest>] [path(s)]\n",
+    fprintf(stderr, "Usage: %s -h | -V | [-lxcad] [--tree] [--verify] [--deep] [--format <name>] [--as <entry> <source>] [-C <dest>] <pak> [path(s)]\n",
             g_argv0);
 }
 
@@ -1025,14 +1045,14 @@ static void help(void) {
     fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
     fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");
     fprintf(stderr, "\nExamples:\n");
-    fprintf(stderr, "  %s -lf pak1.pak               # List contents of pak1.pak\n", g_argv0);
-    fprintf(stderr, "  %s -lf pak1.pak --tree        # List contents as a directory tree\n", g_argv0);
-    fprintf(stderr, "  %s --verify -f pak1.pak       # Walk every entry, report integrity findings\n", g_argv0);
-    fprintf(stderr, "  %s -af pak1.pak --as maps/foo.bsp /tmp/foo.bsp\n", g_argv0);
-    fprintf(stderr, "                                # Add /tmp/foo.bsp as entry 'maps/foo.bsp' (aliasing)\n");
-    fprintf(stderr, "  %s -xf pak1.pak               # Extract pak1.pak to current dir\n", g_argv0);
-    fprintf(stderr, "  %s -xf pak1.pak -C /some/path # Extract pak1.pak to /some/path\n", g_argv0);
-    fprintf(stderr, "  # Extract models/weapons/g_blast/base.pcx from pak1.pak to current dir\n");
-    fprintf(stderr, "  %s -xf pak1.pak models/weapons/g_blast/base.pcx \n", g_argv0);
+    fprintf(stderr, "  %s -l pak1.pak                  # List contents of pak1.pak\n", g_argv0);
+    fprintf(stderr, "  %s -l pak1.pak --tree           # List contents as a directory tree\n", g_argv0);
+    fprintf(stderr, "  %s --verify pak1.pak            # Walk every entry, report integrity findings\n", g_argv0);
+    fprintf(stderr, "  %s -a pak1.pak --as maps/foo.bsp /tmp/foo.bsp\n", g_argv0);
+    fprintf(stderr, "                                  # Add /tmp/foo.bsp as entry 'maps/foo.bsp' (aliasing)\n");
+    fprintf(stderr, "  %s -x pak1.pak                  # Extract pak1.pak to current dir\n", g_argv0);
+    fprintf(stderr, "  %s -x -C /some/path pak1.pak    # Extract pak1.pak to /some/path\n", g_argv0);
+    fprintf(stderr, "  # Extract one specific entry to current dir:\n");
+    fprintf(stderr, "  %s -x pak1.pak models/weapons/g_blast/base.pcx\n", g_argv0);
     exit(1);
 }

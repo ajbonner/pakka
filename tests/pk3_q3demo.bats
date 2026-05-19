@@ -26,7 +26,7 @@ skip_if_missing() {
 
 @test "q3demo: pakka lists 1274 entries" {
     skip_if_missing
-    run "$PAKKA" -lf "$Q3DEMO_PAK0_PK3"
+    run "$PAKKA" -l "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
     line_count="${#lines[@]}"
     [ "$line_count" -eq 1274 ]
@@ -34,7 +34,7 @@ skip_if_missing() {
 
 @test "q3demo: --tree renders without error" {
     skip_if_missing
-    run "$PAKKA" -lf --tree "$Q3DEMO_PAK0_PK3"
+    run "$PAKKA" -l --tree "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
     # Some recognizable Q3 asset paths must appear.
     [[ "$output" == *"models"* ]]
@@ -43,7 +43,7 @@ skip_if_missing() {
 
 @test "q3demo: structural verify succeeds (no findings above INFO)" {
     skip_if_missing
-    run "$PAKKA" --verify -f "$Q3DEMO_PAK0_PK3"
+    run "$PAKKA" --verify "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
     # No WARNING/ERROR lines.
     [[ "$output" != *"ERROR"* ]]
@@ -52,7 +52,7 @@ skip_if_missing() {
 
 @test "q3demo: deep verify (CRC32 every entry) succeeds" {
     skip_if_missing
-    run "$PAKKA" --verify --deep -f "$Q3DEMO_PAK0_PK3"
+    run "$PAKKA" --verify --deep "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
     [[ "$output" != *"ERROR"* ]]
     [[ "$output" != *"WARNING"* ]]
@@ -62,7 +62,7 @@ skip_if_missing() {
     skip_if_missing
     rm -rf "$BATS_TEST_TMPDIR/out"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$Q3DEMO_PAK0_PK3" -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
 
     # Spot-check: vm/cgame.qvm exists and is the expected size.

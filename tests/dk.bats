@@ -91,7 +91,7 @@ write_ambiguous_576() {
 @test "dk open: STORED-only archive lists" {
     pak="$BATS_TEST_TMPDIR/stored.pak"
     write_dk_one_stored "$pak" "weapons/blast.mdl" "model-bytes-here"
-    run "$PAKKA" -lf "$pak" --format daikatana
+    run "$PAKKA" -l "$pak" --format daikatana
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "weapons/blast.mdl"
 }
@@ -100,7 +100,7 @@ write_ambiguous_576() {
     pak="$BATS_TEST_TMPDIR/stored.pak"
     write_dk_one_stored "$pak" "weapons/blast.mdl" "model-bytes-here"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$pak" --format daikatana -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x --format daikatana -C "$BATS_TEST_TMPDIR/out" "$pak"
     [ "$status" -eq 0 ]
     [ "$(cat "$BATS_TEST_TMPDIR/out/weapons/blast.mdl")" = "model-bytes-here" ]
 }
@@ -109,7 +109,7 @@ write_ambiguous_576() {
     pak="$BATS_TEST_TMPDIR/cmp.pak"
     write_dk_one_literal_compressed "$pak" "textures/wall.tga" "wall-pixels"
     mkdir -p "$BATS_TEST_TMPDIR/out"
-    run "$PAKKA" -xf "$pak" --format daikatana -C "$BATS_TEST_TMPDIR/out"
+    run "$PAKKA" -x --format daikatana -C "$BATS_TEST_TMPDIR/out" "$pak"
     [ "$status" -eq 0 ]
     [ "$(cat "$BATS_TEST_TMPDIR/out/textures/wall.tga")" = "wall-pixels" ]
 }
@@ -119,7 +119,7 @@ write_ambiguous_576() {
     write_dk_one_stored "$pak" "x" "y"
     src="$BATS_TEST_TMPDIR/src.txt"
     echo "z" > "$src"
-    run "$PAKKA" -af "$pak" --format daikatana --as new "$src"
+    run "$PAKKA" -a "$pak" --format daikatana --as new "$src"
     [ "$status" -ne 0 ]
     echo "$output" | grep -qi "daikatana"
     echo "$output" | grep -qi "read-only"
@@ -128,13 +128,13 @@ write_ambiguous_576() {
 @test "dk mutation: -d refused with --format daikatana" {
     pak="$BATS_TEST_TMPDIR/stored.pak"
     write_dk_one_stored "$pak" "weapons/blast.mdl" "y"
-    run "$PAKKA" -df "$pak" --format daikatana weapons/blast.mdl
+    run "$PAKKA" -d "$pak" --format daikatana weapons/blast.mdl
     [ "$status" -ne 0 ]
     echo "$output" | grep -qi "read-only"
 }
 
 @test "dk create: --format daikatana refused" {
-    run "$PAKKA" -cf "$BATS_TEST_TMPDIR/should-not-exist.pak" --format daikatana </dev/null
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/should-not-exist.pak" --format daikatana </dev/null
     [ "$status" -ne 0 ]
     [ ! -f "$BATS_TEST_TMPDIR/should-not-exist.pak" ]
 }
@@ -142,7 +142,7 @@ write_ambiguous_576() {
 @test "dk verify: deep verify accepts well-formed compressed entry" {
     pak="$BATS_TEST_TMPDIR/cmp.pak"
     write_dk_one_literal_compressed "$pak" "textures/wall.tga" "good"
-    run "$PAKKA" --verify --deep -f "$pak" --format daikatana
+    run "$PAKKA" --verify --deep "$pak" --format daikatana
     [ "$status" -eq 0 ]
 }
 
@@ -166,7 +166,7 @@ write_ambiguous_576() {
         u32 5                # compressed_size
         u32 1                # is_compressed
     } > "$pak"
-    run "$PAKKA" --verify --deep -f "$pak" --format daikatana
+    run "$PAKKA" --verify --deep "$pak" --format daikatana
     [ "$status" -ne 0 ]
 }
 
@@ -176,7 +176,7 @@ write_ambiguous_576() {
     # The zero-filled directory has offset==0 entries — neither PAK nor
     # DK layout parses cleanly under the offset-validation probe, so we
     # expect a format error rather than a successful list.
-    run "$PAKKA" -lf "$pak"
+    run "$PAKKA" -l "$pak"
     [ "$status" -ne 0 ]
 }
 
@@ -185,7 +185,7 @@ write_ambiguous_576() {
     # 64-byte interpretation would mis-read the trailing bytes.
     pak="$BATS_TEST_TMPDIR/dk_hint.pak"
     write_dk_one_stored "$pak" "test" "abc"
-    run "$PAKKA" -lf "$pak" --format daikatana
+    run "$PAKKA" -l "$pak" --format daikatana
     [ "$status" -eq 0 ]
     echo "$output" | grep -qF "test"
 }
