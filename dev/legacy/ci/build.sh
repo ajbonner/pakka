@@ -51,7 +51,7 @@ mkdir -p "$WORK/scratch/out" "$WORK/scratch/outside"
     printf '\114\000\000\000\000\000\000\000'
 } > "$WORK/scratch/ok.pak"
 ln -s "$WORK/scratch/outside" "$WORK/scratch/out/models"
-if ./pakka -xf "$WORK/scratch/ok.pak" -C "$WORK/scratch/out" 2>/dev/null; then
+if ./pakka -x -C "$WORK/scratch/out" "$WORK/scratch/ok.pak" 2>/dev/null; then
     echo "smoke test failed: pakka extracted through a symlink" >&2
     exit 1
 fi
@@ -65,7 +65,7 @@ fi
 # trivially if extract was just broken.
 rm -f "$WORK/scratch/out/models"
 mkdir -p "$WORK/scratch/out2"
-./pakka -xf "$WORK/scratch/ok.pak" -C "$WORK/scratch/out2"
+./pakka -x -C "$WORK/scratch/out2" "$WORK/scratch/ok.pak"
 [ -f "$WORK/scratch/out2/models/x" ] \
     || (echo "smoke test failed: extract did not create models/x" >&2; exit 1)
 
