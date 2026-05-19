@@ -74,14 +74,14 @@ set +e
         printf '\114\000\000\000\000\000\000\000'
     } > /tmp/scratch/ok.pak
     ln -s /tmp/scratch/outside /tmp/scratch/out/models
-    if ./pakka -xf /tmp/scratch/ok.pak -C /tmp/scratch/out 2>/dev/null; then
+    if ./pakka -x -C /tmp/scratch/out /tmp/scratch/ok.pak 2>/dev/null; then
         echo "symlink-extract NOT REJECTED" >&2; exit 1
     fi
     [ ! -e /tmp/scratch/outside/x ] || { echo "escape happened" >&2; exit 1; }
     echo symlink-rejected-OK
     echo "== smoke: happy extract =="
     mkdir -p /tmp/scratch/out2
-    ./pakka -xf /tmp/scratch/ok.pak -C /tmp/scratch/out2
+    ./pakka -x -C /tmp/scratch/out2 /tmp/scratch/ok.pak
     [ -f /tmp/scratch/out2/models/x ] || { echo "happy-extract failed" >&2; exit 1; }
     echo happy-OK
     echo "== file =="
