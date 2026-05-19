@@ -352,10 +352,7 @@ the canonical reference for the SiN and Daikatana on-disk formats —
 SiN's SPAK + 120-byte filename layout, Daikatana's 72-byte directory
 entry, and especially Daikatana's custom byte-codec compression
 (documented opcode-by-opcode at
-[`src/dk_codec.c`](src/dk_codec.c)). Pakka's decoder is an
-independent reimplementation, but every behavioural choice
-(termination semantics, overlap handling, opcode 0xFE rejection) was
-informed by pakextract's source.
+[`src/dk_codec.c`](src/dk_codec.c)).
 
 ## License
 MIT
