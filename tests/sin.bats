@@ -66,7 +66,9 @@ write_sin_one_entry() {
     pak="$BATS_TEST_TMPDIR/created.sin"
     (cd "$src" && "$PAKKA" -cf "$pak" file.txt) >/dev/null
     [ -f "$pak" ]
-    head -c 4 "$pak" | od -c | head -1 | grep -qF "S   P   A   K"
+    # POSIX-portable byte-prefix check: OpenBSD's head(1) has no -c, so
+    # use dd to extract the first 4 bytes and compare directly.
+    [ "$(dd if="$pak" bs=4 count=1 2>/dev/null)" = "SPAK" ]
 }
 
 @test "sin create: --format sin overrides extension" {
@@ -76,7 +78,9 @@ write_sin_one_entry() {
     pak="$BATS_TEST_TMPDIR/created.pak"
     (cd "$src" && "$PAKKA" -cf "$pak" --format sin file.txt) >/dev/null
     [ -f "$pak" ]
-    head -c 4 "$pak" | od -c | head -1 | grep -qF "S   P   A   K"
+    # POSIX-portable byte-prefix check: OpenBSD's head(1) has no -c, so
+    # use dd to extract the first 4 bytes and compare directly.
+    [ "$(dd if="$pak" bs=4 count=1 2>/dev/null)" = "SPAK" ]
 }
 
 @test "sin round-trip: create, add, list, extract" {
