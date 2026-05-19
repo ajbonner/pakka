@@ -97,8 +97,10 @@ int main(int argc, char **argv) {
     return 0;
 }
 EOF
-    cc -I"${PROJECT_ROOT}/include" -o "$BATS_TEST_TMPDIR/q3_fmt" \
-       "$BATS_TEST_TMPDIR/q3_fmt.c" "${PROJECT_ROOT}/build/lib/libpakka.a"
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/q3_fmt" \
+        "$BATS_TEST_TMPDIR/q3_fmt.c" \
+        "${PROJECT_ROOT}/build/lib/libpakka.a"
     run "$BATS_TEST_TMPDIR/q3_fmt" "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
 }
