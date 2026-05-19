@@ -154,7 +154,7 @@ $(PAK0): verify-tarball
 fixture: $(PAK0)
 
 test: $(TARGET) $(PAK0) $(C_API_TEST) symbol-audit
-	bats tests/
+	CFLAGS='$(CFLAGS)' bats tests/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
 # re-compute SHA256 once at vendor time and pin that here.

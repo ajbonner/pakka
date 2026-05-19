@@ -233,8 +233,10 @@ int main(int argc, char **argv) {
     return 0;
 }
 EOF
-    cc -I"${PROJECT_ROOT}/include" -o "$BATS_TEST_TMPDIR/fmt_test" \
-       "$BATS_TEST_TMPDIR/fmt_test.c" "${PROJECT_ROOT}/build/lib/libpakka.a"
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/fmt_test" \
+        "$BATS_TEST_TMPDIR/fmt_test.c" \
+        "${PROJECT_ROOT}/build/lib/libpakka.a"
     run "$BATS_TEST_TMPDIR/fmt_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -382,8 +384,10 @@ int main(int argc, char **argv) {
     return 0;
 }
 EOF
-    cc -I"${PROJECT_ROOT}/include" -o "$BATS_TEST_TMPDIR/cap_test" \
-       "$BATS_TEST_TMPDIR/cap_test.c" "${PROJECT_ROOT}/build/lib/libpakka.a"
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/cap_test" \
+        "$BATS_TEST_TMPDIR/cap_test.c" \
+        "${PROJECT_ROOT}/build/lib/libpakka.a"
     run "$BATS_TEST_TMPDIR/cap_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
