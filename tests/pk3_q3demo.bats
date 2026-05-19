@@ -78,6 +78,7 @@ skip_if_missing() {
 
 @test "q3demo: pakka_format() returns PAKKA_FORMAT_PK3" {
     skip_if_missing
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH (MSYS2 / MSVC build)"
     cat > "$BATS_TEST_TMPDIR/q3_fmt.c" <<'EOF'
 #include <stdio.h>
 #include "pakka.h"

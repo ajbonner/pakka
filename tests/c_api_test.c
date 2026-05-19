@@ -89,15 +89,12 @@ static int test_null_args(void) {
         FAIL("pakka_create(bad flags) must clear *out");
     }
 
-    /* pakka_create: PK3 to /dev/null → EXISTS (file present, refuses
-     * to overwrite); confirms PK3 path is reachable. */
-    a = (pakka_archive_t *)OUT_SENTINEL;
-    s = pakka_create("/dev/null", PAKKA_FORMAT_PK3,
-                     PAKKA_CREATE_DEFAULT, &a, &err);
-    EXPECT_EQ(s, PAKKA_ERR_EXISTS, "pakka_create PK3 over existing file");
-    if (a != NULL) {
-        FAIL("pakka_create(PK3, exists) must clear *out");
-    }
+    /* pakka_create: PK3 over an existing file → EXISTS. Confirms the
+     * PK3 dispatch path is reachable. Defer the actual call into
+     * test_create_close_roundtrip(scratch_dir) below — at this point
+     * we don't have a path to an existing file we control. The
+     * NULL/INVALID_ARGUMENT cases for the PK3 dispatch are covered by
+     * the unknown-format and bad-flags checks above. */
 
     /* pakka_entry_at on NULL archive → INVALID_ARGUMENT, *out cleared */
     e = (const pakka_entry_t *)OUT_SENTINEL;
@@ -414,6 +411,19 @@ static int test_create_close_roundtrip(const char *scratch_dir) {
 
     s = pakka_close(a, &err);
     EXPECT_EQ(s, PAKKA_OK, "pakka_close after empty create");
+
+    /* PK3 create over an existing path → EXISTS. The just-closed empty
+     * PAK at `path` is now a guaranteed-present file we can use. */
+    {
+        pakka_archive_t *a2 = (pakka_archive_t *)OUT_SENTINEL;
+        s = pakka_create(path, PAKKA_FORMAT_PK3,
+                         PAKKA_CREATE_DEFAULT, &a2, &err);
+        EXPECT_EQ(s, PAKKA_ERR_EXISTS,
+                  "pakka_create PK3 over existing file");
+        if (a2 != NULL) {
+            FAIL("pakka_create(PK3, exists) must clear *out");
+        }
+    }
 
     /* The on-disk file must be a valid 12-byte PACK header:
      *   "PACK" + diroffset=12 (LE) + dirlength=0 (LE) */
