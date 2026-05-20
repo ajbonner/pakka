@@ -108,7 +108,13 @@ jobs:
           persist-credentials: false
       - run: |
           sudo apt-get update
-          sudo apt-get install -y clang-tidy mingw-w64
+          # mingw-w64-x86-64-dev is the headers + import libs only;
+          # the full `mingw-w64` meta-package pulls the gcc cross-
+          # compiler matrix (i686 + x86_64, posix + win32 variants,
+          # ~200 MB) which the apt step couldn't even finish within
+          # the job timeout. clang-tidy doesn't need GCC; LLVM does
+          # the analysis itself with --target=x86_64-w64-mingw32.
+          sudo apt-get install -y clang-tidy mingw-w64-x86-64-dev
       # REQUIRE_WIN32_HEADERS=1 turns the local soft-skip into a
       # hard error: in CI the install above either landed the
       # headers or it didn't, and a silently-skipped lint is worse
@@ -163,7 +169,7 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential bats curl openssl zip python3 lcov
       - run: make coverage
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: coverage-html
           path: build/coverage/html
