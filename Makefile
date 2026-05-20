@@ -195,12 +195,13 @@ lint-win32:
 		echo "lint-win32: (override path with WIN32_HEADERS=... if installed elsewhere); skipping"; \
 		exit 0; \
 	fi; \
-	$(CLANG_TIDY) --quiet src/cli.c src/compat.c src/pakfile.c $(PUBLIC_HEADERS) -- \
+	$(CLANG_TIDY) --quiet \
+		--header-filter='(common|compat|filesystem|pakka)\.h$$' \
+		src/cli.c src/compat.c src/pakfile.c $(PUBLIC_HEADERS) -- \
 		$(CPPFLAGS) \
 		--target=x86_64-w64-mingw32 \
 		-isystem $(WIN32_HEADERS) \
-		-Isrc \
-		-isystem src/vendor/wingetopt -isystem src/vendor/dirent \
+		-Isrc -Isrc/vendor/wingetopt -Isrc/vendor/dirent \
 		--std=c99 \
 		-Wno-pragma-pack -Wno-pragma-system-header-outside-header
 
