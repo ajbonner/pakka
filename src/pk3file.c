@@ -12,10 +12,13 @@
  * via the pakka_pk3_* helpers below when pakka_format_is_zip() is true
  * (i.e. format is PK3 or PK4). The pakka_pk3_ name prefix is historical.
  *
- * What's supported: STORED (method 0) and DEFLATE (method 8) entries.
- * Read works for both. Write produces STORED only. ZIP64, encryption,
- * data descriptors (general-purpose bit 3), and multi-disk archives
- * are refused.
+ * What's supported: STORED (method 0) and DEFLATE (method 8) entries
+ * on both read and write. DEFLATE write is gated on
+ * `pak->pk3_compression` (set via `pakka_set_compression` / CLI
+ * `--compress`); the default is STORED. Per-entry auto-fallback to
+ * STORED when DEFLATE output is not smaller than the source. ZIP64,
+ * encryption, data descriptors (general-purpose bit 3), and multi-
+ * disk archives are refused.
  *
  * The error-fill helpers from pakfile.c (err_fill, err_set_entry) are
  * file-local to that TU. To avoid duplicating them, pk3file.c uses
@@ -30,7 +33,7 @@
 
 #include "common.h"
 #include "pakka.h"
-#include "vendor/puff/puff.h"
+#include "deflate/deflate_iface.h"
 
 /* ------------------------------------------------------------------ */
 /* Error-fill helpers (file-local copies of pakfile.c equivalents).   */
@@ -827,9 +830,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
                                          Pakfileentry_t *entry,
                                          pakka_error_t *err) {
     unsigned char *compressed = NULL;
-    unsigned long destlen, srclen;
     pakka_status_t s;
-    int rc;
 
     reader->next_offset = entry->pk3_payload_offset;
     reader->remaining = entry->length;
@@ -942,6 +943,74 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
         } else {
             memcpy(buf, entry->pk3_pending_data, plen);
         }
+        /* DEFLATE pending entry: `buf` currently holds the compressed
+         * bytes (csize == plen). Inflate them into a fresh buffer of
+         * length `entry->length` so the reader serves decompressed
+         * bytes. STORED entries skip this — csize == usize and the
+         * buf IS the served bytes. */
+        if (entry->pk3_method == PK3_METHOD_DEFLATE) {
+            unsigned char *inflated;
+            size_t written = 0;
+            size_t consumed = 0;
+            pakka_status_t is;
+            if (entry->length == 0) {
+                /* Zero-length DEFLATE: validate the stream decodes
+                 * but stash no output. reader->remaining is already
+                 * the entry->length (0); reader_read returns 0. */
+                is = pakka_deflate_inflate(buf, plen, NULL, 0,
+                                           &written, &consumed, err);
+                free(buf);
+                if (is != PAKKA_OK || written != 0 || consumed != plen) {
+                    if (is == PAKKA_OK) {
+                        return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                            PAKKA_ERR_DOMAIN_NONE, 0,
+                                            "open_entry",
+                                            "Pending DEFLATE entry %s "
+                                            "scan-decode produced %zu / "
+                                            "consumed %zu (expected 0 / %u)",
+                                            entry->filename, written,
+                                            consumed, (unsigned)plen);
+                    }
+                    return is;
+                }
+                return PAKKA_OK;
+            }
+            inflated = malloc(entry->length);
+            if (inflated == NULL) {
+                free(buf);
+                return pk3_err_fill(err, PAKKA_ERR_NOMEM,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                                    "Cannot allocate pending DEFLATE "
+                                    "inflate buffer for %s (%u bytes)",
+                                    entry->filename,
+                                    (unsigned)entry->length);
+            }
+            is = pakka_deflate_inflate(buf, plen, inflated,
+                                       (size_t)entry->length,
+                                       &written, &consumed, err);
+            free(buf);
+            if (is != PAKKA_OK
+                || written != (size_t)entry->length
+                || consumed != plen) {
+                free(inflated);
+                if (is == PAKKA_OK) {
+                    return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                        PAKKA_ERR_DOMAIN_NONE, 0,
+                                        "open_entry",
+                                        "Pending DEFLATE entry %s "
+                                        "decode failed (got=%zu/%u, "
+                                        "consumed=%zu/%u)",
+                                        entry->filename, written,
+                                        (unsigned)entry->length,
+                                        consumed, (unsigned)plen);
+                }
+                return is;
+            }
+            reader->inflated_buf = inflated;
+            reader->inflated_len = (size_t)entry->length;
+            reader->inflated_cursor = 0;
+            return PAKKA_OK;
+        }
         reader->inflated_buf = buf;
         reader->inflated_len = plen;
         reader->inflated_cursor = 0;
@@ -968,20 +1037,32 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
 
     /* Inflate runs even when usize == 0 — a valid empty payload still
      * carries a deflate end-of-block marker that must parse cleanly.
-     * puff with NIL dest is a "scan only" mode (see puff.h). */
+     * Pass out=NULL, out_cap=0 for scan-only validation: the backend
+     * decodes the stream end-to-end and reports zero output if the
+     * stream legitimately produces none (the final-empty-block marker). */
     if (entry->length == 0) {
-        destlen = 0;
-        srclen = (unsigned long)entry->pk3_compressed_size;
-        rc = pakka_inflate(NIL, &destlen, compressed, &srclen);
+        size_t written = 0;
+        size_t consumed = 0;
+        s = pakka_deflate_inflate(compressed,
+                                  (size_t)entry->pk3_compressed_size,
+                                  NULL, 0, &written, &consumed, err);
         free(compressed);
-        if (rc != 0 || destlen != 0
-            || srclen != (unsigned long)entry->pk3_compressed_size) {
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open_entry",
-                                "ZIP DEFLATE decode failed for empty "
-                                "entry %s (rc=%d, consumed=%lu/%u)",
-                                entry->filename, rc, srclen,
-                                (unsigned)entry->pk3_compressed_size);
+        if (s != PAKKA_OK || written != 0
+            || consumed != (size_t)entry->pk3_compressed_size) {
+            /* deflate_iface populated err on s != OK; rewrite for the
+             * mismatch paths so the caller sees a consistent message
+             * scoped to the open_entry operation. */
+            if (s == PAKKA_OK) {
+                return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                                    "ZIP DEFLATE decode for empty entry "
+                                    "%s produced %zu bytes / consumed "
+                                    "%zu of %u (expected 0 / %u)",
+                                    entry->filename, written, consumed,
+                                    (unsigned)entry->pk3_compressed_size,
+                                    (unsigned)entry->pk3_compressed_size);
+            }
+            return s;
         }
         return PAKKA_OK;
     }
@@ -995,25 +1076,36 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
                             (unsigned)entry->length);
     }
 
-    destlen = (unsigned long)entry->length;
-    srclen = (unsigned long)entry->pk3_compressed_size;
-    rc = pakka_inflate(reader->inflated_buf, &destlen, compressed, &srclen);
-    free(compressed);
-    /* Reject: decode error, produced size mismatch, OR consumed size
-     * mismatch (trailing bytes inside the declared compressed payload
-     * indicate either corruption or a malformed archive). */
-    if (rc != 0
-        || destlen != (unsigned long)entry->length
-        || srclen != (unsigned long)entry->pk3_compressed_size) {
-        free(reader->inflated_buf);
-        reader->inflated_buf = NULL;
-        return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
-                            "open_entry",
-                            "ZIP DEFLATE decode failed for %s "
-                            "(rc=%d, got=%lu/%u, consumed=%lu/%u)",
-                            entry->filename, rc,
-                            destlen, (unsigned)entry->length,
-                            srclen, (unsigned)entry->pk3_compressed_size);
+    {
+        size_t written = 0;
+        size_t consumed = 0;
+        s = pakka_deflate_inflate(compressed,
+                                  (size_t)entry->pk3_compressed_size,
+                                  reader->inflated_buf,
+                                  (size_t)entry->length,
+                                  &written, &consumed, err);
+        free(compressed);
+        /* Reject: decode error, produced size mismatch, OR consumed
+         * size mismatch (trailing bytes inside the declared compressed
+         * payload indicate either corruption or a malformed archive).
+         * Vendored backend doesn't surface bytes-consumed and always
+         * reports full consume — see deflate_vendored.c header. */
+        if (s != PAKKA_OK
+            || written != (size_t)entry->length
+            || consumed != (size_t)entry->pk3_compressed_size) {
+            free(reader->inflated_buf);
+            reader->inflated_buf = NULL;
+            if (s == PAKKA_OK) {
+                return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                                    "ZIP DEFLATE decode failed for %s "
+                                    "(got=%zu/%u, consumed=%zu/%u)",
+                                    entry->filename, written,
+                                    (unsigned)entry->length, consumed,
+                                    (unsigned)entry->pk3_compressed_size);
+            }
+            return s;
+        }
     }
     reader->inflated_len = entry->length;
     return PAKKA_OK;
@@ -1092,10 +1184,8 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
                                            pakka_error_t *err) {
     unsigned char *compressed = NULL;
     unsigned char *inflated;
-    unsigned long destlen, srclen;
     uint32_t crc;
     pakka_status_t s;
-    int rc;
 
     /* Pending (queued-add) entry: payload isn't on pak->fp yet. The
      * CRC32 was computed at add time; with no on-disk bytes to
@@ -1150,19 +1240,28 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
     } else {
         /* DEFLATE: inflate, then CRC the uncompressed bytes. */
         if (entry->length == 0) {
-            /* puff(NIL, ...) scan-only mode validates the stream. */
-            destlen = 0;
-            srclen = (unsigned long)entry->pk3_compressed_size;
-            rc = pakka_inflate(NIL, &destlen, compressed, &srclen);
+            /* Scan-only validation: out=NULL, out_cap=0. The backend
+             * decodes the stream end-to-end and rejects any stream
+             * that would have produced > 0 bytes. */
+            size_t written = 0;
+            size_t consumed = 0;
+            s = pakka_deflate_inflate(compressed,
+                                      (size_t)entry->pk3_compressed_size,
+                                      NULL, 0, &written, &consumed, err);
             free(compressed);
-            if (rc != 0 || destlen != 0
-                || srclen != (unsigned long)entry->pk3_compressed_size) {
-                return pk3_err_fill(err, PAKKA_ERR_FORMAT,
-                                    PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                                    "ZIP DEFLATE decode failed for empty "
-                                    "entry %s (rc=%d, consumed=%lu/%u)",
-                                    entry->filename, rc, srclen,
-                                    (unsigned)entry->pk3_compressed_size);
+            if (s != PAKKA_OK || written != 0
+                || consumed != (size_t)entry->pk3_compressed_size) {
+                if (s == PAKKA_OK) {
+                    return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                        PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                                        "ZIP DEFLATE decode for empty entry "
+                                        "%s produced %zu bytes / consumed "
+                                        "%zu of %u (expected 0 / %u)",
+                                        entry->filename, written, consumed,
+                                        (unsigned)entry->pk3_compressed_size,
+                                        (unsigned)entry->pk3_compressed_size);
+                }
+                return s;
             }
             return (entry->pk3_crc32 == 0u)
                 ? PAKKA_OK
@@ -1180,21 +1279,30 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
                                 "Cannot allocate inflate buffer (%u bytes)",
                                 (unsigned)entry->length);
         }
-        destlen = (unsigned long)entry->length;
-        srclen = (unsigned long)entry->pk3_compressed_size;
-        rc = pakka_inflate(inflated, &destlen, compressed, &srclen);
-        free(compressed);
-        if (rc != 0
-            || destlen != (unsigned long)entry->length
-            || srclen != (unsigned long)entry->pk3_compressed_size) {
-            free(inflated);
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                                "ZIP DEFLATE decode failed for %s "
-                                "(rc=%d, got=%lu/%u, consumed=%lu/%u)",
-                                entry->filename, rc,
-                                destlen, (unsigned)entry->length,
-                                srclen, (unsigned)entry->pk3_compressed_size);
+        {
+            size_t written = 0;
+            size_t consumed = 0;
+            s = pakka_deflate_inflate(compressed,
+                                      (size_t)entry->pk3_compressed_size,
+                                      inflated,
+                                      (size_t)entry->length,
+                                      &written, &consumed, err);
+            free(compressed);
+            if (s != PAKKA_OK
+                || written != (size_t)entry->length
+                || consumed != (size_t)entry->pk3_compressed_size) {
+                free(inflated);
+                if (s == PAKKA_OK) {
+                    return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                        PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                                        "ZIP DEFLATE decode failed for %s "
+                                        "(got=%zu/%u, consumed=%zu/%u)",
+                                        entry->filename, written,
+                                        (unsigned)entry->length, consumed,
+                                        (unsigned)entry->pk3_compressed_size);
+                }
+                return s;
+            }
         }
         crc = pk3_crc32_update(0, inflated, (size_t)entry->length);
         free(inflated);
@@ -1211,7 +1319,8 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
 }
 
 /* ------------------------------------------------------------------ */
-/* Write path: create / add / delete / commit. STORED only.           */
+/* Write path: create / add / delete / commit. STORED + DEFLATE       */
+/* (gated on pak->pk3_compression set via pakka_set_compression).      */
 /* ------------------------------------------------------------------ */
 
 /* Build a 22-byte EOCD record for the given central directory
@@ -1229,15 +1338,19 @@ static void pk3_build_eocd(unsigned char eocd[PK3_EOCD_SIZE],
     pk3_put_u16(&eocd[20], 0);               /* comment length */
 }
 
-/* Build a 30-byte LFH for a STORED entry. extra and comment fields
- * are not written (zero-length). */
+/* Build a 30-byte LFH for an entry. extra and comment fields are not
+ * written (zero-length). `method` is the ZIP compression method
+ * (PK3_METHOD_STORED or PK3_METHOD_DEFLATE); csize and usize must be
+ * sized to match (csize == usize for STORED, csize <= usize for
+ * DEFLATE). */
 static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
+                          uint16_t method,
                           uint32_t crc, uint32_t csize, uint32_t usize,
                           uint16_t name_len) {
     lfh[0] = 'P'; lfh[1] = 'K'; lfh[2] = 3; lfh[3] = 4;
     pk3_put_u16(&lfh[4], 20);                /* version needed: 2.0 */
     pk3_put_u16(&lfh[6], 0);                 /* general purpose flags */
-    pk3_put_u16(&lfh[8], PK3_METHOD_STORED); /* compression method */
+    pk3_put_u16(&lfh[8], method);            /* compression method */
     pk3_put_u16(&lfh[10], 0);                /* DOS mod time */
     pk3_put_u16(&lfh[12], 0x0021);           /* DOS mod date: 1980-01-01 */
     pk3_put_u32(&lfh[14], crc);
@@ -1247,15 +1360,17 @@ static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
     pk3_put_u16(&lfh[28], 0);                /* extra field length */
 }
 
-/* Build a 46-byte CDR entry header (variable-length name follows). */
+/* Build a 46-byte CDR entry header (variable-length name follows).
+ * `method` mirrors the LFH method field — see pk3_build_lfh. */
 static void pk3_build_cdr(unsigned char cdr[PK3_CDR_SIZE],
+                          uint16_t method,
                           uint32_t crc, uint32_t csize, uint32_t usize,
                           uint16_t name_len, uint32_t lfh_offset) {
     cdr[0] = 'P'; cdr[1] = 'K'; cdr[2] = 1; cdr[3] = 2;
     pk3_put_u16(&cdr[4], 20);                /* version made by: 2.0 */
     pk3_put_u16(&cdr[6], 20);                /* version needed: 2.0 */
     pk3_put_u16(&cdr[8], 0);                 /* general purpose flags */
-    pk3_put_u16(&cdr[10], PK3_METHOD_STORED);
+    pk3_put_u16(&cdr[10], method);
     pk3_put_u16(&cdr[12], 0);                /* DOS mod time */
     pk3_put_u16(&cdr[14], 0x0021);           /* DOS mod date */
     pk3_put_u32(&cdr[16], crc);
@@ -1419,6 +1534,95 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
                                 &entry, err);
     if (s != PAKKA_OK) return s;
 
+    /* DEFLATE-compressed add: load the full source into memory, attempt
+     * encode through the active backend, and stash either the encoded
+     * bytes (DEFLATE won) or the raw bytes (STORED fallback) in
+     * pk3_pending_data. The eager-capture path bypasses the commit-
+     * time TOCTOU revalidation that the streaming pk3_pending_source
+     * path runs — we already CRC'd the bytes here and own the buffer,
+     * so the source file can change freely after this call returns.
+     *
+     * STORED-only adds (the default) keep the existing pk3_pending_source
+     * streaming path: no buffering, full source revalidation at commit. */
+    if (pak->pk3_compression == PK3_METHOD_DEFLATE && total > 0) {
+        unsigned char *src_buf;
+        unsigned char *enc_buf = NULL;
+        size_t enc_len = 0;
+        uint32_t recaptured_crc;
+
+        src_buf = malloc((size_t)total);
+        if (src_buf == NULL) {
+            pakka_entry_free(entry);
+            return pk3_err_fill(err, PAKKA_ERR_NOMEM,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "add",
+                                "Cannot buffer source %s (%" PRIu64
+                                " bytes) for DEFLATE compression",
+                                source_path, total);
+        }
+        src = fopen(source_path, "rb");
+        if (src == NULL) {
+            saved_errno = errno;
+            free(src_buf);
+            pakka_entry_free(entry);
+            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "add",
+                                "Cannot reopen source %s for DEFLATE pass",
+                                source_path);
+        }
+        if (fread(src_buf, 1, (size_t)total, src) != (size_t)total) {
+            saved_errno = errno;
+            fclose(src);
+            free(src_buf);
+            pakka_entry_free(entry);
+            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "add",
+                                "Short read on source %s for DEFLATE pass",
+                                source_path);
+        }
+        fclose(src);
+
+        /* Recompute CRC32 over the actually-captured bytes. The first
+         * pass above streamed the source for CRC + size, then this
+         * branch reopened and re-read `total` bytes. If the source
+         * changed between those reads (TOCTOU), the streamed CRC
+         * would not match the bytes we're about to write — the
+         * committed archive would silently pair valid compressed
+         * bytes with a stale CRC32 in the LFH/CDR. Replace the
+         * scanned CRC with the recaptured-buffer CRC so the LFH and
+         * the bytes always agree. */
+        recaptured_crc = pk3_crc32_update(0, src_buf, (size_t)total);
+        entry->pk3_crc32 = recaptured_crc;
+
+        s = pakka_deflate_compress(src_buf, (size_t)total,
+                                   &enc_buf, &enc_len, err);
+        if (s != PAKKA_OK) {
+            free(src_buf);
+            pakka_entry_free(entry);
+            return s;
+        }
+
+        if (enc_buf != NULL) {
+            /* DEFLATE won: stash encoded bytes, update sizes. The
+             * uncompressed size stays in entry->length (already set
+             * by pk3_alloc_pending_entry to `total`); the compressed
+             * size becomes the encoded byte count. */
+            entry->pk3_method = PK3_METHOD_DEFLATE;
+            entry->pk3_compressed_size = (uint32_t)enc_len;
+            entry->pk3_pending_data = enc_buf;
+            entry->pk3_pending_data_len = enc_len;
+            free(src_buf);
+        } else {
+            /* STORED fallback: keep the source buffer as the payload.
+             * entry->pk3_method / pk3_compressed_size / length already
+             * reflect STORED+uncompressed-size from
+             * pk3_alloc_pending_entry. */
+            entry->pk3_pending_data = src_buf;
+            entry->pk3_pending_data_len = (size_t)total;
+        }
+        pk3_link_pending_entry(pak, entry);
+        return PAKKA_OK;
+    }
+
     entry->pk3_pending_source = pakka_compat_strdup(source_path);
     if (entry->pk3_pending_source == NULL) {
         pakka_entry_free(entry);
@@ -1459,6 +1663,29 @@ pakka_status_t pakka_pk3_add_memory_impl(Pak_t *pak,
      * zero-sized payload via NULL — pk3_pending_data_len == 0 is the
      * marker for an empty pending entry. */
     if (len > 0) {
+        /* DEFLATE-compressed add: attempt encode on the caller's
+         * buffer. The data is already in memory so this is just one
+         * backend call — no extra fopen / fread vs. the STORED path. */
+        if (pak->pk3_compression == PK3_METHOD_DEFLATE) {
+            unsigned char *enc_buf = NULL;
+            size_t enc_len = 0;
+            s = pakka_deflate_compress((const unsigned char *)data, len,
+                                       &enc_buf, &enc_len, err);
+            if (s != PAKKA_OK) {
+                pakka_entry_free(entry);
+                return s;
+            }
+            if (enc_buf != NULL) {
+                entry->pk3_method = PK3_METHOD_DEFLATE;
+                entry->pk3_compressed_size = (uint32_t)enc_len;
+                entry->pk3_pending_data = enc_buf;
+                entry->pk3_pending_data_len = enc_len;
+                pk3_link_pending_entry(pak, entry);
+                return PAKKA_OK;
+            }
+            /* DEFLATE didn't beat STORED — fall through to the STORED
+             * copy below. */
+        }
         entry->pk3_pending_data = malloc(len);
         if (entry->pk3_pending_data == NULL) {
             pakka_entry_free(entry);
@@ -1637,8 +1864,8 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                     e->filename);
             }
 
-            pk3_build_lfh(lfh, e->pk3_crc32, e->pk3_compressed_size,
-                          e->length, name_len);
+            pk3_build_lfh(lfh, e->pk3_method, e->pk3_crc32,
+                          e->pk3_compressed_size, e->length, name_len);
             if (fwrite(lfh, 1, PK3_LFH_SIZE, tmpfp) != PK3_LFH_SIZE
                 || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
                 saved_errno = errno;
@@ -1964,8 +2191,9 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         }
         for (e = pak->head; e != NULL; e = e->next) {
             uint16_t name_len = (uint16_t)strlen(e->filename);
-            pk3_build_cdr(cdr, e->pk3_crc32, e->pk3_compressed_size,
-                          e->length, name_len, e->pk3_lfh_offset);
+            pk3_build_cdr(cdr, e->pk3_method, e->pk3_crc32,
+                          e->pk3_compressed_size, e->length, name_len,
+                          e->pk3_lfh_offset);
             if (fwrite(cdr, 1, PK3_CDR_SIZE, tmpfp) != PK3_CDR_SIZE
                 || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
                 saved_errno = errno;
@@ -2188,8 +2416,9 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
     /* Write the central directory. */
     for (e = pak->head; e != NULL; e = e->next) {
         uint16_t name_len = (uint16_t)strlen(e->filename);
-        pk3_build_cdr(cdr, e->pk3_crc32, e->pk3_compressed_size,
-                      e->length, name_len, e->pk3_lfh_offset);
+        pk3_build_cdr(cdr, e->pk3_method, e->pk3_crc32,
+                      e->pk3_compressed_size, e->length, name_len,
+                      e->pk3_lfh_offset);
         if (fwrite(cdr, 1, PK3_CDR_SIZE, pak->fp) != PK3_CDR_SIZE
             || fwrite(e->filename, 1, name_len, pak->fp) != name_len) {
             saved_errno = errno;

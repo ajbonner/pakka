@@ -174,6 +174,12 @@ struct pakka_archive {
      * file. New LFHs are written from this offset (replacing any prior
      * CDR + EOCD), with the new CDR + EOCD rewritten at commit. */
     uint32_t pk3_cdr_offset;
+    /* Sticky compression mode applied to subsequent pakka_add_file /
+     * pakka_add_memory calls — PK3_METHOD_STORED or PK3_METHOD_DEFLATE.
+     * Zero-initialised by calloc so the default at pakka_open / create
+     * time is STORED. Mutated only via pakka_set_compression (which
+     * also enforces the read-only / non-ZIP guards). */
+    uint16_t pk3_compression;
     /* Cap on per-entry decompressed bytes for pakka_open_entry and
      * pakka_read_entry_alloc. 0 disables the cap. Applies to both ZIP-
      * class (PK3/PK4) DEFLATE entries and Daikatana compressed entries —

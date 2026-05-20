@@ -1286,6 +1286,48 @@ pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
     return PAKKA_OK;
 }
 
+pakka_status_t pakka_set_compression(pakka_archive_t *archive,
+                                     pakka_compression_t method,
+                                     pakka_error_t *err) {
+    /* Validate in the order documented in include/pakka.h:
+     * NULL -> bad enum -> !writable -> wrong format -> success. The
+     * fall-through path mutates pk3_compression only on the last leg. */
+    if (archive == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0,
+                        "set_compression",
+                        "pakka_set_compression: archive must be non-NULL");
+    }
+    if (method != PAKKA_COMPRESSION_STORE
+        && method != PAKKA_COMPRESSION_DEFLATE) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0,
+                        "set_compression",
+                        "pakka_set_compression: unknown method %d "
+                        "(expected PAKKA_COMPRESSION_STORE=0 or "
+                        "PAKKA_COMPRESSION_DEFLATE=8)",
+                        (int)method);
+    }
+    if (!archive->writable) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0,
+                        "set_compression",
+                        "pakka_set_compression: archive is read-only "
+                        "(opened with PAKKA_OPEN_READ)");
+    }
+    if (method == PAKKA_COMPRESSION_DEFLATE
+        && !pakka_format_is_zip(archive->format)) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0,
+                        "set_compression",
+                        "pakka_set_compression: DEFLATE is only valid for "
+                        "PK3 / PK4 archives (this archive is format %d)",
+                        (int)archive->format);
+    }
+    archive->pk3_compression = (uint16_t)method;
+    return PAKKA_OK;
+}
+
 /* Daikatana archives are read-only. The custom codec has no published
  * encoder, so add/delete/commit on a DK pak would either corrupt the
  * file (rebuild-copy treats `length` as the byte extent — wrong for

@@ -172,17 +172,26 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
  *   - PAK / SiN: source bytes are read and written into the archive
  *     immediately. After return, source_path can be freely modified or
  *     deleted.
- *   - PK3 / PK4: pakka_add_file records the CRC32 + size, stashes the
- *     source path, and reads the bytes again at commit time (or close
- *     time, which implicitly commits). The caller MUST keep source_path
- *     readable and unchanged until pakka_commit / pakka_close returns;
- *     a modified-since-add source causes commit to refuse with
- *     PAKKA_ERR_FORMAT (CRC or size mismatch), and a source replaced
- *     with a symlink causes PAKKA_ERR_UNSAFE_NAME. This is what makes
- *     ZIP adds atomic against partial-write failures — the archive on
- *     disk isn't touched until the commit-time temp-file rename
- *     succeeds. Daikatana archives are read-only on every format
- *     (no published encoder for the custom byte-codec).
+ *   - PK3 / PK4 with STORED (default): pakka_add_file records the
+ *     CRC32 + size, stashes the source path, and reads the bytes
+ *     again at commit time (or close time, which implicitly commits).
+ *     The caller MUST keep source_path readable and unchanged until
+ *     pakka_commit / pakka_close returns; a modified-since-add source
+ *     causes commit to refuse with PAKKA_ERR_FORMAT (CRC or size
+ *     mismatch), and a source replaced with a symlink causes
+ *     PAKKA_ERR_UNSAFE_NAME. This is what makes ZIP adds atomic
+ *     against partial-write failures — the archive on disk isn't
+ *     touched until the commit-time temp-file rename succeeds.
+ *   - PK3 / PK4 with DEFLATE (pakka_set_compression): the source is
+ *     read fully into memory at add time, compressed (or kept as
+ *     STORED if DEFLATE didn't win), and the resulting bytes are
+ *     stashed in an in-memory buffer. The CRC32 is recomputed over
+ *     the captured bytes — the LFH/CDR always describes the bytes
+ *     actually committed. After return, source_path can be freely
+ *     modified or deleted; the commit-time revalidation does NOT
+ *     apply on this path (the source is captured at add time).
+ *     Daikatana archives are read-only on every format (no published
+ *     encoder for the custom byte-codec).
  *
  * Use pakka_add_memory if you want the payload bytes pinned at call
  * time on every format. */
@@ -263,6 +272,43 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
 pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
                                                uint64_t max_bytes,
                                                pakka_error_t *err);
+
+/* Compression methods accepted by pakka_set_compression. Values match
+ * the on-disk ZIP method numbers (RFC PKWARE APPNOTE 4.4.5): 0 STORED,
+ * 8 DEFLATE. Other method values are reserved for future use and
+ * rejected by the setter. */
+typedef enum {
+    PAKKA_COMPRESSION_STORE   = 0,
+    PAKKA_COMPRESSION_DEFLATE = 8
+} pakka_compression_t;
+
+/* Set the compression method applied to subsequent pakka_add_file /
+ * pakka_add_memory calls on the archive. Sticky on the archive handle
+ * until changed; default at pakka_open / pakka_create time is
+ * PAKKA_COMPRESSION_STORE.
+ *
+ * Validation order — error paths leave archive state unchanged:
+ *   1. archive == NULL                     -> PAKKA_ERR_INVALID_ARGUMENT
+ *   2. method not in {STORE, DEFLATE}      -> PAKKA_ERR_INVALID_ARGUMENT
+ *   3. !archive->writable                  -> PAKKA_ERR_INVALID_ARGUMENT
+ *   4. DEFLATE on non-PK3/PK4 format       -> PAKKA_ERR_INVALID_ARGUMENT
+ *   5. STORE on any writable archive       -> PAKKA_OK
+ *   6. DEFLATE on writable PK3/PK4         -> PAKKA_OK
+ *
+ * The setter is idempotent and may be called any number of times; the
+ * most recent successful call wins for the next pakka_add_*. The
+ * setting lives on the in-memory handle, NOT on the on-disk archive
+ * — re-opening an existing archive resets to STORE.
+ *
+ * When DEFLATE is set, each add still falls back to STORED for that
+ * entry if the compressed payload is not smaller than the source
+ * (matches info-zip behaviour). Entries whose source exceeds the
+ * 2 GiB INT_MAX limit imposed by the bundled (sdefl/sinfl) backend
+ * also fall back to STORED without erroring; the zlib backend (opt-
+ * in at build time) accepts the full 4 GiB ZIP u32 range. */
+pakka_status_t pakka_set_compression(pakka_archive_t *archive,
+                                     pakka_compression_t method,
+                                     pakka_error_t *err);
 
 #ifdef __cplusplus
 }

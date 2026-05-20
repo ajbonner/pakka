@@ -92,6 +92,27 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
+  # Exercises the opt-in zlib DEFLATE backend (PAKKA_DEFLATE_BACKEND=zlib /
+  # -DPAKKA_USE_ZLIB=ON) end-to-end. The vendored sdefl + sinfl codecs
+  # are the default and run across the rest of the matrix; this job
+  # covers the wrapper at src/deflate/deflate_zlib.c so the shim doesn't
+  # bit-rot between releases of libz. Game-engine integrators (ioquake3,
+  # dhewm3, ...) that already link zlib are the primary consumers.
+  linux-glibc-x86_64-zlib:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl zip python3 zlib1g-dev
+      - run: make PAKKA_DEFLATE_BACKEND=zlib test
+
   # Cross-arm lint. Runs clang-tidy against src/cli.c, src/compat.c,
   # and src/pakfile.c under --target=x86_64-w64-mingw32 with Linux's
   # mingw-w64 headers standing in for the MSVC SDK. Catches

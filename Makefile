@@ -11,7 +11,7 @@ TARGET=pakka
 # on _POSIX_C_SOURCE.
 # _FILE_OFFSET_BITS=64 — widens off_t / fseeko / ftello on 32-bit glibc
 # so pakka_compat_fseek/ftell can address the [2 GiB, 4 GiB) range.
-CPPFLAGS = -Iinclude -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+CPPFLAGS = -Iinclude -Isrc -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 
 # Opt-in fault-injection hook (PAKKA_INJECT_FAULT_AT="op:N" env var,
 # read by pakka_test_should_fault in src/compat.c). Compiled into
@@ -47,18 +47,52 @@ LIB_DIR=$(BUILD_DIR)/lib-$(PAKKA_BUILD_MODE)
 TEST_DIR=$(BUILD_DIR)/test
 
 SOURCES=$(wildcard $(SRC_DIR)/*.c)
+
+# DEFLATE backend selection. Default: bundled sdefl + sinfl single-
+# header codecs (no external dependency). Opt-in: PAKKA_DEFLATE_BACKEND=zlib
+# routes through the host's libz instead, useful for integrators (game
+# engines) that already link zlib and don't want to carry the ~1400
+# LOC of bundled codec code in their binary. Only one backend is
+# compiled per build — the deflate impl files live under src/deflate/
+# which the top-level wildcard above doesn't reach, so the conditional
+# below is the only way they enter the source list.
+PAKKA_DEFLATE_BACKEND ?= vendored
+ifeq ($(PAKKA_DEFLATE_BACKEND),zlib)
+    DEFLATE_SOURCES=$(SRC_DIR)/deflate/deflate_zlib.c
+    LDLIBS += -lz
+else ifeq ($(PAKKA_DEFLATE_BACKEND),vendored)
+    DEFLATE_SOURCES=$(SRC_DIR)/deflate/deflate_vendored.c
+else
+    $(error PAKKA_DEFLATE_BACKEND must be 'vendored' or 'zlib', got '$(PAKKA_DEFLATE_BACKEND)')
+endif
+
 # Vendored sources live under src/vendor/. Kept out of $(SOURCES) so
 # the lint target (clang-tidy WarningsAsErrors:'*') skips them — patches
 # against upstream are out of scope. The objects still land in
-# libpakka.a via LIB_OBJECTS.
-VENDOR_SOURCES=$(wildcard $(SRC_DIR)/vendor/puff/*.c)
-OBJECTS=$(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+# libpakka.a via LIB_OBJECTS. The glob stays narrow on purpose: a
+# broader src/vendor/*/*.c pattern would unconditionally pull in
+# src/vendor/wingetopt/getopt.c + src/vendor/dirent/*.c, which are
+# Windows-only shims gated under WIN32 in CMakeLists.txt and not
+# linkable on Unix.
+ifeq ($(PAKKA_DEFLATE_BACKEND),vendored)
+VENDOR_SOURCES=$(wildcard $(SRC_DIR)/vendor/sdefl/*.c) \
+               $(wildcard $(SRC_DIR)/vendor/sinfl/*.c)
+else
+VENDOR_SOURCES=
+endif
 
-# Library is every src/*.c except cli.c (CLI-only) plus the vendored
-# objects. `symbol-audit` below enforces only pakka_*-prefixed names
-# leave the archive — vendored puff was renamed `puff` -> `pakka_inflate`
-# at vendor time so it passes the same gate.
-LIB_SOURCES=$(filter-out $(SRC_DIR)/cli.c,$(SOURCES))
+OBJECTS=$(SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o) \
+        $(DEFLATE_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
+
+# Library is every src/*.c except cli.c (CLI-only) plus the selected
+# deflate backend impl plus the vendored objects. `symbol-audit` below
+# enforces only pakka_*-prefixed names leave the archive — both sdefl
+# and sinfl were renamed `sdefl_`/`sinfl_` -> `pakka_sdefl_`/`pakka_sinfl_`
+# at vendor time so they pass the same gate. The zlib backend links
+# against host libz at executable-link time; libz's own symbols appear
+# only as undefined references (U flag) in libpakka.a and don't
+# violate the pakka_*-prefix rule.
+LIB_SOURCES=$(filter-out $(SRC_DIR)/cli.c,$(SOURCES)) $(DEFLATE_SOURCES)
 LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o) \
             $(VENDOR_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o)
 CLI_OBJECTS=$(OBJ_DIR)/cli.o
@@ -313,7 +347,7 @@ symbol-audit: $(LIBPAKKA)
 	fi
 
 $(TARGET): $(CLI_OBJECTS) $(LIBPAKKA)
-	$(CC) $(CFLAGS) -o $(TARGET) $(CLI_OBJECTS) $(LIBPAKKA)
+	$(CC) $(CFLAGS) -o $(TARGET) $(CLI_OBJECTS) $(LIBPAKKA) $(LDLIBS)
 
 # ar rcs: r = insert/replace, c = create silently, s = write index.
 # Inline mkdir keeps us GNU make 3.79.1 compatible (no order-only prereqs).
@@ -330,7 +364,7 @@ $(LIBPAKKA): $(LIB_OBJECTS)
 C_API_TEST = $(TEST_DIR)/c_api_test
 $(C_API_TEST): tests/c_api_test.c $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -o $@ tests/c_api_test.c $(LIBPAKKA)
+	$(CC) $(CFLAGS) -o $@ tests/c_api_test.c $(LIBPAKKA) $(LDLIBS)
 c_api_test: $(C_API_TEST)
 
 # DK-codec exerciser. Unlike c_api_test (which is public-surface only),
@@ -340,7 +374,7 @@ c_api_test: $(C_API_TEST)
 DK_CODEC_TEST = $(TEST_DIR)/dk_codec_test
 $(DK_CODEC_TEST): tests/dk_codec_test.c $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ tests/dk_codec_test.c $(LIBPAKKA)
+	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ tests/dk_codec_test.c $(LIBPAKKA) $(LDLIBS)
 dk_codec_test: $(DK_CODEC_TEST)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
@@ -374,7 +408,7 @@ $(PAK0): verify-tarball
 fixture: $(PAK0)
 
 test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
-	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' bats tests/
+	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats tests/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
 # re-compute SHA256 once at vendor time and pin that here.

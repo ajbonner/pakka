@@ -73,6 +73,11 @@ typedef struct opts_s {
     int path_count;
     int tree;
     int deep;
+    /* --compress: enable DEFLATE compression on newly-added entries.
+     * Valid only for PK3 / PK4 archives in add (-a) or create (-c)
+     * mode; rejected for PAK/SiN/Daikatana before any file is opened.
+     * Per-entry auto-fallback to STORED when DEFLATE wouldn't win. */
+    int compress;
     /* --as <entry_name> <source_path> pairs. Parallel arrays so a
      * caller can pass any number of --as occurrences alongside plain
      * paths. Only valid with PAK_ADD / PAK_CREATE. */
@@ -148,12 +153,34 @@ int main(int argc, char *argv[]) {
                   "(custom codec has no encoder)");
     }
 
+    /* --compress is only meaningful on create and add. For -l / -x / -d
+     * / --verify there's no add path to apply compression to, so reject
+     * before any file is opened to keep the error message specific. */
+    if (opts.compress
+        && opts.mode != PAK_CREATE && opts.mode != PAK_ADD) {
+        pakka_die("--compress is only valid with -c (create) or -a (add)");
+    }
+    /* --compress requires a ZIP-class target. The library setter also
+     * enforces this at pakka_set_compression time, but failing here
+     * gives a friendlier message (CLI flag context) and skips opening
+     * the archive. The --format-pinned PAK / SiN cases are caught
+     * directly; AUTO is caught by extension-sniff inference on create
+     * and by post-open format probe on add. */
+    if (opts.compress) {
+        if (opts.format == PAKKA_FORMAT_PAK
+            || opts.format == PAKKA_FORMAT_SIN
+            || opts.format == PAKKA_FORMAT_DAIKATANA) {
+            pakka_die("--compress (DEFLATE) is only valid for PK3 / PK4 "
+                      "archives, not the requested PAK-class format");
+        }
+    }
+
     if (opts.mode == PAK_CREATE) {
         /* Format selection from --format if explicit, else from
          * extension (case-insensitive): .pk3 → PK3 (Quake 3), .pk4 →
          * PK4 (Doom 3), .sin → SiN (Ritual), anything else → PAK.
-         * PK3/PK4 produce only STORED entries in this build; DEFLATE
-         * encode is a future addition shared between both. */
+         * PK3/PK4 default to STORED on write; pass --compress to enable
+         * DEFLATE (pakka_set_compression is invoked after create below). */
         pakka_format_t fmt = opts.format;
         if (fmt == PAKKA_FORMAT_AUTO) {
             size_t plen = strlen(opts.pakfile);
@@ -189,6 +216,19 @@ int main(int argc, char *argv[]) {
     }
     if (s != PAKKA_OK) {
         fail_from_err(&err);
+    }
+
+    /* Apply --compress now that we have an open handle. The format
+     * guard above caught PAK-class targets when --format was explicit;
+     * this call catches the AUTO-extension case (e.g. a `.pak` file
+     * passed without --format). pakka_set_compression rejects DEFLATE
+     * on non-ZIP with PAKKA_ERR_INVALID_ARGUMENT — fail_from_err
+     * formats the library's message. */
+    if (opts.compress) {
+        s = pakka_set_compression(pak, PAKKA_COMPRESSION_DEFLATE, &err);
+        if (s != PAKKA_OK) {
+            fail_from_err(&err);
+        }
     }
 
     switch (opts.mode) {
@@ -835,6 +875,9 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
         } else if (!option_end && strcmp(argv[src], "--deep") == 0) {
             opts->deep = 1;
             continue;
+        } else if (!option_end && strcmp(argv[src], "--compress") == 0) {
+            opts->compress = 1;
+            continue;
         } else if (!option_end && strcmp(argv[src], "--format") == 0) {
             if (src + 1 >= argc) {
                 fprintf(stderr,
@@ -1003,7 +1046,7 @@ static void setmodetype(opts_t *opts, short mode) {
 
 static void usage_banner(void) {
     fprintf(stderr, "%s %s (%s).\n", APP_NAME, VERSION, BUILD_DATE);
-    fprintf(stderr, "Usage: %s -h | -V | [-lxcad] [--tree] [--verify] [--deep] [--format <name>] [--as <entry> <source>] [-C <dest>] <pak> [path(s)]\n",
+    fprintf(stderr, "Usage: %s -h | -V | [-lxcad] [--tree] [--verify] [--deep] [--compress] [--format <name>] [--as <entry> <source>] [-C <dest>] <pak> [path(s)]\n",
             g_argv0);
 }
 
@@ -1019,8 +1062,8 @@ static void version(void) {
     printf("              (--format goldsrc and --format hl are aliases for pak)\n");
     printf("  sin         Ritual SiN (1998)    read + write\n");
     printf("  daikatana   Ion Storm (2000)     read-only (custom codec, no encoder)\n");
-    printf("  pk3         Quake 3 / ZIP        read + write (STORED on write; STORED + DEFLATE on read)\n");
-    printf("  pk4         Doom 3 / ZIP         read + write (STORED on write; STORED + DEFLATE on read)\n");
+    printf("  pk3         Quake 3 / ZIP        read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
+    printf("  pk4         Doom 3 / ZIP         read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
     printf("\n");
     printf("Use --format <name> to pin the format on open or override the\n");
     printf("create-time extension sniffer. PACK magic is shared between\n");
@@ -1057,6 +1100,8 @@ static void help(void) {
     fprintf(stderr, "                                 (goldsrc and hl are aliases for pak — Half-Life 1 / CS 1.6 / TFC use Quake PAK)\n");
     fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
     fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");
+    fprintf(stderr, " --compress                      DEFLATE-encode added entries (PK3/PK4 only, with -c or -a)\n");
+    fprintf(stderr, "                                 (per-entry auto-fallback to STORED on incompressible payloads)\n");
     fprintf(stderr, "\nExamples:\n");
     fprintf(stderr, "  %s -l pak1.pak                  # List contents of pak1.pak\n", g_argv0);
     fprintf(stderr, "  %s -l pak1.pak --tree           # List contents as a directory tree\n", g_argv0);

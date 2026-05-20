@@ -100,13 +100,14 @@ supported-format matrix.
 | Quake 1 / 2 PAK (also GoldSrc: Half-Life 1, CS 1.6, TFC, Sven Co-op) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | SiN (`SPAK`, 120-byte names) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Daikatana (`PACK`, 72-byte entries, custom codec) | ✓ | ✓ | ✓ | — | — | — | ✓ |
-| Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
-| Doom 3 PK4 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
+| Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Doom 3 PK4 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
-PK3/PK4 write produces STORED-method entries only (no compression).
-Quake and Doom 3 engines accept STORED archives; the output is larger
-than a DEFLATE-compressed equivalent. DEFLATE encode support is deferred
-for both formats.
+PK3/PK4 write defaults to STORED (method 0). Pass `--compress` to the
+CLI, or call `pakka_set_compression(archive, PAKKA_COMPRESSION_DEFLATE,
+&err)` from the library, to DEFLATE-encode new entries instead. Per-
+entry auto-fallback to STORED when DEFLATE wouldn't beat STORED — see
+the "DEFLATE write" section below.
 
 Daikatana is read-only: the custom byte-codec has no published encoder,
 so `pakka_create(PAKKA_FORMAT_DAIKATANA, ...)` and the mutation modes
@@ -121,7 +122,7 @@ other than STORED (0) and DEFLATE (8). Each refusal returns
 
 ### Using libpakka from C
 
-`include/pakka.h` exposes 23 functions for opening, inspecting,
+`include/pakka.h` exposes 24 functions for opening, inspecting,
 extracting from, and mutating pak archives:
 
 * Version: `pakka_version` returns the linked libpakka version string
@@ -141,7 +142,9 @@ extracting from, and mutating pak archives:
 * Integrity: `pakka_verify` (drives a caller-supplied
   `pakka_report_fn` callback)
 * Tuning: `pakka_set_max_decompressed_size` (caps PK3/PK4 DEFLATE and
-  Daikatana decompressed payload size; default 64 MiB, 0 disables)
+  Daikatana decompressed payload size; default 64 MiB, 0 disables) /
+  `pakka_set_compression` (PK3/PK4 only; switches new adds between
+  STORED and DEFLATE — see "DEFLATE write" below)
 * Memory convenience: `pakka_read_entry_alloc` / `pakka_free`
 
 Library functions never call `exit` and never write to stdout/stderr;
@@ -157,6 +160,35 @@ RAM. Default 64 MiB; pass 0 to disable. `pakka_verify` with the
 `PAKKA_VERIFY_DEEP` flag adds per-entry CRC32 and decompression checks
 on top of the structural walk (CRC for PK3/PK4; byte-count check for
 Daikatana — the custom codec has no CRC).
+
+### DEFLATE write (PK3/PK4)
+
+Both `pakka -c --compress` (CLI) and `pakka_set_compression(archive,
+PAKKA_COMPRESSION_DEFLATE, err)` (library) enable DEFLATE on new
+entries added to a PK3/PK4 archive. Default is STORED; the setter is
+sticky on the open handle and rejected on non-ZIP archives. Each
+entry's compressed payload is computed up front; if DEFLATE doesn't
+beat STORED for that entry (incompressible inputs like PNG, MP3, or
+random bytes), the archive falls back to STORED for that entry
+automatically — matches info-zip behavior.
+
+The DEFLATE codec is selectable at build time. The default is the
+bundled `sdefl` + `sinfl` single-header encoder/decoder pair (no
+external dependency, ~1400 LOC vendored under `src/vendor/`):
+
+    make                            # default: bundled codec
+    cmake -B build/cmake .          # same on Windows
+
+Game-engine integrators who already link `zlib` can route DEFLATE
+through it instead and skip the duplicate codec code:
+
+    make PAKKA_DEFLATE_BACKEND=zlib
+    cmake -B build/cmake -DPAKKA_USE_ZLIB=ON .
+
+Both backends produce byte-interchangeable raw RFC 1951 DEFLATE
+streams — a PK3 written with one backend reads cleanly with the
+other, and with any third-party tool (info-zip, Windows Explorer,
+Quake III / Doom 3 engines).
 
 `tests/c_api_test.c` exercises every one of those functions against
 `libpakka.a` only (no internal headers) and is the canonical example

@@ -1055,6 +1055,174 @@ static int test_version(void) {
     return 0;
 }
 
+/* pakka_set_compression: NULL / bad enum / read-only / wrong-format /
+ * happy-path / default invariant / reset-on-reopen. The setter lives
+ * in src/pakfile.c next to pakka_set_max_decompressed_size; coverage
+ * here matches the existing public-API exerciser shape. */
+static int test_set_compression(const char *scratch_dir) {
+    char path[1024];
+    pakka_archive_t *arc = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const char *compressible_text =
+        "The quick brown fox jumps over the lazy dog. "
+        "The quick brown fox jumps over the lazy dog. "
+        "The quick brown fox jumps over the lazy dog. "
+        "The quick brown fox jumps over the lazy dog. "
+        "The quick brown fox jumps over the lazy dog. ";
+    unsigned char random_bytes[1024];
+    size_t i;
+    unsigned long lcg = 0xdeadbeefu;
+
+    snprintf(path, sizeof(path), "%s/c_api_compress.pk3", scratch_dir);
+
+    /* --- NULL archive --- */
+    s = pakka_set_compression(NULL, PAKKA_COMPRESSION_DEFLATE, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "set_compression(NULL)");
+    EXPECT_EQ(err.status, PAKKA_ERR_INVALID_ARGUMENT, "err.status NULL");
+    /* err.operation is populated even on NULL-archive errors. */
+    if (err.operation[0] == '\0') {
+        FAIL("set_compression(NULL) left err.operation empty");
+    }
+
+    /* --- bad enum value --- */
+    s = pakka_create(path, PAKKA_FORMAT_PK3, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create PK3 for set_compression tests");
+    s = pakka_set_compression(arc, (pakka_compression_t)99, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "set_compression bad enum");
+
+    /* --- DEFLATE on PK3 writable handle (happy path) --- */
+    s = pakka_set_compression(arc, PAKKA_COMPRESSION_DEFLATE, &err);
+    EXPECT_EQ(s, PAKKA_OK, "set_compression DEFLATE on PK3");
+
+    /* Add one compressible entry and one incompressible one to confirm
+     * the auto-fallback path. */
+    s = pakka_add_memory(arc, "text.txt", compressible_text,
+                         strlen(compressible_text), &err);
+    EXPECT_EQ(s, PAKKA_OK, "add compressible memory");
+
+    for (i = 0; i < sizeof(random_bytes); i++) {
+        lcg = lcg * 1103515245u + 12345u;
+        random_bytes[i] = (unsigned char)(lcg >> 16);
+    }
+    s = pakka_add_memory(arc, "noise.bin", random_bytes,
+                         sizeof(random_bytes), &err);
+    EXPECT_EQ(s, PAKKA_OK, "add incompressible memory");
+
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after DEFLATE adds");
+
+    /* Reopen read-only, round-trip both entries through
+     * pakka_read_entry_alloc. */
+    arc = NULL;
+    s = pakka_open(path, PAKKA_OPEN_READ, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen --compress-built PK3");
+    {
+        void *buf;
+        size_t len;
+        s = pakka_read_entry_alloc(arc, "text.txt", &buf, &len, &err);
+        EXPECT_EQ(s, PAKKA_OK, "read compressible round-trip");
+        EXPECT_EQ(len, strlen(compressible_text), "compressible len matches");
+        if (memcmp(buf, compressible_text, len) != 0) {
+            FAIL("compressible bytes do not match after round-trip");
+        }
+        pakka_free(buf);
+
+        s = pakka_read_entry_alloc(arc, "noise.bin", &buf, &len, &err);
+        EXPECT_EQ(s, PAKKA_OK, "read incompressible round-trip");
+        EXPECT_EQ(len, sizeof(random_bytes), "noise len matches");
+        if (memcmp(buf, random_bytes, len) != 0) {
+            FAIL("incompressible bytes do not match after round-trip");
+        }
+        pakka_free(buf);
+    }
+
+    /* --- Read-only handle --- */
+    s = pakka_set_compression(arc, PAKKA_COMPRESSION_DEFLATE, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT,
+              "set_compression on read-only handle");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close read-only handle");
+
+    /* --- Wrong format: DEFLATE on PAK rejected, STORE on PAK OK --- */
+    snprintf(path, sizeof(path), "%s/c_api_compress.pak", scratch_dir);
+    arc = NULL;
+    s = pakka_create(path, PAKKA_FORMAT_PAK, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create PAK for wrong-format test");
+    s = pakka_set_compression(arc, PAKKA_COMPRESSION_DEFLATE, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT,
+              "set_compression DEFLATE on PAK rejected");
+    s = pakka_set_compression(arc, PAKKA_COMPRESSION_STORE, &err);
+    EXPECT_EQ(s, PAKKA_OK,
+              "set_compression STORE on PAK accepted (no-op)");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close PAK after wrong-format test");
+
+    /* --- Reset on reopen: a previously-set DEFLATE handle's setting
+     * does NOT persist across close+open. New adds default to STORED. */
+    snprintf(path, sizeof(path), "%s/c_api_compress_reset.pk3",
+             scratch_dir);
+    arc = NULL;
+    s = pakka_create(path, PAKKA_FORMAT_PK3, PAKKA_CREATE_DEFAULT,
+                     &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create PK3 for reset test");
+    s = pakka_set_compression(arc, PAKKA_COMPRESSION_DEFLATE, &err);
+    EXPECT_EQ(s, PAKKA_OK, "set_compression DEFLATE for reset test");
+    s = pakka_add_memory(arc, "compressed.txt", compressible_text,
+                         strlen(compressible_text), &err);
+    EXPECT_EQ(s, PAKKA_OK, "add compressed entry for reset test");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after first add");
+
+    /* Reopen for write WITHOUT calling set_compression. The new add
+     * must be STORED because the setting lives on the handle. */
+    arc = NULL;
+    s = pakka_open(path, PAKKA_OPEN_READ_WRITE, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen for write");
+    s = pakka_add_memory(arc, "stored.txt", compressible_text,
+                         strlen(compressible_text), &err);
+    EXPECT_EQ(s, PAKKA_OK, "add stored entry after reopen");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after stored add");
+
+    /* Read the two entries back; both decode correctly regardless of
+     * method. pakka's reader doesn't expose method directly so we
+     * verify by round-trip — the proof that the second entry is
+     * STORED comes from the bats suite's unzip -v assertion, not
+     * here. This case pins "no crash + correct bytes" after the
+     * setting-reset. */
+    arc = NULL;
+    s = pakka_open(path, PAKKA_OPEN_READ, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen read-only after reset test");
+    {
+        void *buf;
+        size_t len;
+        s = pakka_read_entry_alloc(arc, "compressed.txt", &buf, &len, &err);
+        EXPECT_EQ(s, PAKKA_OK, "read first (deflated) entry");
+        EXPECT_EQ(len, strlen(compressible_text),
+                  "deflated entry length matches");
+        if (memcmp(buf, compressible_text, len) != 0) {
+            FAIL("deflated entry bytes differ");
+        }
+        pakka_free(buf);
+
+        s = pakka_read_entry_alloc(arc, "stored.txt", &buf, &len, &err);
+        EXPECT_EQ(s, PAKKA_OK, "read second (stored) entry");
+        EXPECT_EQ(len, strlen(compressible_text),
+                  "stored entry length matches");
+        if (memcmp(buf, compressible_text, len) != 0) {
+            FAIL("stored entry bytes differ");
+        }
+        pakka_free(buf);
+    }
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after final read");
+
+    return 0;
+}
+
 static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
     /* Truncated PK3 signatures (just the 4-byte magic, no EOCD)
      * should fail with FORMAT now that PK3 is a recognized format.
@@ -1094,6 +1262,7 @@ int main(int argc, char **argv) {
     if (test_add_to_readonly_fails(argv[1]) != 0) return 1;
     if (test_memory_apis(argv[2]) != 0) return 1;
     if (test_verify(argv[1], argv[2]) != 0) return 1;
+    if (test_set_compression(argv[2]) != 0) return 1;
 
     printf("c_api_test: OK\n");
     return 0;

@@ -268,7 +268,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/fmt_test" \
         "$BATS_TEST_TMPDIR/fmt_test.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/fmt_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -420,7 +420,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/cap_test" \
         "$BATS_TEST_TMPDIR/cap_test.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/cap_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -462,7 +462,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/verify_cap" \
         "$BATS_TEST_TMPDIR/verify_cap.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/verify_cap" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -524,7 +524,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/stale" \
         "$BATS_TEST_TMPDIR/stale.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/stale" \
         "$BATS_TEST_TMPDIR/work.pk3" \
         "$BATS_TEST_TMPDIR/payload.txt"
@@ -578,7 +578,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/grew" \
         "$BATS_TEST_TMPDIR/grew.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/grew" \
         "$BATS_TEST_TMPDIR/work.pk3" \
         "$BATS_TEST_TMPDIR/payload.txt"
@@ -664,7 +664,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/handle_cap" \
         "$BATS_TEST_TMPDIR/handle_cap.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/handle_cap" \
         "$BATS_TEST_TMPDIR/handle_cap.pk3" \
         "$BATS_TEST_TMPDIR/big.txt"
@@ -706,7 +706,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/handle" \
         "$BATS_TEST_TMPDIR/handle.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     run "$BATS_TEST_TMPDIR/handle" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -781,7 +781,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/h3" \
         "$BATS_TEST_TMPDIR/h3.c" \
-        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}" ${LDLIBS:-}
     PAKKA_INJECT_FAULT_AT=commit_rename:1 \
         run "$BATS_TEST_TMPDIR/h3" "$BATS_TEST_TMPDIR/work.pk3"
     [ "$status" -eq 0 ]
@@ -971,4 +971,140 @@ EOF
     [[ "$output" == *"real.txt"* ]]
     # No "empty_dir/" in listing
     [[ "$output" != *"empty_dir/"* ]]
+}
+
+# ------------------------------------------------------------------
+# --compress / DEFLATE write tests.
+#
+# These exercise the new write-side DEFLATE path. The cross-tool
+# checks use /usr/bin/unzip's -v listing because it surfaces the
+# compression method per entry — pakka's own -l doesn't print methods.
+# All tests skip cleanly when /usr/bin/unzip is missing (MSYS2 minimal
+# install on Windows, for example).
+# ------------------------------------------------------------------
+
+@test "pk3 create: --compress encodes a compressible payload as DEFLATE" {
+    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    python3 -c "open('$BATS_TEST_TMPDIR/src/lorem.txt','w').write('The quick brown fox jumps over the lazy dog. ' * 500)"
+
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/c.pk3" lorem.txt
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+
+    run unzip -v "$BATS_TEST_TMPDIR/c.pk3"
+    [ "$status" -eq 0 ]
+    # unzip prints "Defl:N" for DEFLATE (sdefl normal level) or just
+    # "Defl" with a level suffix for zlib. Match either.
+    [[ "$output" == *"Defl"* ]]
+    [[ "$output" == *"lorem.txt"* ]]
+}
+
+@test "pk3 create: --compress falls back to STORED on incompressible input" {
+    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    # 4 KiB of OS-randomness is essentially incompressible — DEFLATE
+    # would grow it by ~5 bytes of framing, so the auto-fallback path
+    # kicks in and writes STORED.
+    dd if=/dev/urandom of="$BATS_TEST_TMPDIR/src/random.bin" bs=1024 count=4 status=none
+
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/rb.pk3" random.bin
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+
+    run unzip -v "$BATS_TEST_TMPDIR/rb.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"Stored"* ]]
+    [[ "$output" == *"random.bin"* ]]
+    # Defensive: if a future codec ever beats STORED on /dev/urandom,
+    # we want to know — but the auto-fallback contract says STORED wins.
+    [[ "$output" != *"Defl"* ]]
+}
+
+@test "pk3 create: --compress mixed archive (compressible + incompressible)" {
+    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    python3 -c "open('$BATS_TEST_TMPDIR/src/text.txt','w').write('hello ' * 2000)"
+    dd if=/dev/urandom of="$BATS_TEST_TMPDIR/src/noise.bin" bs=1024 count=4 status=none
+
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/m.pk3" text.txt noise.bin
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+
+    # Method column for text.txt should be Defl*; for noise.bin Stored.
+    run unzip -v "$BATS_TEST_TMPDIR/m.pk3"
+    [ "$status" -eq 0 ]
+    text_line=$(echo "$output" | grep "text.txt") || true
+    noise_line=$(echo "$output" | grep "noise.bin") || true
+    [[ "$text_line" == *"Defl"* ]]
+    [[ "$noise_line" == *"Stored"* ]]
+}
+
+@test "pk3 round-trip: --compress-written archive extracts byte-identical" {
+    mkdir -p "$BATS_TEST_TMPDIR/src" "$BATS_TEST_TMPDIR/out"
+    python3 -c "open('$BATS_TEST_TMPDIR/src/lorem.txt','w').write('Lorem ipsum dolor sit amet, consectetur adipiscing elit. ' * 300)"
+    dd if=/dev/urandom of="$BATS_TEST_TMPDIR/src/random.bin" bs=512 count=8 status=none
+
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/rt.pk3" lorem.txt random.bin
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/out" "$BATS_TEST_TMPDIR/rt.pk3"
+    [ "$status" -eq 0 ]
+    diff "$BATS_TEST_TMPDIR/src/lorem.txt"  "$BATS_TEST_TMPDIR/out/lorem.txt"
+    diff "$BATS_TEST_TMPDIR/src/random.bin" "$BATS_TEST_TMPDIR/out/random.bin"
+}
+
+@test "pk4 round-trip: --compress writes a DEFLATE PK4 that pakka can read" {
+    mkdir -p "$BATS_TEST_TMPDIR/src" "$BATS_TEST_TMPDIR/d_out"
+    python3 -c "open('$BATS_TEST_TMPDIR/src/asset.txt','w').write('doom3 asset payload ' * 200)"
+
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/d.pk4" asset.txt
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -x -C "$BATS_TEST_TMPDIR/d_out" "$BATS_TEST_TMPDIR/d.pk4"
+    [ "$status" -eq 0 ]
+    diff "$BATS_TEST_TMPDIR/src/asset.txt" "$BATS_TEST_TMPDIR/d_out/asset.txt"
+}
+
+@test "pk3 verify --deep accepts a --compress-written archive" {
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    python3 -c "open('$BATS_TEST_TMPDIR/src/v.txt','w').write('verify me ' * 1000)"
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/v.pk3" v.txt
+    popd >/dev/null
+    [ "$status" -eq 0 ]
+    run "$PAKKA" --verify --deep "$BATS_TEST_TMPDIR/v.pk3"
+    [ "$status" -eq 0 ]
+}
+
+@test "pk3 create --compress rejected on .pak (PAK target)" {
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/x.pak" /dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"PK3"* ]] || [[ "$output" == *"DEFLATE"* ]]
+}
+
+@test "pk3 create --compress rejected on .sin (SiN target)" {
+    run "$PAKKA" -c --compress "$BATS_TEST_TMPDIR/x.sin" /dev/null
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"PK3"* ]] || [[ "$output" == *"DEFLATE"* ]]
+}
+
+@test "pk3 add --compress rejected with -l (list, not a mutation)" {
+    # Build a STORED PK3 first so the archive exists; --compress on -l
+    # should fail before opening.
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "stored" > "$BATS_TEST_TMPDIR/src/s.txt"
+    pushd "$BATS_TEST_TMPDIR/src" >/dev/null
+    "$PAKKA" -c "$BATS_TEST_TMPDIR/list.pk3" s.txt
+    popd >/dev/null
+    run "$PAKKA" -l --compress "$BATS_TEST_TMPDIR/list.pk3"
+    [ "$status" -ne 0 ]
+    [[ "$output" == *"--compress"* ]]
 }

@@ -14,6 +14,13 @@ set(CMAKE_C_EXTENSIONS OFF)
 
 string(TIMESTAMP PAKKA_BUILD_DATE "%b %d, %Y")
 
+# DEFLATE backend selection. Default: bundled sdefl + sinfl. Opt-in:
+# -DPAKKA_USE_ZLIB=ON routes through the host's zlib (raw DEFLATE via
+# windowBits = -MAX_WBITS) instead, useful for integrators that
+# already link libz and don't want to carry duplicate codec code.
+# Exactly one backend impl is compiled per build.
+option(PAKKA_USE_ZLIB "Use system zlib instead of bundled sdefl+sinfl" OFF)
+
 # The library is every src/*.c except cli.c; cli.c is the CLI. Only
 # pakka_*-prefixed symbols leak out of the static archive (enforced by
 # make symbol-audit).
@@ -24,8 +31,17 @@ set(PAKKA_LIB_SOURCES
     src/filesystem.c
     src/pakfile.c
     src/pk3file.c
-    src/vendor/puff/puff.c
 )
+
+if(PAKKA_USE_ZLIB)
+    list(APPEND PAKKA_LIB_SOURCES src/deflate/deflate_zlib.c)
+else()
+    list(APPEND PAKKA_LIB_SOURCES
+        src/deflate/deflate_vendored.c
+        src/vendor/sdefl/sdefl.c
+        src/vendor/sinfl/sinfl.c
+    )
+endif()
 
 set(PAKKA_CLI_SOURCES
     src/cli.c
@@ -41,13 +57,19 @@ endif()
 add_library(pakka STATIC ${PAKKA_LIB_SOURCES})
 add_executable(pakka_exe ${PAKKA_CLI_SOURCES})
 
+if(PAKKA_USE_ZLIB)
+    find_package(ZLIB REQUIRED)
+    target_link_libraries(pakka PUBLIC ZLIB::ZLIB)
+endif()
+
 # Vendored sources are not pakka's code — they ship with the warnings
 # their upstream is willing to live with. Suppress /W4 and similar for
-# them so MSVC's "warnings as errors" policy doesn't reject Mark Adler's
-# puff.c (C4324 alignment padding, C4244 int->short conversions, etc.)
-# or any future vendor that's clean on gcc but noisy on cl.exe.
-if(MSVC)
-    set_source_files_properties(src/vendor/puff/puff.c PROPERTIES
+# them so MSVC's "warnings as errors" policy doesn't reject sdefl /
+# sinfl (which use C4324 alignment padding, C4244 int->short etc.).
+if(MSVC AND NOT PAKKA_USE_ZLIB)
+    set_source_files_properties(src/vendor/sdefl/sdefl.c PROPERTIES
+        COMPILE_FLAGS "/W0")
+    set_source_files_properties(src/vendor/sinfl/sinfl.c PROPERTIES
         COMPILE_FLAGS "/W0")
 endif()
 
