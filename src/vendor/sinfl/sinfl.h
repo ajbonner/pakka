@@ -122,6 +122,12 @@ extern "C" {
 
 struct pakka_sinfl {
   const unsigned char *bitptr;
+  /* pakka local addition: one-past-last input byte. Used by the
+   * patched pakka_sinfl_refill to clamp bit-reads against the actual
+   * input buffer end, so a malformed or tampered DEFLATE stream
+   * can't drive bitptr past the caller's buffer. Set once by
+   * pakka_sinfl_decompress at entry; never advances past this. */
+  const unsigned char *bitend;
   unsigned long long bitbuf;
   int bitcnt;
 
@@ -178,8 +184,25 @@ pakka_sinfl_bsr(unsigned long n) {
   unsigned long r = 0;
   _BitScanReverse(&r, n);
   return (int)(r);
-#else // defined(__GNUC__) || defined(__clang__) || defined(__TINYC__)
+#elif defined(__clang__) || (defined(__GNUC__) && (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4)))
+  /* pakka local modification: gate __builtin_clz on gcc >= 3.4
+   * (the release that added the builtin). Upstream sinfl has no
+   * portable fallback — the original `#else` comment claimed
+   * GCC/Clang/TinyCC but the actual code only worked for those.
+   * The portable lookup branch below handles gcc 3.0-3.3 (RH9
+   * default toolchain) and any other compiler lacking __builtin_clz. */
   return 31 - __builtin_clz(n);
+#else
+  /* Portable bit-scan-reverse: returns the 0-based bit index of the
+   * most significant set bit. Caller guarantees n > 0 (every site
+   * either pre-checks or feeds a value that's already non-zero). */
+  int r = 0;
+  if (n >= 0x10000UL) { r += 16; n >>= 16; }
+  if (n >= 0x100UL)   { r += 8;  n >>= 8;  }
+  if (n >= 0x10UL)    { r += 4;  n >>= 4;  }
+  if (n >= 0x4UL)     { r += 2;  n >>= 2;  }
+  if (n >= 0x2UL)     { r += 1; }
+  return r;
 #endif
 }
 static unsigned long long
@@ -215,8 +238,30 @@ pakka_sinfl_copy128(unsigned char **dst, unsigned char **src) {
 #endif
 static void
 pakka_sinfl_refill(struct pakka_sinfl *s) {
-  s->bitbuf |= pakka_sinfl_read64(s->bitptr) << s->bitcnt;
-  s->bitptr += (63 - s->bitcnt) >> 3;
+  /* pakka local modification: bound the 8-byte refill read against
+   * s->bitend so a malformed stream can't drive bitptr past the
+   * caller's input buffer. Upstream reads 8 bytes unconditionally;
+   * adversarial Huffman tables can spin the decode loop in
+   * pakka_sinfl_decompress's `blk` state and walk bitptr arbitrarily
+   * far past the actual stream end. The tail branch zero-fills the
+   * missing bytes — DEFLATE end-of-block / invalid-symbol detection
+   * handles the resulting bit pattern via its existing checks. */
+  size_t avail = (size_t)(s->bitend - s->bitptr);
+  unsigned long long n;
+  size_t adv;
+  if (avail >= 8) {
+    n = pakka_sinfl_read64(s->bitptr);
+  } else {
+    /* Partial tail: copy what's available into a zero-initialized
+     * 8-byte stub so the shift below sees deterministic bits. */
+    unsigned char stub[8] = {0};
+    if (avail > 0) memcpy(stub, s->bitptr, avail);
+    n = pakka_sinfl_read64(stub);
+  }
+  s->bitbuf |= n << s->bitcnt;
+  adv = (size_t)((63 - s->bitcnt) >> 3);
+  if (adv > avail) adv = avail;
+  s->bitptr += adv;
   s->bitcnt |= 56; /* bitcount in range [56,63] */
 }
 static int
@@ -389,6 +434,7 @@ pakka_sinfl_decompress(unsigned char *out, int cap, const unsigned char *in, int
   int last = 0;
 
   s.bitptr = in;
+  s.bitend = in + size;
   while (1) {
     switch (state) {
     case hdr: {

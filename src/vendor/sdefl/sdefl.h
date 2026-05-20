@@ -206,7 +206,11 @@ pakka_sdefl_ilog2(int n) {
   unsigned long msbp = 0;
   _BitScanReverse(&msbp, (unsigned long)n);
   return (int)msbp;
-#elif defined(__GNUC__) || defined(__clang__)
+#elif defined(__clang__) || (defined(__GNUC__) && (__GNUC__ > 3 || (__GNUC__ == 3 && __GNUC_MINOR__ >= 4)))
+  /* pakka local modification: gate __builtin_clzl on gcc >= 3.4, the
+   * release that added the builtin. Earlier gcc (3.0-3.3, including
+   * the Red Hat 9 / NetBSD 3.0 / Sarge legacy targets) falls through
+   * to the portable lookup table below. */
   return (int)sizeof(unsigned long) * CHAR_BIT - 1 - __builtin_clzl((unsigned long)n);
 #else
   #define lt(n) n, n, n, n, n, n, n, n, n, n, n, n, n, n, n, n

@@ -976,15 +976,25 @@ EOF
 # ------------------------------------------------------------------
 # --compress / DEFLATE write tests.
 #
-# These exercise the new write-side DEFLATE path. The cross-tool
-# checks use /usr/bin/unzip's -v listing because it surfaces the
-# compression method per entry — pakka's own -l doesn't print methods.
-# All tests skip cleanly when /usr/bin/unzip is missing (MSYS2 minimal
-# install on Windows, for example).
+# Method-choice assertions go through python's zipfile module rather
+# than `unzip -v`: zipfile reports per-entry compress_type directly
+# from the CDR (0 == STORED, 8 == DEFLATE), so the test is independent
+# of info-zip vs bsdunzip output formatting (which differs between
+# Linux, FreeBSD, macOS, and MSYS2). python3 is already a test-suite
+# dep — the fixture builder at the top of this file uses it.
 # ------------------------------------------------------------------
 
+# Echo "<entry>:<method>" lines for each CDR entry. 0 = STORED, 8 = DEFLATE.
+zip_methods() {
+    python3 -c "
+import sys, zipfile
+with zipfile.ZipFile(sys.argv[1]) as z:
+    for i in z.infolist():
+        print(f'{i.filename}:{i.compress_type}')
+" "$1"
+}
+
 @test "pk3 create: --compress encodes a compressible payload as DEFLATE" {
-    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
     mkdir -p "$BATS_TEST_TMPDIR/src"
     python3 -c "open('$BATS_TEST_TMPDIR/src/lorem.txt','w').write('The quick brown fox jumps over the lazy dog. ' * 500)"
 
@@ -993,16 +1003,11 @@ EOF
     popd >/dev/null
     [ "$status" -eq 0 ]
 
-    run unzip -v "$BATS_TEST_TMPDIR/c.pk3"
-    [ "$status" -eq 0 ]
-    # unzip prints "Defl:N" for DEFLATE (sdefl normal level) or just
-    # "Defl" with a level suffix for zlib. Match either.
-    [[ "$output" == *"Defl"* ]]
-    [[ "$output" == *"lorem.txt"* ]]
+    methods=$(zip_methods "$BATS_TEST_TMPDIR/c.pk3")
+    [[ "$methods" == *"lorem.txt:8"* ]]
 }
 
 @test "pk3 create: --compress falls back to STORED on incompressible input" {
-    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
     mkdir -p "$BATS_TEST_TMPDIR/src"
     # 4 KiB of OS-randomness is essentially incompressible — DEFLATE
     # would grow it by ~5 bytes of framing, so the auto-fallback path
@@ -1014,17 +1019,14 @@ EOF
     popd >/dev/null
     [ "$status" -eq 0 ]
 
-    run unzip -v "$BATS_TEST_TMPDIR/rb.pk3"
-    [ "$status" -eq 0 ]
-    [[ "$output" == *"Stored"* ]]
-    [[ "$output" == *"random.bin"* ]]
-    # Defensive: if a future codec ever beats STORED on /dev/urandom,
-    # we want to know — but the auto-fallback contract says STORED wins.
-    [[ "$output" != *"Defl"* ]]
+    methods=$(zip_methods "$BATS_TEST_TMPDIR/rb.pk3")
+    # method 0 = STORED. Defensive: if a future codec ever beats
+    # STORED on /dev/urandom, we want to know — auto-fallback contract.
+    [[ "$methods" == *"random.bin:0"* ]]
+    [[ "$methods" != *"random.bin:8"* ]]
 }
 
 @test "pk3 create: --compress mixed archive (compressible + incompressible)" {
-    command -v unzip >/dev/null 2>&1 || skip "unzip not available"
     mkdir -p "$BATS_TEST_TMPDIR/src"
     python3 -c "open('$BATS_TEST_TMPDIR/src/text.txt','w').write('hello ' * 2000)"
     dd if=/dev/urandom of="$BATS_TEST_TMPDIR/src/noise.bin" bs=1024 count=4 status=none
@@ -1034,13 +1036,9 @@ EOF
     popd >/dev/null
     [ "$status" -eq 0 ]
 
-    # Method column for text.txt should be Defl*; for noise.bin Stored.
-    run unzip -v "$BATS_TEST_TMPDIR/m.pk3"
-    [ "$status" -eq 0 ]
-    text_line=$(echo "$output" | grep "text.txt") || true
-    noise_line=$(echo "$output" | grep "noise.bin") || true
-    [[ "$text_line" == *"Defl"* ]]
-    [[ "$noise_line" == *"Stored"* ]]
+    methods=$(zip_methods "$BATS_TEST_TMPDIR/m.pk3")
+    [[ "$methods" == *"text.txt:8"* ]]
+    [[ "$methods" == *"noise.bin:0"* ]]
 }
 
 @test "pk3 round-trip: --compress-written archive extracts byte-identical" {

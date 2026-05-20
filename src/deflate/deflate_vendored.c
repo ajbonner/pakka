@@ -5,16 +5,12 @@
  * PAKKA_USE_ZLIB is unset / OFF (CMake). See src/deflate/deflate_iface.h
  * for the contract.
  *
- * Input-padding requirement: sinfl's pakka_sinfl_refill reads 8 bytes
- * at a time via memcpy, advancing bitptr toward `in + size`. When
- * bitptr lands within 7 bytes of end-of-input the refill reads past
- * the buffer end — undefined behaviour, and ASan-detectable. Pakka's
- * call sites pass tight LFH-sized compressed buffers, so this wrapper
- * always copies the caller's bytes into a freshly-malloc'd buffer
- * with 8 zero bytes of trailing padding before invoking sinfl. The
- * extra copy is bounded by the existing pakka_set_max_decompressed_size
- * cap (default 64 MiB) and pays for itself in safety against
- * end-of-stream OOB reads on hostile or tight payloads.
+ * End-of-buffer safety: sinfl's patched pakka_sinfl_refill bounds its
+ * bit-reads against the s->bitend pointer (a pakka-local addition;
+ * see src/vendor/sinfl/sinfl.h and src/vendor/sinfl/VENDOR.md), so
+ * malformed or tampered DEFLATE streams cannot drive bitptr past the
+ * caller's input buffer. This wrapper passes the caller's `src` and
+ * `src_len` directly to pakka_sinflate — no input padding is needed.
  *
  * Trailing-bytes detection caveat: sinfl's exported pakka_sinflate
  * returns only the number of output bytes written, not the number of
@@ -176,15 +172,6 @@ pakka_status_t pakka_deflate_compress(const unsigned char *src,
     return PAKKA_OK;
 }
 
-/* sinfl reads 8 bytes ahead via memcpy in pakka_sinfl_refill — passing
- * a tight LFH-sized buffer triggers an OOB read on the last refill.
- * Allocate src_len + DF_SINFL_TAIL_PAD bytes and zero-fill the
- * trailing pad before invoking sinfl. The pad is invisible to the
- * decoder because the bitstream's end-of-block marker should land
- * inside the original src_len bytes; the extra pad bits are read but
- * never consumed by the state machine. */
-#define DF_SINFL_TAIL_PAD 8u
-
 pakka_status_t pakka_deflate_inflate(const unsigned char *src,
                                      size_t src_len,
                                      unsigned char *out,
@@ -194,7 +181,6 @@ pakka_status_t pakka_deflate_inflate(const unsigned char *src,
                                      pakka_error_t *err) {
     unsigned char scan_byte;
     unsigned char *dest;
-    unsigned char *padded_src = NULL;
     int dest_cap;
     int produced;
 
@@ -240,21 +226,10 @@ pakka_status_t pakka_deflate_inflate(const unsigned char *src,
         dest_cap = (int)out_cap;
     }
 
-    /* OOB-safe copy with trailing pad — see DF_SINFL_TAIL_PAD comment. */
-    padded_src = malloc(src_len + DF_SINFL_TAIL_PAD);
-    if (padded_src == NULL) {
-        return df_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
-                           "inflate",
-                           "Cannot allocate %zu-byte sinfl input pad",
-                           src_len + DF_SINFL_TAIL_PAD);
-    }
-    if (src_len > 0) {
-        memcpy(padded_src, src, src_len);
-    }
-    memset(padded_src + src_len, 0, DF_SINFL_TAIL_PAD);
-
-    produced = pakka_sinflate(dest, dest_cap, padded_src, (int)src_len);
-    free(padded_src);
+    /* sinfl bounds its own reads against s->bitend (set by pakka's
+     * local patch to in + size). No padding needed — pass the
+     * caller's buffer through directly. */
+    produced = pakka_sinflate(dest, dest_cap, src, (int)src_len);
 
     if (produced < 0) {
         return df_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,

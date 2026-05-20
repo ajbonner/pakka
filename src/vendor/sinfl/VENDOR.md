@@ -41,22 +41,33 @@ the decoded byte count or a negative error code.
 Two caller-side caveats that the vendored backend wrapper documents
 (see `src/deflate/deflate_vendored.c`):
 
-1. **8-byte tail padding required.** `pakka_sinfl_refill` reads 8
-   bytes at a time via `memcpy`. Pakka's call sites pass tight LFH-
-   sized buffers, so `deflate_vendored.c` copies into a padded
-   scratch (`src_len + 8` zero-padded) before invoking sinfl.
-2. **No bytes-consumed surface.** sinfl returns only the output
+1. **No bytes-consumed surface.** sinfl returns only the output
    count; the wrapper reports `*in_consumed == src_len` on success.
    Trailing-bytes detection inside an LFH's declared csize is
    therefore softer than puff's (zlib backend has exact `z.total_in`).
    `pakka_pk3_deep_verify_entry`'s CRC32 cross-check is the end-to-
    end integrity backstop.
-3. **Soft-fail on some malformed inputs.** sinfl returns a partial-
+2. **Soft-fail on some malformed inputs.** sinfl returns a partial-
    output success count for invalid block types, stored-block
    LEN/NLEN mismatch, and invalid Huffman code lengths. The caller's
    `written != entry->length` check catches every case where the
    malformed block appears before the declared usize is reached;
    CRC32 in deep-verify catches the rest.
+
+**Local mod — bounded refill (fixes an upstream OOB).** Upstream
+`pakka_sinfl_refill` reads 8 bytes ahead via `memcpy` without
+checking input bounds. Adversarial or tampered DEFLATE streams can
+drive bitptr arbitrarily far past the actual input end before the
+state machine notices, producing a heap-buffer-overflow read
+(reproducible under ASan with the existing PK3 test fixtures). The
+patch adds an `s->bitend` field (one-past-last input byte), sets it
+in `pakka_sinfl_decompress`, and has `pakka_sinfl_refill` clamp both
+the read length and the bitptr advance against `bitend`. The tail
+read zero-fills the missing bytes — DEFLATE end-of-block /
+invalid-symbol detection already handles the resulting bit pattern
+via its existing checks. See `src/vendor/sinfl/sinfl.h` for the
+patched code; the change is small enough to re-apply mechanically
+on an upstream rebase.
 
 Why replace puff? Author symmetry with sdefl — same code style,
 same dual MIT/PD license, same memcpy-based load pattern, same
