@@ -154,6 +154,27 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
                                  pakka_error_t *err);
 void pakka_reader_close(pakka_reader_t *reader);
 
+/* Add a file from disk under entry_name. Validation: entry-name length
+ * + unsafe-name + duplicate + source symlink/regular-file checks +
+ * u32 size cap.
+ *
+ * Format-specific timing of the source read:
+ *   - PAK / SiN: source bytes are read and written into the archive
+ *     immediately. After return, source_path can be freely modified or
+ *     deleted.
+ *   - PK3 / PK4: pakka_add_file records the CRC32 + size, stashes the
+ *     source path, and reads the bytes again at commit time (or close
+ *     time, which implicitly commits). The caller MUST keep source_path
+ *     readable and unchanged until pakka_commit / pakka_close returns;
+ *     a modified-since-add source causes commit to refuse with
+ *     PAKKA_ERR_FORMAT (CRC or size mismatch), and a source replaced
+ *     with a symlink causes PAKKA_ERR_UNSAFE_NAME. This is what makes
+ *     ZIP adds atomic against partial-write failures — the archive on
+ *     disk isn't touched until the commit-time temp-file rename
+ *     succeeds. PK3 / PK4 daikatana is read-only.
+ *
+ * Use pakka_add_memory if you want the payload bytes pinned at call
+ * time on every format. */
 pakka_status_t pakka_add_file(pakka_archive_t *archive,
                               const char *source_path,
                               const char *entry_name,
@@ -161,7 +182,10 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
 /* Add an entry whose payload comes from an in-memory buffer rather
  * than a source file. Same validation as pakka_add_file (entry-name
  * length, unsafe-name, duplicate, u32 size cap, append overflow).
- * len == 0 produces a zero-byte entry. */
+ * len == 0 produces a zero-byte entry. The buffer is copied
+ * synchronously (PAK / SiN write it to the archive, PK3 / PK4 store
+ * an owned copy until commit), so the caller can free `data` as soon
+ * as this function returns. */
 pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                                 const char *entry_name,
                                 const void *data, size_t len,

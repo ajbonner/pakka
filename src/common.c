@@ -1,4 +1,16 @@
 #include "common.h"
+#include <stdlib.h>
+
+/* Free a single entry, including any ZIP queued-add bookkeeping. Used
+ * by both src/pakfile.c (destroy_pak, pakka_delete) and src/pk3file.c
+ * (add-path error paths) so the cleanup of pending source/data lives
+ * in one place. */
+void pakka_entry_free(Pakfileentry_t *e) {
+    if (e == NULL) return;
+    free(e->pk3_pending_source);
+    free(e->pk3_pending_data);
+    free(e);
+}
 
 /* VERSION is supplied as a -D flag by the build system (Makefile +
  * CMakeLists.txt). Reading it through a function rather than a macro

@@ -705,3 +705,37 @@ out:
 #endif
 
 #endif
+
+#ifdef PAKKA_TEST_BUILD
+/* Test-only fault injection. Reads PAKKA_INJECT_FAULT_AT="op:N" once,
+ * then returns 1 on the N-th call to pakka_test_should_fault matching
+ * op (and 0 otherwise). Single global counter — only one op is armed
+ * per process, which is what the bats tests need. Compiled out in
+ * production via the macro in compat.h. */
+#include <stdlib.h>
+int pakka_test_should_fault(const char *op) {
+    static int initialized = 0;
+    static char target_op[64];
+    static int target_n = 0;
+    static int counter = 0;
+    if (!initialized) {
+        const char *env = getenv("PAKKA_INJECT_FAULT_AT");
+        target_op[0] = '\0';
+        if (env != NULL) {
+            const char *colon = strchr(env, ':');
+            if (colon != NULL && colon != env
+                && (size_t)(colon - env) < sizeof(target_op)) {
+                memcpy(target_op, env, (size_t)(colon - env));
+                target_op[colon - env] = '\0';
+                target_n = atoi(colon + 1);
+            }
+        }
+        initialized = 1;
+    }
+    if (target_op[0] == '\0' || strcmp(op, target_op) != 0) {
+        return 0;
+    }
+    counter++;
+    return counter == target_n;
+}
+#endif

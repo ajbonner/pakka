@@ -101,7 +101,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/q3_fmt" \
         "$BATS_TEST_TMPDIR/q3_fmt.c" \
-        "${PROJECT_ROOT}/build/lib/libpakka.a"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
     run "$BATS_TEST_TMPDIR/q3_fmt" "$Q3DEMO_PAK0_PK3"
     [ "$status" -eq 0 ]
 }

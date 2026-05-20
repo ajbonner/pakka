@@ -155,4 +155,19 @@ int pakka_compat_rename_noreplace(const char *src, const char *dst,
  * EOCD comment can outlive the new EOCD and corrupt the archive. */
 int pakka_compat_ftruncate(FILE *fp, int64_t length);
 
+/* Deterministic fault injection for tests. In a build with
+ * PAKKA_TEST_BUILD defined, set PAKKA_INJECT_FAULT_AT="op:N" in the
+ * environment to make the N-th PAKKA_FAULT_CHECK("op") call return
+ * non-zero. Callers that see it return non-zero must set errno and
+ * report the failure as if the underlying syscall returned an error.
+ * Op names are local conventions, e.g. "commit_fclose_tmp",
+ * "commit_rename", "commit_ftruncate". In production builds the macro
+ * expands to 0 — zero overhead and no symbol leak. */
+#ifdef PAKKA_TEST_BUILD
+int pakka_test_should_fault(const char *op);
+#define PAKKA_FAULT_CHECK(op) pakka_test_should_fault(op)
+#else
+#define PAKKA_FAULT_CHECK(op) 0
+#endif
+
 #endif

@@ -241,7 +241,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/fmt_test" \
         "$BATS_TEST_TMPDIR/fmt_test.c" \
-        "${PROJECT_ROOT}/build/lib/libpakka.a"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
     run "$BATS_TEST_TMPDIR/fmt_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -393,7 +393,7 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/cap_test" \
         "$BATS_TEST_TMPDIR/cap_test.c" \
-        "${PROJECT_ROOT}/build/lib/libpakka.a"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
     run "$BATS_TEST_TMPDIR/cap_test" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
 }
@@ -435,9 +435,305 @@ EOF
     ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
         -o "$BATS_TEST_TMPDIR/verify_cap" \
         "$BATS_TEST_TMPDIR/verify_cap.c" \
-        "${PROJECT_ROOT}/build/lib/libpakka.a"
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
     run "$BATS_TEST_TMPDIR/verify_cap" "$BATS_FILE_TMPDIR/mixed.pk3"
     [ "$status" -eq 0 ]
+}
+
+@test "pk3 c-api: commit refuses pending source whose bytes changed after add" {
+    # Atomic-add's CRC computed at add time pinned the bytes we
+    # promised to publish. If the source file is modified between
+    # add and commit, commit must refuse — the stored CRC no longer
+    # describes the bytes we'd be writing, and the published archive
+    # would have valid bytes paired with a stale CRC.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH"
+
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "ORIGINAL-BODY" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/work.pk3" alpha.txt)
+    # Both versions are exactly 12 bytes so commit reads the full
+    # entry size and exercises CRC validation, not short-read handling.
+    printf 'FIRST-BODY1\n' > "$BATS_TEST_TMPDIR/payload.txt"
+
+    cat > "$BATS_TEST_TMPDIR/stale.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "pakka.h"
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s = pakka_open(argv[1], PAKKA_OPEN_READ_WRITE, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "open: %s\n", err.message); return 2; }
+    s = pakka_add_file(a, argv[2], "new.txt", &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "add: %s\n", err.message); return 3; }
+    /* Mutate the payload file in place (same length, different bytes)
+     * before commit reads it back. The replacement is exactly 12
+     * bytes so the read succeeds but the CRC differs. */
+    {
+        FILE *f = fopen(argv[2], "wb");
+        const char *replacement = "SECOND-BODY\n";
+        if (!f) { perror("rewrite"); return 4; }
+        if (fwrite(replacement, 1, strlen(replacement), f)
+            != strlen(replacement)) { perror("fwrite"); return 4; }
+        fclose(f);
+    }
+    s = pakka_commit(a, &err);
+    pakka_close(a, NULL);
+    if (s == PAKKA_OK) {
+        fprintf(stderr, "commit unexpectedly accepted stale bytes\n");
+        return 5;
+    }
+    if (s != PAKKA_ERR_FORMAT) {
+        fprintf(stderr, "expected PAKKA_ERR_FORMAT, got %d: %s\n",
+                (int)s, err.message);
+        return 6;
+    }
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/stale" \
+        "$BATS_TEST_TMPDIR/stale.c" \
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+    run "$BATS_TEST_TMPDIR/stale" \
+        "$BATS_TEST_TMPDIR/work.pk3" \
+        "$BATS_TEST_TMPDIR/payload.txt"
+    [ "$status" -eq 0 ]
+}
+
+@test "pk3 c-api: commit refuses pending source that grew with same prefix" {
+    # Same drift class as the prior test, but the new source keeps
+    # the original bytes as a prefix and extends past the recorded
+    # length. CRC alone would match for the prefix, so commit must
+    # also re-check size; otherwise the archive would silently publish
+    # a truncated view of the new file.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH"
+
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "ORIGINAL-BODY" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/work.pk3" alpha.txt)
+    printf 'PREFIX-BODY1' > "$BATS_TEST_TMPDIR/payload.txt"
+
+    cat > "$BATS_TEST_TMPDIR/grew.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include "pakka.h"
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s = pakka_open(argv[1], PAKKA_OPEN_READ_WRITE, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "open: %s\n", err.message); return 2; }
+    s = pakka_add_file(a, argv[2], "new.txt", &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "add: %s\n", err.message); return 3; }
+    /* Append bytes to the source; the original prefix + CRC still
+     * matches what add recorded, but the file size has changed. */
+    {
+        FILE *f = fopen(argv[2], "ab");
+        if (!f) { perror("append"); return 4; }
+        fputs("-EXTRA", f);
+        fclose(f);
+    }
+    s = pakka_commit(a, &err);
+    pakka_close(a, NULL);
+    if (s != PAKKA_ERR_FORMAT) {
+        fprintf(stderr, "expected PAKKA_ERR_FORMAT, got %d: %s\n",
+                (int)s, err.message);
+        return 5;
+    }
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/grew" \
+        "$BATS_TEST_TMPDIR/grew.c" \
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+    run "$BATS_TEST_TMPDIR/grew" \
+        "$BATS_TEST_TMPDIR/work.pk3" \
+        "$BATS_TEST_TMPDIR/payload.txt"
+    [ "$status" -eq 0 ]
+}
+
+@test "pk3 add: failed commit leaves original ZIP unchanged (atomic add)" {
+    # H2 regression. Before atomic-add, pakka_pk3_add_file_impl
+    # overwrote the live CDR with an LFH+name before payload streaming
+    # — a payload-write failure (or any commit failure) left a partial
+    # entry where the CDR used to be, and the archive could no longer
+    # be opened. Now adds are queued into pk3_pending_source/data and
+    # the rebuild commit publishes via temp+rename. A fault-injected
+    # commit failure must leave the original bytes byte-identical.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "alpha-body" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/work.pk3" alpha.txt)
+    echo "incoming" > "$BATS_TEST_TMPDIR/new.txt"
+    pre_size=$(wc -c < "$BATS_TEST_TMPDIR/work.pk3")
+    pre_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+
+    # Fault the rename so commit fails after queuing the add.
+    run env PAKKA_INJECT_FAULT_AT=commit_rename:1 \
+        "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pk3" \
+        --as "new.txt" "$BATS_TEST_TMPDIR/new.txt"
+    [ "$status" -ne 0 ]
+
+    # Original archive must still be byte-identical to its pre-add
+    # state. No partial LFH bytes, no overwritten CDR.
+    post_size=$(wc -c < "$BATS_TEST_TMPDIR/work.pk3")
+    post_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+    [ "$pre_size" -eq "$post_size" ]
+    [ "$pre_sha" = "$post_sha" ]
+
+    # And the archive still opens with alpha intact and no new.txt.
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"alpha.txt"* ]]
+    [[ "$output" != *"new.txt"* ]]
+}
+
+@test "pk3 c-api: rebuild rollback preserves in-memory entry offsets" {
+    # H3 in-memory regression. The bats tests below pin the on-disk
+    # state across a fault-injected commit; this one pins the
+    # in-memory state. Without the rollback, a survivor entry's
+    # offsets get mutated to point at the temp file's layout, the
+    # temp is removed on commit failure, and a subsequent
+    # pakka_read_entry_alloc reads garbage bytes from the (still-on-
+    # disk) original. With the rollback the offsets are restored to
+    # the pre-commit values that match pak->fp.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH"
+
+    # Three entries so we can delete the FIRST and read a survivor whose
+    # rebuild offset would have been mutated to a smaller value than
+    # its original. Without H3 the offsets would still point at the
+    # temp-file layout (removed on rename failure) and the read would
+    # produce garbage from the original on-disk file.
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    # alpha gets ~1 KB of body so gamma's original on-disk offset is
+    # noticeably past gamma's rebuild offset (LFH + "gamma.txt" + 0).
+    python3 -c "open('$BATS_TEST_TMPDIR/src/alpha.txt','w').write('a' * 1024)"
+    echo "gamma-body" > "$BATS_TEST_TMPDIR/src/gamma.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q -0 "$BATS_TEST_TMPDIR/work.pk3" alpha.txt gamma.txt)
+
+    cat > "$BATS_TEST_TMPDIR/h3.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include "pakka.h"
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    void *buf = NULL;
+    size_t len = 0;
+    s = pakka_open(argv[1], PAKKA_OPEN_READ_WRITE, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "open: %s\n", err.message); return 2; }
+    /* Delete the FIRST entry so the surviving entry's rebuild offset
+     * is meaningfully smaller than its original on-disk offset. */
+    s = pakka_delete(a, "alpha.txt", &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "delete: %s\n", err.message); return 3; }
+    s = pakka_commit(a, &err);
+    if (s == PAKKA_OK) {
+        fprintf(stderr, "commit unexpectedly succeeded — fault not armed?\n");
+        return 4;
+    }
+    /* gamma's stored offsets pre-commit pointed at bytes 1054+ in the
+     * original file; post-rebuild offsets would have pointed at ~30.
+     * Without H3 the read picks up the wrong bytes. */
+    s = pakka_read_entry_alloc(a, "gamma.txt", &buf, &len, &err);
+    if (s != PAKKA_OK) {
+        fprintf(stderr, "read gamma after rollback: %s\n", err.message);
+        return 5;
+    }
+    if (len != strlen("gamma-body\n")
+        || memcmp(buf, "gamma-body\n", len) != 0) {
+        fprintf(stderr, "gamma bytes wrong: len=%zu, content=%.*s\n",
+                len, (int)len, (char *)buf);
+        pakka_free(buf);
+        return 6;
+    }
+    pakka_free(buf);
+    pakka_close(a, &err);
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/h3" \
+        "$BATS_TEST_TMPDIR/h3.c" \
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+    PAKKA_INJECT_FAULT_AT=commit_rename:1 \
+        run "$BATS_TEST_TMPDIR/h3" "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+}
+
+@test "pk3 commit: rebuild rollback after fault-injected fclose(tmp)" {
+    # H3 regression. PAKKA_INJECT_FAULT_AT (only honored in
+    # PAKKA_TEST_BUILD builds) makes the named op fail on the Nth
+    # call. With "commit_fclose_tmp:1" the rebuild path closes the
+    # temp BEFORE renaming and fails — the in-memory offsets must roll
+    # back so the on-disk archive (still unchanged) parses correctly
+    # on a subsequent open.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "alpha" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    echo "gamma" > "$BATS_TEST_TMPDIR/src/gamma.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/work.pk3" alpha.txt gamma.txt)
+    pre_size=$(wc -c < "$BATS_TEST_TMPDIR/work.pk3")
+    pre_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+
+    # Delete forces the rebuild path; fault makes fclose(tmpfp) fail.
+    run env PAKKA_INJECT_FAULT_AT=commit_fclose_tmp:1 \
+        "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pk3" gamma.txt
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "rebuild temp"
+
+    # On-disk archive must be exactly as it was before the failed
+    # delete. The rename never happened; the temp got removed.
+    post_size=$(wc -c < "$BATS_TEST_TMPDIR/work.pk3")
+    post_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+    [ "$pre_size" -eq "$post_size" ]
+    [ "$pre_sha" = "$post_sha" ]
+
+    # And listing it without the env var should show BOTH entries.
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"alpha.txt"* ]]
+    [[ "$output" == *"gamma.txt"* ]]
+}
+
+@test "pk3 commit: rebuild rollback after fault-injected rename" {
+    # Same H3 regression at the other end of the rebuild — the rename
+    # itself fails. Both file handles are closed before rename so the
+    # only way to leave the archive intact is to remove the temp and
+    # let the caller see the original.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "alpha" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    echo "gamma" > "$BATS_TEST_TMPDIR/src/gamma.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/work.pk3" alpha.txt gamma.txt)
+    pre_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+
+    run env PAKKA_INJECT_FAULT_AT=commit_rename:1 \
+        "$PAKKA" -d "$BATS_TEST_TMPDIR/work.pk3" gamma.txt
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "rebuild temp"
+
+    post_sha=$(openssl dgst -sha256 < "$BATS_TEST_TMPDIR/work.pk3")
+    [ "$pre_sha" = "$post_sha" ]
+
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"gamma.txt"* ]]
 }
 
 @test "pk3 commit: truncates stale EOCD comment" {

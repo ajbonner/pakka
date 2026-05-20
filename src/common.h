@@ -83,6 +83,17 @@ struct pakka_entry {
     /* Daikatana fields. Zero for PAK/SiN entries. */
     uint32_t dk_compressed_size;    /* on-disk bytes for DK compressed entries */
     uint8_t  dk_is_compressed;      /* 0 = STORED, 1 = custom byte-codec */
+
+    /* ZIP queued-add bookkeeping. When non-NULL, the entry's payload
+     * hasn't been written into the archive yet — pakka_pk3_add_file_impl
+     * staged metadata only, and pk3_commit's rebuild path will stream
+     * from the source path or in-memory buffer at commit time. Pairs
+     * exclusively (a queued entry has exactly one of source/data set,
+     * not both). Both NULL for entries loaded from the on-disk archive
+     * and for non-ZIP entries. */
+    char    *pk3_pending_source;    /* strdup'd source path */
+    void    *pk3_pending_data;      /* malloc'd payload buffer */
+    size_t   pk3_pending_data_len;  /* length of pk3_pending_data */
 };
 
 typedef struct pakka_entry Pakfileentry_t;
@@ -123,6 +134,12 @@ typedef struct {
 } pakka_pak_geometry_t;
 
 const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt);
+
+/* Release an entry plus any owned pending-add bookkeeping (ZIP queued
+ * source paths or in-memory payload buffers). Safe on NULL. Replaces
+ * raw free(entry) at every entry-release site so adding a new owned
+ * field to pakka_entry can't leak. */
+void pakka_entry_free(Pakfileentry_t *e);
 
 struct pakka_archive {
     pakka_format_t format;          /* PAKKA_FORMAT_PAK, _PK3, or _PK4 */

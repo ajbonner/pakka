@@ -743,6 +743,101 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
         }
     }
 
+    /* Pending (queued-add) entry: payload bytes aren't on pak->fp yet
+     * — they live in pk3_pending_source (file path) or pk3_pending_data
+     * (in-memory buffer). Reuse the inflated_buf machinery to serve
+     * the bytes through pakka_reader_read; the buffer is freed by
+     * pakka_reader_close just like DEFLATE inflated output. */
+    if (entry->pk3_pending_source != NULL
+        || entry->pk3_pending_data != NULL) {
+        unsigned char *buf;
+        uint32_t plen = entry->pk3_compressed_size;
+        if (plen == 0) {
+            /* Empty payload: leave inflated_buf NULL and report
+             * zero remaining bytes; reader_read returns 0 immediately. */
+            reader->remaining = 0;
+            return PAKKA_OK;
+        }
+        buf = malloc(plen);
+        if (buf == NULL) {
+            return pk3_err_fill(err, PAKKA_ERR_NOMEM,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
+                                "Cannot allocate pending-entry buffer "
+                                "for %s (%u bytes)",
+                                entry->filename, (unsigned)plen);
+        }
+        if (entry->pk3_pending_source != NULL) {
+            /* Same source-side hardening commit applies — refuse to
+             * follow a symlink or read from a non-regular file even
+             * for in-process read-after-add. Distinguish stat failure
+             * (PAKKA_ERR_IO with the underlying errno — source might
+             * have been deleted or permission-revoked) from a found
+             * symlink / non-regular file (PAKKA_ERR_UNSAFE_NAME). */
+            {
+                struct stat sb;
+                if (pakka_compat_is_reparse_or_symlink(
+                        entry->pk3_pending_source)) {
+                    free(buf);
+                    return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                                        PAKKA_ERR_DOMAIN_NONE, 0,
+                                        "open_entry",
+                                        "Pending source %s is now a "
+                                        "symlink/reparse point",
+                                        entry->pk3_pending_source);
+                }
+                if (pakka_compat_lstat(
+                        entry->pk3_pending_source, &sb) != 0) {
+                    int saved_errno = errno;
+                    free(buf);
+                    return pk3_err_fill(err, PAKKA_ERR_IO,
+                                        PAKKA_ERR_DOMAIN_ERRNO,
+                                        (uint32_t)saved_errno,
+                                        "open_entry",
+                                        "Cannot stat pending source %s",
+                                        entry->pk3_pending_source);
+                }
+                if (!S_ISREG(sb.st_mode)) {
+                    free(buf);
+                    return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                                        PAKKA_ERR_DOMAIN_NONE, 0,
+                                        "open_entry",
+                                        "Pending source %s is no longer "
+                                        "a regular file",
+                                        entry->pk3_pending_source);
+                }
+            }
+            {
+                FILE *src = fopen(entry->pk3_pending_source, "rb");
+                if (src == NULL) {
+                    int saved_errno = errno;
+                    free(buf);
+                    return pk3_err_fill(err, PAKKA_ERR_IO,
+                                        PAKKA_ERR_DOMAIN_ERRNO,
+                                        (uint32_t)saved_errno, "open_entry",
+                                        "Cannot reopen pending source %s",
+                                        entry->pk3_pending_source);
+                }
+                if (fread(buf, 1, plen, src) != plen) {
+                    int saved_errno = errno;
+                    fclose(src);
+                    free(buf);
+                    return pk3_err_fill(err, PAKKA_ERR_IO,
+                                        PAKKA_ERR_DOMAIN_ERRNO,
+                                        (uint32_t)saved_errno, "open_entry",
+                                        "Short read from pending source %s",
+                                        entry->pk3_pending_source);
+                }
+                fclose(src);
+            }
+        } else {
+            memcpy(buf, entry->pk3_pending_data, plen);
+        }
+        reader->inflated_buf = buf;
+        reader->inflated_len = plen;
+        reader->inflated_cursor = 0;
+        return PAKKA_OK;
+    }
+
     /* STORED entries: nothing to inflate, reader streams directly. */
     if (entry->pk3_method == PK3_METHOD_STORED) {
         return PAKKA_OK;
@@ -891,6 +986,16 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
     uint32_t crc;
     pakka_status_t s;
     int rc;
+
+    /* Pending (queued-add) entry: payload isn't on pak->fp yet. The
+     * CRC32 was computed at add time; with no on-disk bytes to
+     * cross-check there's nothing meaningful for deep verify to do.
+     * Skip cleanly — caller can re-run after commit. */
+    if (entry->pk3_pending_source != NULL
+        || entry->pk3_pending_data != NULL) {
+        (void)pak;
+        return PAKKA_OK;
+    }
 
     /* Enforce the same decompressed-size cap that pakka_open_entry
      * applies. --verify --deep on a hostile archive can otherwise force
@@ -1083,27 +1188,24 @@ pakka_status_t pakka_pk3_create_impl(Pak_t *pak, pakka_error_t *err) {
     return PAKKA_OK;
 }
 
-/* Preflight: allocate + fill an entry node, validate sizes, seek to
- * pk3_cdr_offset (overwriting any prior CDR+EOCD), and write
- * LFH + name. Does NOT yet link the entry or mark dirty — the caller
- * still has to stream the payload, and we want to roll back cleanly
- * if THAT fails. On success, *out_entry is the unlinked node; the
- * caller fills in pk3_cdr_offset and links it after payload succeeds.
- * On failure, no on-disk state changes that aren't restored. */
-static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
-                                               const char *entry_name,
-                                               size_t name_len,
-                                               uint32_t crc,
-                                               uint64_t payload_len,
-                                               Pakfileentry_t **out_entry,
-                                               pakka_error_t *err) {
-    unsigned char lfh[PK3_LFH_SIZE];
+/* Allocate + fill an entry with ZIP STORED metadata, leaving on-disk
+ * offsets as 0. Called from add_file / add_memory. The caller is
+ * responsible for stashing the payload source (pk3_pending_source for
+ * a file, pk3_pending_data for an in-memory buffer) and linking the
+ * entry into pak->head. Sets dirty + needs_rebuild on the archive so
+ * commit drives the temp-file rebuild that actually publishes the
+ * bytes. Atomic-add semantics: pak->fp is never mutated until commit
+ * succeeds and the temp file is renamed over the original. */
+static pakka_status_t pk3_alloc_pending_entry(Pak_t *pak,
+                                              const char *entry_name,
+                                              size_t name_len,
+                                              uint32_t crc,
+                                              uint64_t payload_len,
+                                              Pakfileentry_t **out_entry,
+                                              pakka_error_t *err) {
     Pakfileentry_t *entry;
-    uint32_t lfh_offset = pak->pk3_cdr_offset;
-    uint64_t new_eof;
-    int saved_errno;
-
     *out_entry = NULL;
+    (void)pak;
 
     /* ZIP non-ZIP64 limit: every per-entry size field is u32. */
     if (payload_len > 0xFFFFFFFFu) {
@@ -1113,16 +1215,7 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
                             "exceeds 4 GiB ZIP non-ZIP64 limit",
                             entry_name, payload_len);
     }
-    new_eof = (uint64_t)lfh_offset + (uint64_t)PK3_LFH_SIZE
-            + (uint64_t)name_len + payload_len;
-    if (new_eof > 0xFFFFFFFFu) {
-        return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
-                            "add",
-                            "ZIP would grow past 4 GiB non-ZIP64 limit");
-    }
 
-    /* Allocate before any file mutation so an ENOMEM here doesn't
-     * leave a half-written LFH on disk. */
     entry = calloc(1, sizeof(*entry));
     if (entry == NULL) {
         return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -1134,41 +1227,19 @@ static pakka_status_t pk3_prepare_stored_entry(Pak_t *pak,
     entry->pk3_crc32 = crc;
     entry->pk3_compressed_size = (uint32_t)payload_len;
     entry->length = (uint32_t)payload_len;
-    entry->pk3_lfh_offset = lfh_offset;
-    entry->pk3_payload_offset = lfh_offset + PK3_LFH_SIZE + (uint32_t)name_len;
-    entry->offset = entry->pk3_payload_offset;
-
-    if (pakka_compat_fseek(pak->fp, (int64_t)lfh_offset, SEEK_SET) != 0) {
-        saved_errno = errno;
-        free(entry);
-        return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add",
-                            "Cannot seek to ZIP CDR start for LFH write");
-    }
-
-    pk3_build_lfh(lfh, crc, (uint32_t)payload_len, (uint32_t)payload_len,
-                  (uint16_t)name_len);
-    if (fwrite(lfh, 1, PK3_LFH_SIZE, pak->fp) != PK3_LFH_SIZE
-        || fwrite(entry_name, 1, name_len, pak->fp) != name_len) {
-        saved_errno = errno;
-        free(entry);
-        /* Disk state is partial. The in-memory list isn't mutated
-         * because we haven't linked entry; pak->pk3_cdr_offset still
-         * points at lfh_offset, so a retry will overwrite the partial
-         * LFH cleanly. dirty remains as it was, so pakka_close won't
-         * commit a broken archive on top of this failure. */
-        return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add",
-                            "Cannot write ZIP LFH for %s", entry_name);
-    }
+    /* lfh / payload offsets are computed by the rebuild commit loop —
+     * leave them 0 until then. Reads against a pending entry through
+     * pak->fp would point at the wrong file, so pakka_open_entry must
+     * also skip pending entries. */
 
     *out_entry = entry;
     return PAKKA_OK;
 }
 
-/* Link a freshly-written entry into the archive's list and advance
- * pk3_cdr_offset. Called only after payload write has succeeded. */
-static void pk3_commit_stored_entry(Pak_t *pak, Pakfileentry_t *entry) {
+/* Link a queued entry into the in-memory list (appended at the tail
+ * to preserve add order in the committed CDR), then mark the archive
+ * dirty + needing rebuild. */
+static void pk3_link_pending_entry(Pak_t *pak, Pakfileentry_t *entry) {
     Pakfileentry_t *tail;
     if (pak->head == NULL) {
         pak->head = entry;
@@ -1177,8 +1248,8 @@ static void pk3_commit_stored_entry(Pak_t *pak, Pakfileentry_t *entry) {
         tail->next = entry;
     }
     pak->num_entries++;
-    pak->pk3_cdr_offset = entry->pk3_payload_offset + entry->pk3_compressed_size;
     pak->dirty = 1;
+    pak->needs_rebuild = 1;
 }
 
 pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
@@ -1202,8 +1273,11 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
                             name_len, (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
     }
 
-    /* First pass: compute CRC32 and total size. total is uint64_t so
-     * 32-bit hosts can't wrap before the 4 GiB cap check. */
+    /* Scan the source to compute CRC32 and size up-front. ZIP non-
+     * ZIP64 caps every per-entry size field at u32; total is uint64_t
+     * so 32-bit hosts can't silently wrap before the cap check. The
+     * payload bytes themselves are read again at commit time — atomic
+     * add cost is one extra full read per source file. */
     src = fopen(source_path, "rb");
     if (src == NULL) {
         saved_errno = errno;
@@ -1229,48 +1303,19 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
                             (uint32_t)saved_errno, "add",
                             "Read error on %s", source_path);
     }
-
-    /* Two-phase write: prepare (allocate entry, write LFH+name),
-     * stream payload, commit (link entry, advance pk3_cdr_offset). */
-    s = pk3_prepare_stored_entry(pak, entry_name, name_len, crc, total,
-                                 &entry, err);
-    if (s != PAKKA_OK) {
-        fclose(src);
-        return s;
-    }
-
-    /* Second pass: stream payload from start of source. The prepare
-     * helper left the file pointer at the payload offset. */
-    if (pakka_compat_fseek(src, 0, SEEK_SET) != 0) {
-        saved_errno = errno;
-        free(entry);
-        fclose(src);
-        return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add",
-                            "Cannot rewind source %s", source_path);
-    }
-    while ((got = fread(buf, 1, sizeof(buf), src)) > 0) {
-        if (fwrite(buf, 1, got, pak->fp) != got) {
-            saved_errno = errno;
-            free(entry);
-            fclose(src);
-            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                                (uint32_t)saved_errno, "add",
-                                "Cannot stream payload to ZIP");
-        }
-    }
-    if (ferror(src)) {
-        saved_errno = errno;
-        free(entry);
-        fclose(src);
-        return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add",
-                            "Read error on %s during payload streaming",
-                            source_path);
-    }
     fclose(src);
 
-    pk3_commit_stored_entry(pak, entry);
+    s = pk3_alloc_pending_entry(pak, entry_name, name_len, crc, total,
+                                &entry, err);
+    if (s != PAKKA_OK) return s;
+
+    entry->pk3_pending_source = pakka_compat_strdup(source_path);
+    if (entry->pk3_pending_source == NULL) {
+        pakka_entry_free(entry);
+        return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "add", "Cannot store pending source path");
+    }
+    pk3_link_pending_entry(pak, entry);
     return PAKKA_OK;
 }
 
@@ -1282,7 +1327,6 @@ pakka_status_t pakka_pk3_add_memory_impl(Pak_t *pak,
     size_t name_len = strlen(entry_name);
     Pakfileentry_t *entry;
     pakka_status_t s;
-    int saved_errno;
 
     if (name_len >= PAKKA_ENTRY_NAME_SIZE) {
         return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -1295,24 +1339,66 @@ pakka_status_t pakka_pk3_add_memory_impl(Pak_t *pak,
         ? pk3_crc32_update(0, (const unsigned char *)data, len)
         : 0;
 
-    s = pk3_prepare_stored_entry(pak, entry_name, name_len, crc,
-                                 (uint64_t)len, &entry, err);
+    s = pk3_alloc_pending_entry(pak, entry_name, name_len, crc,
+                                (uint64_t)len, &entry, err);
     if (s != PAKKA_OK) return s;
 
-    if (len > 0 && fwrite(data, 1, len, pak->fp) != len) {
-        saved_errno = errno;
-        free(entry);
-        return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add",
-                            "Cannot write ZIP memory payload");
+    /* Take an owned copy of the caller's buffer. The caller is free
+     * to mutate or free `data` after this returns; commit reads from
+     * the copy. malloc(0) is implementation-defined, so allocate a
+     * zero-sized payload via NULL — pk3_pending_data_len == 0 is the
+     * marker for an empty pending entry. */
+    if (len > 0) {
+        entry->pk3_pending_data = malloc(len);
+        if (entry->pk3_pending_data == NULL) {
+            pakka_entry_free(entry);
+            return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                                "add", "Cannot copy memory payload");
+        }
+        memcpy(entry->pk3_pending_data, data, len);
+        entry->pk3_pending_data_len = len;
+    } else {
+        /* Empty payload still needs the "pending" mark so commit's
+         * rebuild loop knows not to fall through to the live-stream
+         * branch. Use a non-NULL sentinel via a single zero byte. */
+        entry->pk3_pending_data = malloc(1);
+        if (entry->pk3_pending_data == NULL) {
+            pakka_entry_free(entry);
+            return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                                "add", "Cannot tag empty pending entry");
+        }
+        ((char *)entry->pk3_pending_data)[0] = '\0';
+        entry->pk3_pending_data_len = 0;
     }
-    pk3_commit_stored_entry(pak, entry);
+    pk3_link_pending_entry(pak, entry);
     return PAKKA_OK;
 }
 
 /* ------------------------------------------------------------------ */
 /* Commit: rewrite CDR + EOCD at pak->pk3_cdr_offset.                 */
 /* ------------------------------------------------------------------ */
+
+/* Restore the per-entry offset triplet plus pk3_cdr_offset from a
+ * snapshot taken before the rebuild copy loop began. Called on any
+ * pre-rename failure so the in-memory archive layout still matches
+ * the unchanged on-disk file. Iterates by list order — the snapshot
+ * was taken in list order and the list isn't reshuffled during the
+ * copy. */
+static void pk3_rebuild_rollback_offsets(Pak_t *pak,
+                                         const uint32_t *old_lfh,
+                                         const uint32_t *old_payload,
+                                         const uint32_t *old_offset_field,
+                                         uint32_t old_cdr_offset) {
+    Pakfileentry_t *e;
+    size_t i = 0;
+    for (e = pak->head; e != NULL; e = e->next) {
+        e->pk3_lfh_offset = old_lfh[i];
+        e->pk3_payload_offset = old_payload[i];
+        e->offset = old_offset_field[i];
+        i++;
+    }
+    pak->pk3_cdr_offset = old_cdr_offset;
+}
 
 pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *e;
@@ -1344,20 +1430,64 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
      *
      * For an is_new archive, the rebuild temp replaces pak->tmp_pakpath
      * (NOT pak->new_pakpath) — pakka_close still owns the final
-     * tmp → new_pakpath rename. Mirrors the PAK rebuild flow. */
+     * tmp → new_pakpath rename. Mirrors the PAK rebuild flow.
+     *
+     * Rollback semantics: in-memory entry offsets are snapshotted
+     * before the copy loop. Any failure BEFORE the rename succeeds
+     * restores the snapshot so the caller (and a subsequent open)
+     * still sees the pre-commit layout. After the rename succeeds the
+     * temp IS the canonical file, so post-publish failures (reopen,
+     * post-rebuild seek) keep the new offsets — restoring would lie
+     * about what's on disk. */
     if (pak->needs_rebuild) {
         FILE *tmpfp;
         char tmp_path[OS_PATH_MAX];
         unsigned char copy_buf[PAKFILE_COPY_CHUNK];
         uint32_t cur_offset;
+        uint32_t *old_lfh = NULL;
+        uint32_t *old_payload = NULL;
+        uint32_t *old_offset_field = NULL;
+        uint32_t old_cdr_offset = pak->pk3_cdr_offset;
+        size_t n_entries = 0;
+        size_t i;
         const char *dest_for_rename = pak->is_new ? pak->tmp_pakpath
                                                   : pak->cur_pakpath;
+
+        for (e = pak->head; e != NULL; e = e->next) {
+            n_entries++;
+        }
+        if (n_entries > 0) {
+            old_lfh = malloc(sizeof(*old_lfh) * n_entries);
+            old_payload = malloc(sizeof(*old_payload) * n_entries);
+            old_offset_field = malloc(sizeof(*old_offset_field)
+                                      * n_entries);
+            if (old_lfh == NULL || old_payload == NULL
+                || old_offset_field == NULL) {
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
+                return pk3_err_fill(err, PAKKA_ERR_NOMEM,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                                    "Cannot allocate ZIP rebuild "
+                                    "rollback buffers");
+            }
+            i = 0;
+            for (e = pak->head; e != NULL; e = e->next) {
+                old_lfh[i] = e->pk3_lfh_offset;
+                old_payload[i] = e->pk3_payload_offset;
+                old_offset_field[i] = e->offset;
+                i++;
+            }
+        }
 
         if (! (tmpfp = pakka_compat_mkstemp_open(dest_for_rename,
                                               "pakkaXXXXXX",
                                               tmp_path,
                                               sizeof(tmp_path)))) {
             saved_errno = errno;
+            free(old_lfh);
+            free(old_payload);
+            free(old_offset_field);
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
                                 "Cannot create ZIP rebuild temp file");
@@ -1367,18 +1497,49 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         for (e = pak->head; e != NULL; e = e->next) {
             unsigned char lfh[PK3_LFH_SIZE];
             uint64_t remaining;
+            uint64_t per_entry_extent;
 
             /* Build a fresh LFH at the new offset; sizes/CRC are
              * verbatim from the entry. Name length comes from
              * strlen(filename). */
             uint16_t name_len = (uint16_t)strlen(e->filename);
+
+            /* Per-entry size check against the u32 cap. cur_offset is
+             * u32; without this guard a sequence of pending adds whose
+             * lfh + name + payload exceeds 4 GiB would silently wrap
+             * and emit overlapping LFH offsets. */
+            per_entry_extent = (uint64_t)PK3_LFH_SIZE
+                             + (uint64_t)name_len
+                             + (uint64_t)e->pk3_compressed_size;
+            if ((uint64_t)cur_offset + per_entry_extent > 0xFFFFFFFFu) {
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
+                fclose(tmpfp);
+                remove(tmp_path);
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
+                return pk3_err_fill(err, PAKKA_ERR_LIMIT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                                    "ZIP payload section would push past "
+                                    "4 GiB non-ZIP64 limit at entry %s",
+                                    e->filename);
+            }
+
             pk3_build_lfh(lfh, e->pk3_crc32, e->pk3_compressed_size,
                           e->length, name_len);
             if (fwrite(lfh, 1, PK3_LFH_SIZE, tmpfp) != PK3_LFH_SIZE
                 || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
                 saved_errno = errno;
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
                 fclose(tmpfp);
                 remove(tmp_path);
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
                 return pk3_err_fill(err, PAKKA_ERR_IO,
                                     PAKKA_ERR_DOMAIN_ERRNO,
                                     (uint32_t)saved_errno, "commit",
@@ -1386,46 +1547,272 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                     e->filename);
             }
 
-            /* Stream payload bytes from the original file. */
-            if (pakka_compat_fseek(pak->fp, (int64_t)e->pk3_payload_offset, SEEK_SET) != 0) {
-                saved_errno = errno;
-                fclose(tmpfp);
-                remove(tmp_path);
-                return pk3_err_fill(err, PAKKA_ERR_IO,
-                                    PAKKA_ERR_DOMAIN_ERRNO,
-                                    (uint32_t)saved_errno, "commit",
-                                    "Cannot seek source for rebuild");
-            }
-            remaining = e->pk3_compressed_size;
-            while (remaining > 0) {
-                size_t want = remaining > sizeof(copy_buf)
-                    ? sizeof(copy_buf) : (size_t)remaining;
-                size_t got = fread(copy_buf, 1, want, pak->fp);
-                if (got != want) {
+            /* Stream payload bytes. Three sources, in priority order:
+             *   1. pk3_pending_source != NULL — queued file add, open
+             *      the source path and stream from it
+             *   2. pk3_pending_data != NULL — queued memory add, copy
+             *      from the buffer (length lives in pk3_pending_data_len;
+             *      a 1-byte sentinel buffer represents a 0-byte payload)
+             *   3. neither set — entry from the on-disk archive, stream
+             *      from pak->fp at its current pk3_payload_offset
+             *
+             * Cases 1 and 2 are how H2's atomic add works: pak->fp
+             * isn't mutated until commit succeeds and the temp file is
+             * renamed over the original. */
+            if (e->pk3_pending_source != NULL) {
+                /* Re-run the source-side hardening that ran at add
+                 * time. The source path is caller-supplied and might
+                 * have been swapped for a symlink between add and
+                 * commit (TOCTOU). A clean failure here beats writing
+                 * the target's bytes under the original entry name. */
+                {
+                    struct stat sb;
+                    /* Same three-way split as open_entry: symlink ->
+                     * UNSAFE_NAME, stat failure -> IO/ERRNO, non-regular
+                     * -> UNSAFE_NAME. */
+                    if (pakka_compat_is_reparse_or_symlink(
+                            e->pk3_pending_source)) {
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                                            PAKKA_ERR_DOMAIN_NONE, 0,
+                                            "commit",
+                                            "Pending source %s for %s "
+                                            "is now a symlink/reparse "
+                                            "point",
+                                            e->pk3_pending_source,
+                                            e->filename);
+                    }
+                    if (pakka_compat_lstat(e->pk3_pending_source,
+                                           &sb) != 0) {
+                        saved_errno = errno;
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_IO,
+                                            PAKKA_ERR_DOMAIN_ERRNO,
+                                            (uint32_t)saved_errno,
+                                            "commit",
+                                            "Cannot stat pending source "
+                                            "%s for %s",
+                                            e->pk3_pending_source,
+                                            e->filename);
+                    }
+                    if (!S_ISREG(sb.st_mode)) {
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                                            PAKKA_ERR_DOMAIN_NONE, 0,
+                                            "commit",
+                                            "Pending source %s for %s "
+                                            "is no longer a regular "
+                                            "file",
+                                            e->pk3_pending_source,
+                                            e->filename);
+                    }
+                    /* Reject a source whose total size differs from
+                     * what add saw. Catches the grow-with-same-prefix
+                     * case the CRC alone misses: a source that grew
+                     * keeps the same first N bytes (and CRC) but the
+                     * archive would silently publish a truncated copy
+                     * of the new file. */
+                    if ((uint64_t)sb.st_size
+                        != (uint64_t)e->pk3_compressed_size) {
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                            PAKKA_ERR_DOMAIN_NONE, 0,
+                                            "commit",
+                                            "Pending source %s for %s "
+                                            "changed size between add "
+                                            "and commit (now %lld, was %u)",
+                                            e->pk3_pending_source,
+                                            e->filename,
+                                            (long long)sb.st_size,
+                                            (unsigned)e->pk3_compressed_size);
+                    }
+                }
+                {
+                    FILE *src = fopen(e->pk3_pending_source, "rb");
+                    uint32_t recomputed_crc = 0;
+                    if (src == NULL) {
+                        saved_errno = errno;
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_IO,
+                                            PAKKA_ERR_DOMAIN_ERRNO,
+                                            (uint32_t)saved_errno, "commit",
+                                            "Cannot reopen pending source %s "
+                                            "for %s",
+                                            e->pk3_pending_source,
+                                            e->filename);
+                    }
+                    remaining = e->pk3_compressed_size;
+                    while (remaining > 0) {
+                        size_t want = remaining > sizeof(copy_buf)
+                            ? sizeof(copy_buf) : (size_t)remaining;
+                        size_t got = fread(copy_buf, 1, want, src);
+                        if (got != want
+                            || fwrite(copy_buf, 1, got, tmpfp) != got) {
+                            saved_errno = errno;
+                            fclose(src);
+                            pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                         old_offset_field,
+                                                         old_cdr_offset);
+                            fclose(tmpfp);
+                            remove(tmp_path);
+                            free(old_lfh);
+                            free(old_payload);
+                            free(old_offset_field);
+                            return pk3_err_fill(err, PAKKA_ERR_IO,
+                                                PAKKA_ERR_DOMAIN_ERRNO,
+                                                (uint32_t)saved_errno, "commit",
+                                                "Stream from pending source "
+                                                "%s failed for %s",
+                                                e->pk3_pending_source,
+                                                e->filename);
+                        }
+                        recomputed_crc = pk3_crc32_update(recomputed_crc,
+                                                         copy_buf,
+                                                         (size_t)got);
+                        remaining -= (uint64_t)got;
+                    }
+                    fclose(src);
+                    /* Refuse to publish stale-source bytes under the
+                     * CRC we stored at add time. Catches a source file
+                     * modified between add and commit — without this
+                     * the archive committed valid bytes paired with a
+                     * stale CRC, and downstream verifiers would flag
+                     * it as corrupt. */
+                    if (recomputed_crc != e->pk3_crc32) {
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                            PAKKA_ERR_DOMAIN_NONE, 0,
+                                            "commit",
+                                            "Pending source %s for %s "
+                                            "changed between add and "
+                                            "commit (CRC 0x%08x vs 0x%08x)",
+                                            e->pk3_pending_source,
+                                            e->filename,
+                                            recomputed_crc, e->pk3_crc32);
+                    }
+                }
+            } else if (e->pk3_pending_data != NULL) {
+                if (e->pk3_pending_data_len > 0
+                    && fwrite(e->pk3_pending_data, 1,
+                              e->pk3_pending_data_len, tmpfp)
+                       != e->pk3_pending_data_len) {
                     saved_errno = errno;
+                    pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                 old_offset_field,
+                                                 old_cdr_offset);
                     fclose(tmpfp);
                     remove(tmp_path);
+                    free(old_lfh);
+                    free(old_payload);
+                    free(old_offset_field);
                     return pk3_err_fill(err, PAKKA_ERR_IO,
                                         PAKKA_ERR_DOMAIN_ERRNO,
                                         (uint32_t)saved_errno, "commit",
-                                        "Short read on rebuild for %s",
+                                        "Write pending data failed for %s",
                                         e->filename);
                 }
-                if (fwrite(copy_buf, 1, got, tmpfp) != got) {
+            } else {
+                if (pakka_compat_fseek(pak->fp, (int64_t)e->pk3_payload_offset, SEEK_SET) != 0) {
                     saved_errno = errno;
+                    pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                 old_offset_field,
+                                                 old_cdr_offset);
                     fclose(tmpfp);
                     remove(tmp_path);
+                    free(old_lfh);
+                    free(old_payload);
+                    free(old_offset_field);
                     return pk3_err_fill(err, PAKKA_ERR_IO,
                                         PAKKA_ERR_DOMAIN_ERRNO,
                                         (uint32_t)saved_errno, "commit",
-                                        "Short write on rebuild for %s",
-                                        e->filename);
+                                        "Cannot seek source for rebuild");
                 }
-                remaining -= (uint64_t)got;
+                remaining = e->pk3_compressed_size;
+                while (remaining > 0) {
+                    size_t want = remaining > sizeof(copy_buf)
+                        ? sizeof(copy_buf) : (size_t)remaining;
+                    size_t got = fread(copy_buf, 1, want, pak->fp);
+                    if (got != want) {
+                        saved_errno = errno;
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_IO,
+                                            PAKKA_ERR_DOMAIN_ERRNO,
+                                            (uint32_t)saved_errno, "commit",
+                                            "Short read on rebuild for %s",
+                                            e->filename);
+                    }
+                    if (fwrite(copy_buf, 1, got, tmpfp) != got) {
+                        saved_errno = errno;
+                        pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                     old_offset_field,
+                                                     old_cdr_offset);
+                        fclose(tmpfp);
+                        remove(tmp_path);
+                        free(old_lfh);
+                        free(old_payload);
+                        free(old_offset_field);
+                        return pk3_err_fill(err, PAKKA_ERR_IO,
+                                            PAKKA_ERR_DOMAIN_ERRNO,
+                                            (uint32_t)saved_errno, "commit",
+                                            "Short write on rebuild for %s",
+                                            e->filename);
+                    }
+                    remaining -= (uint64_t)got;
+                }
             }
 
             /* Update the in-memory entry to point at the new file's
-             * offsets — the old ones become invalid once we rename. */
+             * offsets. Snapshot in old_*[] still holds the pre-commit
+             * values so a later pre-rename failure can restore them. */
             e->pk3_lfh_offset = cur_offset;
             e->pk3_payload_offset = cur_offset + PK3_LFH_SIZE
                                   + (uint32_t)name_len;
@@ -1435,39 +1822,180 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
 
         pak->pk3_cdr_offset = cur_offset;
 
+        /* Write CDR + EOCD into the temp BEFORE renaming. Pre-rename
+         * placement means a failure here rolls back cleanly via the
+         * existing rollback path (offsets restored, temp removed,
+         * original archive untouched). The previous design wrote
+         * CDR/EOCD into pak->fp AFTER the rename, leaving the on-disk
+         * archive incomplete if any of the writes failed — a
+         * disk-full event at the worst moment could publish a renamed
+         * temp containing only LFH+payload bytes with no central
+         * directory. */
+        {
+            uint64_t total = (uint64_t)pak->pk3_cdr_offset
+                             + (uint64_t)PK3_EOCD_SIZE;
+            for (e = pak->head; e != NULL; e = e->next) {
+                total += (uint64_t)PK3_CDR_SIZE
+                         + (uint64_t)strlen(e->filename);
+                if (total > UINT32_MAX) {
+                    pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                                 old_offset_field,
+                                                 old_cdr_offset);
+                    fclose(tmpfp);
+                    remove(tmp_path);
+                    free(old_lfh);
+                    free(old_payload);
+                    free(old_offset_field);
+                    return pk3_err_fill(err, PAKKA_ERR_LIMIT,
+                                        PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                                        "ZIP CDR + EOCD would push file "
+                                        "past 4 GiB");
+                }
+            }
+        }
+        for (e = pak->head; e != NULL; e = e->next) {
+            uint16_t name_len = (uint16_t)strlen(e->filename);
+            pk3_build_cdr(cdr, e->pk3_crc32, e->pk3_compressed_size,
+                          e->length, name_len, e->pk3_lfh_offset);
+            if (fwrite(cdr, 1, PK3_CDR_SIZE, tmpfp) != PK3_CDR_SIZE
+                || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
+                saved_errno = errno;
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
+                fclose(tmpfp);
+                remove(tmp_path);
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
+                return pk3_err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)saved_errno, "commit",
+                                    "Cannot write rebuild CDR entry %s",
+                                    e->filename);
+            }
+            cdr_size += PK3_CDR_SIZE + name_len;
+            entry_count++;
+        }
+        pk3_build_eocd(eocd, pak->pk3_cdr_offset, cdr_size,
+                       (uint16_t)entry_count);
+        if (fwrite(eocd, 1, PK3_EOCD_SIZE, tmpfp) != PK3_EOCD_SIZE) {
+            saved_errno = errno;
+            pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                         old_offset_field, old_cdr_offset);
+            fclose(tmpfp);
+            remove(tmp_path);
+            free(old_lfh);
+            free(old_payload);
+            free(old_offset_field);
+            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "commit",
+                                "Cannot write rebuild EOCD");
+        }
+        if (fflush(tmpfp) != 0) {
+            saved_errno = errno;
+            pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                         old_offset_field, old_cdr_offset);
+            fclose(tmpfp);
+            remove(tmp_path);
+            free(old_lfh);
+            free(old_payload);
+            free(old_offset_field);
+            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "commit",
+                                "Cannot flush rebuild temp before rename");
+        }
+
         /* Close BOTH file handles before renaming. Windows CRT fopen
          * omits FILE_SHARE_DELETE so MoveFileExA blocks while either
          * handle is live. Check fclose() errors before the rename so
          * buffered-write failures on either file surface here rather
          * than after we've published the temp. */
-        if (fclose(tmpfp) != 0) {
-            saved_errno = errno;
-            remove(tmp_path);
-            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                                (uint32_t)saved_errno, "commit",
-                                "Cannot close ZIP rebuild temp before rename");
+        /* fclose-with-fault: always close first, then let the fault
+         * hook override the success code. Skipping the close on a
+         * fault-injected branch would leak the handle. */
+        {
+            int close_rc = fclose(tmpfp);
+            if (PAKKA_FAULT_CHECK("commit_fclose_tmp")) {
+                close_rc = -1;
+                errno = EIO;
+            }
+            if (close_rc != 0) {
+                saved_errno = errno ? errno : EIO;
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
+                remove(tmp_path);
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
+                return pk3_err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)saved_errno, "commit",
+                                    "Cannot close ZIP rebuild temp "
+                                    "before rename");
+            }
         }
-        if (fclose(pak->fp) != 0) {
-            saved_errno = errno;
-            remove(tmp_path);
+        {
+            int close_rc = fclose(pak->fp);
+            if (PAKKA_FAULT_CHECK("commit_fclose_orig")) {
+                close_rc = -1;
+                errno = EIO;
+            }
             pak->fp = NULL;
-            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                                (uint32_t)saved_errno, "commit",
-                                "Cannot close original ZIP before rename");
+            if (close_rc != 0) {
+                saved_errno = errno ? errno : EIO;
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
+                remove(tmp_path);
+                /* Restore the original archive's handle so the caller
+                 * keeps a readable archive after a failed commit —
+                 * matches the rename-failure recovery path below. */
+                pak->fp = fopen(pak->is_new ? pak->tmp_pakpath
+                                            : pak->cur_pakpath, "r+b");
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
+                return pk3_err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)saved_errno, "commit",
+                                    "Cannot close original ZIP "
+                                    "before rename");
+            }
         }
-        pak->fp = NULL;
         {
             uint32_t win32_code = 0;
+            int rc;
             /* For is_new: rename rebuild temp over the create temp
              * (pak->tmp_pakpath). pakka_close finishes the
              * tmp_pakpath → new_pakpath rename. For an existing
              * archive: rename rebuild temp over cur_pakpath. */
-            int rc = pak->is_new
-                ? pakka_compat_rename_replace(tmp_path, pak->tmp_pakpath, &win32_code)
-                : pakka_compat_rename_replace(tmp_path, pak->cur_pakpath, &win32_code);
+            if (PAKKA_FAULT_CHECK("commit_rename")) {
+                rc = -1;
+                errno = EIO;
+            } else {
+                rc = pak->is_new
+                    ? pakka_compat_rename_replace(tmp_path,
+                                                  pak->tmp_pakpath,
+                                                  &win32_code)
+                    : pakka_compat_rename_replace(tmp_path,
+                                                  pak->cur_pakpath,
+                                                  &win32_code);
+            }
             if (rc != 0) {
                 saved_errno = errno;
+                pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
+                                             old_offset_field,
+                                             old_cdr_offset);
                 remove(tmp_path);
+                /* Try to reopen the original so the handle is at
+                 * least readable for a caller that wants to retry. */
+                pak->fp = fopen(pak->is_new ? pak->tmp_pakpath
+                                            : pak->cur_pakpath, "r+b");
+                free(old_lfh);
+                free(old_payload);
+                free(old_offset_field);
                 return pk3_err_fill(err, PAKKA_ERR_IO,
                                     win32_code ? PAKKA_ERR_DOMAIN_WIN32
                                                : PAKKA_ERR_DOMAIN_ERRNO,
@@ -1477,23 +2005,45 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                     "Cannot rename ZIP rebuild temp");
             }
         }
-        /* Re-open the renamed file for further reads. */
+
+        /* Past the rename: temp IS the canonical file. New offsets
+         * stay installed even if reopen/seek below fail — restoring
+         * would mismatch on-disk reality. Free the rollback buffers. */
+        free(old_lfh);
+        free(old_payload);
+        free(old_offset_field);
+        /* Queued adds have been consumed into the renamed file. Drop
+         * the pending source/data on every entry so subsequent ops
+         * (reads, a second commit on a new add) see them as live. */
+        for (e = pak->head; e != NULL; e = e->next) {
+            free(e->pk3_pending_source);
+            e->pk3_pending_source = NULL;
+            free(e->pk3_pending_data);
+            e->pk3_pending_data = NULL;
+            e->pk3_pending_data_len = 0;
+        }
+        /* CDR + EOCD are already in the renamed file. Reopen for future
+         * reads only; no more writes needed. file_size matches what we
+         * wrote: payload_section + cdr_size + EOCD. */
         pak->fp = fopen(pak->is_new ? pak->tmp_pakpath : pak->cur_pakpath,
                         "r+b");
         if (pak->fp == NULL) {
             saved_errno = errno;
+            /* Archive is on disk but we have no handle. Leave dirty
+             * cleared so pakka_close doesn't attempt another commit;
+             * future reads will hit the no-fp error path. */
+            pak->dirty = 0;
+            pak->needs_rebuild = 0;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
                                 "Cannot reopen committed ZIP");
         }
-        /* Seek to where CDR will be written below. */
-        if (pakka_compat_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
-            saved_errno = errno;
-            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                                (uint32_t)saved_errno, "commit",
-                                "Cannot seek to CDR start after rebuild");
-        }
+        pak->file_size = (uint64_t)pak->pk3_cdr_offset
+                       + (uint64_t)cdr_size
+                       + (uint64_t)PK3_EOCD_SIZE;
+        pak->dirty = 0;
         pak->needs_rebuild = 0;
+        return PAKKA_OK;
     } else {
         /* Add-only path: file already has fresh LFHs at the correct
          * offsets. Just seek to pk3_cdr_offset to overwrite any stale

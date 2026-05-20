@@ -12,6 +12,21 @@ TARGET=pakka
 # _FILE_OFFSET_BITS=64 — widens off_t / fseeko / ftello on 32-bit glibc
 # so pakka_compat_fseek/ftell can address the [2 GiB, 4 GiB) range.
 CPPFLAGS = -Iinclude -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
+
+# Opt-in fault-injection hook (PAKKA_INJECT_FAULT_AT="op:N" env var,
+# read by pakka_test_should_fault in src/compat.c). Compiled into
+# binaries only when the user invokes a test target, so a plain
+# `make` produces a release-style build without the hook. The bats
+# suite (`make test`) gets it automatically; the c_api_test exerciser
+# and inline cc invocations link against the test-built libpakka.a
+# and pick up the hook through it. CMake / Windows release builds
+# never define PAKKA_TEST_BUILD.
+ifneq ($(filter test test-fault slow-test, $(MAKECMDGOALS)),)
+CPPFLAGS += -DPAKKA_TEST_BUILD
+PAKKA_BUILD_MODE := test
+else
+PAKKA_BUILD_MODE := prod
+endif
 CC=cc $(CPPFLAGS)
 CFLAGS=-g -Wall --std=c99 --pedantic
 AR ?= ar
@@ -19,8 +34,16 @@ AR ?= ar
 SRC_DIR=src
 INCLUDE_DIR=include
 BUILD_DIR=build
-OBJ_DIR=$(BUILD_DIR)/obj
-LIB_DIR=$(BUILD_DIR)/lib
+# Per-build-mode object + library directories. `make` and `make test`
+# compile with different CPPFLAGS (the latter adds -DPAKKA_TEST_BUILD),
+# so sharing OBJ/LIB lets the wrong-flavor .o or .a be reused after a
+# mode switch — especially painful at second-resolution mtime
+# comparisons where back-to-back builds collide. Splitting per mode
+# keeps each cache warm and avoids the ambiguity. The bats suite picks
+# up the right libpakka.a via the $LIBPAKKA env var the test target
+# passes through.
+OBJ_DIR=$(BUILD_DIR)/obj-$(PAKKA_BUILD_MODE)
+LIB_DIR=$(BUILD_DIR)/lib-$(PAKKA_BUILD_MODE)
 TEST_DIR=$(BUILD_DIR)/test
 
 SOURCES=$(wildcard $(SRC_DIR)/*.c)
@@ -65,10 +88,20 @@ PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
 .PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
 
-all: $(TARGET)
+all: force-relink $(TARGET)
+
+# Always rebuild the top-level binary and per-mode libpakka.a. GNU
+# Make 3.81 (Apple's default) compares mtimes at second resolution,
+# so back-to-back `make` ↔ `make test` invocations can land in the
+# same second and leave the wrong-flavor binary in place. The
+# per-mode .o cache still survives (build/obj-prod/ vs obj-test/), so
+# this only adds a relink — a fraction of a second.
+.PHONY: force-relink
+force-relink:
+	@rm -f $(TARGET) $(LIBPAKKA)
 
 clean:
-	rm -rf $(OBJ_DIR) $(LIB_DIR) $(TARGET)
+	rm -rf $(BUILD_DIR)/obj-* $(BUILD_DIR)/lib-* $(TARGET)
 
 test-clean:
 	rm -rf $(TEST_DIR)/extracted $(TEST_DIR)/re_extracted $(TEST_DIR)/rebuilt.pak $(TEST_DIR)/crud $(TEST_DIR)/id1
@@ -165,8 +198,8 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
-	CFLAGS='$(CFLAGS)' bats tests/
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
+	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' bats tests/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
 # re-compute SHA256 once at vendor time and pin that here.

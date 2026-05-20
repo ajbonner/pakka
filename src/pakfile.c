@@ -150,7 +150,7 @@ static void destroy_pak(Pak_t *pak) {
     e = pak->head;
     while (e != NULL) {
         next = e->next;
-        free(e);
+        pakka_entry_free(e);
         e = next;
     }
     free(pak);
@@ -539,7 +539,7 @@ pakka_status_t pakka_close(pakka_archive_t *pak, pakka_error_t *err) {
     e = pak->head;
     while (e != NULL) {
         next = e->next;
-        free(e);
+        pakka_entry_free(e);
         e = next;
     }
 
@@ -824,7 +824,7 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
             || pakka_read_u32_le(pak->fp, &current->offset) != 0
             || pakka_read_u32_le(pak->fp, &current->length) != 0) {
             saved_errno = errno;
-            free(current);
+            pakka_entry_free(current);
             err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                      (uint32_t)saved_errno, "open",
                      "Cannot read pak directory entry %" PRIu32, i);
@@ -836,7 +836,7 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
             if (pakka_read_u32_le(pak->fp, &current->dk_compressed_size) != 0
                 || pakka_read_u32_le(pak->fp, &flag_u32) != 0) {
                 saved_errno = errno;
-                free(current);
+                pakka_entry_free(current);
                 err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                          (uint32_t)saved_errno, "open",
                          "Cannot read DK directory entry %" PRIu32
@@ -872,7 +872,7 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
             err_set_entry(err, current->filename, (size_t)i - 1,
                           (uint64_t)current->offset,
                           (uint64_t)current->length);
-            free(current);
+            pakka_entry_free(current);
             return PAKKA_ERR_FORMAT;
         }
 
@@ -1463,7 +1463,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         fclose(src_fp);
-        free(entry);
+        pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "add_file",
                         "Cannot seek to append point in pak");
@@ -1473,7 +1473,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
         bytes = malloc(PAKFILE_COPY_CHUNK);
         if (bytes == NULL) {
             fclose(src_fp);
-            free(entry);
+            pakka_entry_free(entry);
             return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
                             0, "add_file",
                             "Cannot allocate copy buffer for %s",
@@ -1487,7 +1487,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                 saved_errno = errno;
                 free(bytes);
                 fclose(src_fp);
-                free(entry);
+                pakka_entry_free(entry);
                 return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "add_file",
                                 "Cannot read %s", source_path);
@@ -1496,7 +1496,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                 saved_errno = errno;
                 free(bytes);
                 fclose(src_fp);
-                free(entry);
+                pakka_entry_free(entry);
                 return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "add_file",
                                 "Cannot append %s to pak", entry_name);
@@ -1592,14 +1592,14 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
 
     if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
-        free(entry);
+        pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "add_memory",
                         "Cannot seek to append point in pak");
     }
     if (len > 0 && fwrite(data, 1, len, archive->fp) != len) {
         saved_errno = errno;
-        free(entry);
+        pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "add_memory",
                         "Cannot append memory payload for %s", entry_name);
@@ -1760,7 +1760,7 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
             } else {
                 prev->next = current->next;
             }
-            free(current);
+            pakka_entry_free(current);
             archive->num_entries--;
             archive->dirty = 1;
             archive->needs_rebuild = 1;
@@ -2137,6 +2137,21 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
             verify_report(report, userdata, PAKKA_REPORT_INFO,
                           PAKKA_OK, current->filename,
                           "OK (0 bytes)");
+            continue;
+        }
+
+        /* Skip queued-add ZIP entries (H2): their payload isn't on
+         * pak->fp yet — it lives in pk3_pending_source/_data and gets
+         * published at commit time. A seek to pk3_payload_offset == 0
+         * would read unrelated header bytes and report spurious
+         * findings. Pending entries are visible to pakka_verify so
+         * the entry-count is honest, just without an on-disk read. */
+        if (pakka_format_is_zip(archive->format)
+            && (current->pk3_pending_source != NULL
+                || current->pk3_pending_data != NULL)) {
+            verify_report(report, userdata, PAKKA_REPORT_INFO,
+                          PAKKA_OK, current->filename,
+                          "pending add (not yet committed)");
             continue;
         }
 
