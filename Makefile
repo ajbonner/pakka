@@ -92,12 +92,19 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 # dependency vs. the 7z/unrar paths the upstream archive uploaders
 # could have chosen.
 #
-# Fixture A: Half-Life Uplink (1999 free demo). 48 MiB zip from the
-# half-life-day-one archive.org item (the same item also wraps Day
-# One and Opposing Force). Inner path Half-LifeUplink/valve/pak0.PAK
-# (uppercase extension, as Valve shipped it).
-# Fixture B: Half-Life: Day One (1998 OEM video-card-bundled demo).
-# 90 MiB zip. Inner path Half-Life Day One/valve/pak0.pak.
+# Fixture A: Half-Life Uplink (1999 free standalone demo Valve made
+# public for the launch promotion; the executable was distributed
+# free of charge). 48 MiB zip from the half-life-day-one archive.org
+# item (a community upload — pakka does not assert authorship; the
+# SHA pin and the runtime-only fetch keep us out of bundling them).
+# Inner path Half-LifeUplink/valve/pak0.PAK (uppercase extension, as
+# the original shipped).
+# Fixture B: Half-Life: Day One (1998 OEM video-card-bundled demo
+# that came with retail Voodoo cards of the period). 90 MiB zip from
+# the same archive.org item. Inner path Half-Life Day One/valve/pak0.pak.
+# Both fixtures are fetched at test time only; the SHA pin ensures
+# we run against the exact bytes we tested against. Neither file is
+# committed to this repository.
 GOLDSRC_UPLINK_URL=https://archive.org/download/half-life-day-one/Half-LifeUplink.zip
 GOLDSRC_UPLINK_SHA256=6e06a9f25d36ec12750da8f94af24a71f26af2330a665a9d4922421db4459aa4
 GOLDSRC_UPLINK_WRAPPER=$(TEST_DIR)/hl-uplink.zip

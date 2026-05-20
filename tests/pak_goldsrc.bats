@@ -55,9 +55,19 @@ skip_if_dayone_missing() {
 
 @test "goldsrc/uplink: pakka -l --format goldsrc is identical to --format pak" {
     skip_if_uplink_missing
-    pak_out=$("$PAKKA" -l --format pak "$GOLDSRC_UPLINK_PAK0")
-    gs_out=$("$PAKKA" -l --format goldsrc "$GOLDSRC_UPLINK_PAK0")
-    hl_out=$("$PAKKA" -l --format hl "$GOLDSRC_UPLINK_PAK0")
+    # Assert each invocation succeeds before asserting equality —
+    # otherwise three identically-failed commands with empty stdout
+    # would pass the equality check trivially.
+    run "$PAKKA" -l --format pak "$GOLDSRC_UPLINK_PAK0"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    pak_out="$output"
+    run "$PAKKA" -l --format goldsrc "$GOLDSRC_UPLINK_PAK0"
+    [ "$status" -eq 0 ]
+    gs_out="$output"
+    run "$PAKKA" -l --format hl "$GOLDSRC_UPLINK_PAK0"
+    [ "$status" -eq 0 ]
+    hl_out="$output"
     [ "$pak_out" = "$gs_out" ]
     [ "$pak_out" = "$hl_out" ]
 }
@@ -79,7 +89,7 @@ skip_if_dayone_missing() {
     [[ "$output" != *"WARNING"* ]]
 }
 
-@test "goldsrc/uplink: extract every entry round-trips through pakka -c" {
+@test "goldsrc/uplink: full extract materializes the GoldSrc asset families" {
     skip_if_uplink_missing
     rm -rf "$BATS_TEST_TMPDIR/uplink-out"
     mkdir -p "$BATS_TEST_TMPDIR/uplink-out"
@@ -93,17 +103,27 @@ skip_if_dayone_missing() {
     [ "$sz" -eq 3003032 ]
 }
 
-@test "goldsrc/uplink: delete one entry + rebuild matches original less that entry" {
+@test "goldsrc/uplink: delete + rebuild drops exactly the victim entry" {
     skip_if_uplink_missing
     cp "$GOLDSRC_UPLINK_PAK0" "$BATS_TEST_TMPDIR/uplink-mut.pak"
 
-    before=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak" | wc -l | tr -d ' ')
+    # Snapshot the listing before and after the delete; confirm the
+    # victim is the only entry that disappeared. This is stronger than
+    # "count went down by one" — it catches a delete that removes the
+    # wrong entry or a rebuild that drops more than the named victim.
+    before_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak")
+    before=$(echo "$before_list" | wc -l | tr -d ' ')
     # pakka -l renders "entry/name (NNN bytes)" — strip the byte suffix.
-    victim=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak" | head -n 1 | awk '{print $1}')
+    victim=$(echo "$before_list" | head -n 1 | awk '{print $1}')
+    expected=$(echo "$before_list" | grep -vF "$victim " || true)
+
     run "$PAKKA" -d "$BATS_TEST_TMPDIR/uplink-mut.pak" "$victim"
     [ "$status" -eq 0 ]
-    after=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak" | wc -l | tr -d ' ')
+
+    after_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak")
+    after=$(echo "$after_list" | wc -l | tr -d ' ')
     [ "$((before - after))" -eq 1 ]
+    [ "$after_list" = "$expected" ]
 
     run "$PAKKA" --verify "$BATS_TEST_TMPDIR/uplink-mut.pak"
     [ "$status" -eq 0 ]
@@ -144,8 +164,16 @@ EOF
 
 @test "goldsrc/dayone: --format goldsrc is identical to --format pak" {
     skip_if_dayone_missing
-    pak_out=$("$PAKKA" -l --format pak "$GOLDSRC_DAYONE_PAK0")
-    gs_out=$("$PAKKA" -l --format goldsrc "$GOLDSRC_DAYONE_PAK0")
+    # Same pattern as the Uplink alias test — assert each invocation
+    # succeeds + produces non-empty output before comparing, so two
+    # identically-failed-empty commands can't trivially pass.
+    run "$PAKKA" -l --format pak "$GOLDSRC_DAYONE_PAK0"
+    [ "$status" -eq 0 ]
+    [ -n "$output" ]
+    pak_out="$output"
+    run "$PAKKA" -l --format goldsrc "$GOLDSRC_DAYONE_PAK0"
+    [ "$status" -eq 0 ]
+    gs_out="$output"
     [ "$pak_out" = "$gs_out" ]
 }
 
