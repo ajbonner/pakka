@@ -92,13 +92,14 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
-  # Cross-arm lint. Runs clang-tidy against src/cli.c and src/compat.c
-  # under --target=x86_64-w64-mingw32 with Linux's mingw-w64 headers
-  # standing in for the MSVC SDK. Catches regressions in the _WIN32
-  # arm (compat shims, the wingetopt/dirent vendored paths, the
-  # MoveFileExA / GetLastError plumbing) without waiting for the
-  # windows-msvc job. Runs on every push so PRs that touch
-  # src/compat.c get fast feedback.
+  # Cross-arm lint. Runs clang-tidy against src/cli.c, src/compat.c,
+  # and src/pakfile.c under --target=x86_64-w64-mingw32 with Linux's
+  # mingw-w64 headers standing in for the MSVC SDK. Catches
+  # regressions in the _WIN32 arm (compat shims, the wingetopt /
+  # dirent vendored paths, the MoveFileExA / GetLastError plumbing
+  # in the rebuild commit path) without waiting for the windows-msvc
+  # job. Runs on every push so PRs that touch a Win32-aware source
+  # get fast feedback.
   lint-win32:
     runs-on: ubuntu-latest
     steps:
@@ -108,7 +109,11 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y clang-tidy mingw-w64
-      - run: make lint-win32
+      # REQUIRE_WIN32_HEADERS=1 turns the local soft-skip into a
+      # hard error: in CI the install above either landed the
+      # headers or it didn't, and a silently-skipped lint is worse
+      # than a noisy failure.
+      - run: make REQUIRE_WIN32_HEADERS=1 lint-win32
 
   # libFuzzer smoke. Builds each harness under -fsanitize=fuzzer,
   # address,undefined and runs it for 60s against the seed corpus.

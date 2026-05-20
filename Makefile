@@ -164,28 +164,42 @@ lint: lint-header lint-advisory
 	$(CLANG_TIDY) --quiet $(SOURCES) $(PUBLIC_HEADERS) -- $(CPPFLAGS) --std=c99
 
 # Cross-arm lint: run clang-tidy against the _WIN32 branch of every
-# compat-sensitive source. Linux's mingw-w64 headers stand in for
-# the MSVC SDK so we can syntax-check the Windows arm without an
-# MSVC toolchain. Catches regressions where someone touches
-# src/compat.{h,c} or the Win32-only paths in src/cli.c and ships a
-# subtle break that only the windows-msvc job would catch. Skips
-# cleanly when the cross-headers are absent (e.g. on macOS without
-# `brew install mingw-w64`). On Ubuntu the apt package `mingw-w64`
-# drops them at /usr/x86_64-w64-mingw32/include/.
+# Win32-aware source. Linux's mingw-w64 headers stand in for the
+# MSVC SDK so we can syntax-check the Windows arm without an MSVC
+# toolchain. Catches regressions where someone touches src/compat.{h,c},
+# src/cli.c's CLI path, or src/pakfile.c's PAKKA_ERR_DOMAIN_WIN32
+# rebuild branches and ships a subtle break that only the
+# windows-msvc job would catch. Targets src/cli.c + src/compat.c +
+# src/pakfile.c — the three files with non-trivial _WIN32 code.
+#
+# Skips cleanly when the cross-headers are absent (e.g. on macOS
+# without `brew install mingw-w64` — note Homebrew places them
+# under $(brew --prefix mingw-w64), not /usr; override via
+# `make WIN32_HEADERS=... lint-win32`). On Ubuntu the apt package
+# `mingw-w64` drops them at the default path.
+#
+# CI sets REQUIRE_WIN32_HEADERS=1 to fail rather than skip when
+# the headers are missing — installations there are deterministic
+# and a missing-package case is a CI bug, not user laxness.
 .PHONY: lint-win32
 WIN32_HEADERS ?= /usr/x86_64-w64-mingw32/include
 lint-win32:
 	@if [ ! -d "$(WIN32_HEADERS)" ]; then \
+		if [ "$(REQUIRE_WIN32_HEADERS)" = "1" ]; then \
+			echo "lint-win32: Mingw cross-headers required but not found at $(WIN32_HEADERS)" >&2; \
+			exit 1; \
+		fi; \
 		echo "lint-win32: Mingw cross-headers not found at $(WIN32_HEADERS)"; \
 		echo "lint-win32: install via apt-get install mingw-w64 on Linux"; \
-		echo "lint-win32: or brew install mingw-w64 on macOS; skipping"; \
+		echo "lint-win32: or brew install mingw-w64 on macOS"; \
+		echo "lint-win32: (override path with WIN32_HEADERS=... if installed elsewhere); skipping"; \
 		exit 0; \
 	fi; \
-	$(CLANG_TIDY) --quiet src/cli.c src/compat.c $(PUBLIC_HEADERS) -- \
+	$(CLANG_TIDY) --quiet src/cli.c src/compat.c src/pakfile.c $(PUBLIC_HEADERS) -- \
+		$(CPPFLAGS) \
 		--target=x86_64-w64-mingw32 \
-		-D_WIN32 \
 		-isystem $(WIN32_HEADERS) \
-		-Iinclude -Isrc -Isrc/vendor/wingetopt -Isrc/vendor/dirent \
+		-Isrc -Isrc/vendor/wingetopt -Isrc/vendor/dirent \
 		--std=c99 \
 		-Wno-pragma-pack -Wno-pragma-system-header-outside-header
 
