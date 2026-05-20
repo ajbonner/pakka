@@ -64,6 +64,9 @@
  * pakka_set_max_decompressed_size. */
 #define PK3_MAX_CDR_SIZE ((uint64_t)64u * 1024u * 1024u)
 
+/* IEEE 802.3 CRC32 lookup table — one entry per byte value. */
+#define PK3_CRC32_TABLE_SIZE 256u
+
 /* These struct tags match the opaque forward declarations in
  * include/pakka.h. Public consumers see only the tag; the full
  * definitions stay internal. */

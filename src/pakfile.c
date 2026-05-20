@@ -1006,7 +1006,6 @@ pakka_status_t pakka_open_entry(pakka_archive_t *archive,
                                 pakka_reader_t **out,
                                 pakka_error_t *err) {
     const pakka_entry_t *entry = NULL;
-    pakka_reader_t *reader;
     pakka_status_t s;
 
     if (out != NULL) {
@@ -1018,6 +1017,11 @@ pakka_status_t pakka_open_entry(pakka_archive_t *archive,
                         "pakka_open_entry: archive, entry_name, "
                         "and out must be non-NULL");
     }
+    /* Check the live-handle state BEFORE the name lookup so a closed
+     * archive surfaces the same "no live file handle" error
+     * regardless of whether the requested name exists. Without this,
+     * a closed archive + missing name returns NOT_FOUND, which is
+     * misleading. */
     if (archive->fp == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "open_entry",
@@ -1038,10 +1042,37 @@ pakka_status_t pakka_open_entry(pakka_archive_t *archive,
         return s;
     }
 
+    return pakka_open_entry_handle(archive, entry, out, err);
+}
+
+pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
+                                       const pakka_entry_t *entry,
+                                       pakka_reader_t **out,
+                                       pakka_error_t *err) {
+    pakka_reader_t *reader;
+    const char *entry_name;
+
+    if (out != NULL) {
+        *out = NULL;
+    }
+    if (archive == NULL || entry == NULL || out == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open_entry_handle",
+                        "pakka_open_entry_handle: archive, entry, "
+                        "and out must be non-NULL");
+    }
+    if (archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "open_entry_handle",
+                        "pakka_open_entry_handle: archive has no live "
+                        "file handle (closed or commit-failed)");
+    }
+    entry_name = entry->filename;
+
     reader = calloc(1, sizeof(pakka_reader_t));
     if (reader == NULL) {
         return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
-                        "open_entry",
+                        "open_entry_handle",
                         "Cannot allocate pakka_reader_t for %s",
                         entry_name);
     }
@@ -2087,6 +2118,38 @@ static void verify_report(pakka_report_fn report, void *userdata,
     report(userdata, severity, status, entry_name, buf);
 }
 
+/* Combined verify-report + first-error capture. Every error-level
+ * finding in pakka_verify needs to: notify the caller's report
+ * callback, populate the out pakka_error_t on the first error so a
+ * non-callback caller can still see a structured failure, and set
+ * the sticky first_error so the function returns the first error
+ * status rather than the last. Folding all three into one call
+ * removes ~8 lines of boilerplate per finding site (~70 LOC across
+ * pakka_verify). */
+static void verify_record_error(pakka_report_fn report, void *userdata,
+                                pakka_status_t status,
+                                pakka_error_t *err,
+                                pakka_status_t *first_error,
+                                const char *filename,
+                                pakka_error_domain_t domain,
+                                uint32_t system_code,
+                                uint64_t offset, uint64_t length,
+                                const char *fmt, ...) {
+    char buf[PAKKA_MESSAGE_SIZE];
+    va_list args;
+    va_start(args, fmt);
+    vsnprintf(buf, sizeof(buf), fmt, args);
+    va_end(args);
+    if (report != NULL) {
+        report(userdata, PAKKA_REPORT_ERROR, status, filename, buf);
+    }
+    if (*first_error == PAKKA_OK) {
+        err_fill(err, status, domain, system_code, "verify", "%s", buf);
+        err_set_entry(err, filename, (size_t)-1, offset, length);
+        *first_error = status;
+    }
+}
+
 pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_report_fn report, void *userdata,
                             pakka_error_t *err) {
@@ -2118,18 +2181,12 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
         n_entries++;
 
         if (pakka_unsafe_entry_name(current->filename)) {
-            verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                          PAKKA_ERR_UNSAFE_NAME, current->filename,
-                          "Entry name is not safe to extract");
-            if (first_error == PAKKA_OK) {
-                err_fill(err, PAKKA_ERR_UNSAFE_NAME,
-                         PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                         "Entry name is not safe to extract");
-                err_set_entry(err, current->filename, (size_t)-1,
-                              (uint64_t)current->offset,
-                              (uint64_t)current->length);
-                first_error = PAKKA_ERR_UNSAFE_NAME;
-            }
+            verify_record_error(report, userdata, PAKKA_ERR_UNSAFE_NAME,
+                                err, &first_error, current->filename,
+                                PAKKA_ERR_DOMAIN_NONE, 0,
+                                (uint64_t)current->offset,
+                                (uint64_t)current->length,
+                                "Entry name is not safe to extract");
             continue;        /* skip payload read for unsafe names */
         }
 
@@ -2172,19 +2229,14 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
             }
             if (pakka_compat_fseek(archive->fp, (int64_t)verify_offset, SEEK_SET) != 0) {
                 int seek_errno = errno;
-                verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                              PAKKA_ERR_IO, current->filename,
-                              "Cannot seek to entry payload at offset %"
-                              PRIu32, verify_offset);
-                if (first_error == PAKKA_OK) {
-                    err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                             (uint32_t)seek_errno, "verify",
-                             "Cannot seek to entry payload");
-                    err_set_entry(err, current->filename, (size_t)-1,
-                                  (uint64_t)verify_offset,
-                                  (uint64_t)verify_length);
-                    first_error = PAKKA_ERR_IO;
-                }
+                verify_record_error(report, userdata, PAKKA_ERR_IO, err,
+                                    &first_error, current->filename,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)seek_errno,
+                                    (uint64_t)verify_offset,
+                                    (uint64_t)verify_length,
+                                    "Cannot seek to entry payload at "
+                                    "offset %" PRIu32, verify_offset);
                 continue;
             }
             {
@@ -2197,20 +2249,15 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                         int read_errno = errno;
                         uint64_t at = (uint64_t)verify_offset
                                     + ((uint64_t)verify_length - remaining);
-                        verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                                      PAKKA_ERR_IO, current->filename,
-                                      "Cannot read entry payload "
-                                      "(short read at offset %" PRIu64 ")",
-                                      at);
-                        if (first_error == PAKKA_OK) {
-                            err_fill(err, PAKKA_ERR_IO,
-                                     PAKKA_ERR_DOMAIN_ERRNO,
-                                     (uint32_t)read_errno, "verify",
-                                     "Short read on entry payload");
-                            err_set_entry(err, current->filename, (size_t)-1,
-                                          at, (uint64_t)verify_length);
-                            first_error = PAKKA_ERR_IO;
-                        }
+                        verify_record_error(report, userdata, PAKKA_ERR_IO,
+                                            err, &first_error,
+                                            current->filename,
+                                            PAKKA_ERR_DOMAIN_ERRNO,
+                                            (uint32_t)read_errno,
+                                            at, (uint64_t)verify_length,
+                                            "Cannot read entry payload "
+                                            "(short read at offset %"
+                                            PRIu64 ")", at);
                         io_failed = 1;
                         break;
                     }
@@ -2261,31 +2308,20 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                         if (archive->max_decompressed > 0
                             && ((uint64_t)ulen > archive->max_decompressed
                                 || (uint64_t)clen > archive->max_decompressed)) {
-                            verify_report(report, userdata,
-                                          PAKKA_REPORT_ERROR,
-                                          PAKKA_ERR_LIMIT, current->filename,
-                                          "DK entry exceeds "
-                                          "max_decompressed_size "
-                                          "(uncompressed=%u, compressed=%u, "
-                                          "cap=%" PRIu64 ")",
-                                          (unsigned)ulen, (unsigned)clen,
-                                          archive->max_decompressed);
-                            if (first_error == PAKKA_OK) {
-                                err_fill(err, PAKKA_ERR_LIMIT,
-                                         PAKKA_ERR_DOMAIN_NONE, 0,
-                                         "verify",
-                                         "DK entry %s exceeds "
-                                         "max_decompressed_size "
-                                         "(uncompressed=%u, compressed=%u, "
-                                         "cap=%" PRIu64 ")",
-                                         current->filename,
-                                         (unsigned)ulen, (unsigned)clen,
-                                         archive->max_decompressed);
-                                err_set_entry(err, current->filename,
-                                              (size_t)-1, 0,
-                                              (uint64_t)ulen);
-                                first_error = PAKKA_ERR_LIMIT;
-                            }
+                            verify_record_error(report, userdata,
+                                                PAKKA_ERR_LIMIT, err,
+                                                &first_error,
+                                                current->filename,
+                                                PAKKA_ERR_DOMAIN_NONE, 0,
+                                                0, (uint64_t)ulen,
+                                                "DK entry exceeds "
+                                                "max_decompressed_size "
+                                                "(uncompressed=%u, "
+                                                "compressed=%u, "
+                                                "cap=%" PRIu64 ")",
+                                                (unsigned)ulen,
+                                                (unsigned)clen,
+                                                archive->max_decompressed);
                             continue;
                         }
 
@@ -2391,21 +2427,12 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
               verify_collision_cmp);
         for (i = 1; i < n_entries; i++) {
             if (strcmp(recs[i - 1].norm, recs[i].norm) == 0) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
-                         "Normalized collision with '%s'",
-                         recs[i - 1].original);
-                verify_report(report, userdata, PAKKA_REPORT_ERROR,
-                              PAKKA_ERR_DUPLICATE,
-                              recs[i].original, "%s", msg);
-                if (first_error == PAKKA_OK) {
-                    err_fill(err, PAKKA_ERR_DUPLICATE,
-                             PAKKA_ERR_DOMAIN_NONE, 0, "verify",
-                             "%s", msg);
-                    err_set_entry(err, recs[i].original,
-                                  (size_t)-1, 0, 0);
-                    first_error = PAKKA_ERR_DUPLICATE;
-                }
+                verify_record_error(report, userdata,
+                                    PAKKA_ERR_DUPLICATE, err,
+                                    &first_error, recs[i].original,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, 0, 0,
+                                    "Normalized collision with '%s'",
+                                    recs[i - 1].original);
             }
         }
         for (i = 0; i < n_entries; i++) free(recs[i].norm);

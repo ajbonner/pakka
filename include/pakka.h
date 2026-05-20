@@ -154,6 +154,16 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
                                  pakka_error_t *err);
 void pakka_reader_close(pakka_reader_t *reader);
 
+/* Same as pakka_open_entry but skips the name lookup. Use when the
+ * caller already holds the pakka_entry_t* (e.g. from pakka_entry_at
+ * in an iteration loop) to avoid the O(n) name scan per open. The
+ * entry must come from the same archive; passing a stale pointer
+ * after pakka_delete/pakka_commit is undefined behavior. */
+pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
+                                       const pakka_entry_t *entry,
+                                       pakka_reader_t **out,
+                                       pakka_error_t *err);
+
 /* Add a file from disk under entry_name. Validation: entry-name length
  * + unsafe-name + duplicate + source symlink/regular-file checks +
  * u32 size cap.

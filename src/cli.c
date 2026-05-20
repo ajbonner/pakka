@@ -233,6 +233,12 @@ int main(int argc, char *argv[]) {
 static void fail_from_err(const pakka_error_t *err) {
     if (err->domain == PAKKA_ERR_DOMAIN_ERRNO) {
         pakka_die_e((int)err->system_code, "%s", err->message);
+    } else if (err->domain == PAKKA_ERR_DOMAIN_WIN32) {
+        /* GetLastError DWORDs don't decode through strerror — print the
+         * raw code so Windows users have something to feed into a search
+         * or HRESULT lookup. */
+        pakka_die_e(0, "%s (Win32 error %u)",
+                    err->message, (unsigned)err->system_code);
     } else {
         pakka_die_e(0, "%s", err->message);
     }

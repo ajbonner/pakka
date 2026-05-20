@@ -230,4 +230,5 @@ $(Q3DEMO_PAK0_PK3): $(TARGET) verify-q3demo
 # 93 MiB from archive.org, so kept out of `make test`. CI can opt in
 # by running `make slow-test` on a single representative job.
 slow-test: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
+	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats tests/pk3_q3demo.bats

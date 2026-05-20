@@ -137,6 +137,33 @@ PY
     [ ! -f "$BATS_TEST_TMPDIR/escape.txt" ]
 }
 
+@test "pk3 open: rejects entry name with embedded NUL byte" {
+    # M8 regression. Pre-fix, the CDR name was memcpy'd into a NUL-
+    # terminated filename buffer. A crafted name like 'good\0../escape'
+    # was stored as 'good' in memory while the on-disk CDR carried
+    # the full evil string. Duplicate checks / verify / extract saw
+    # the truncated form. Now any control byte (< 0x20) anywhere in
+    # the declared name length is rejected at open.
+    python3 - "$BATS_TEST_TMPDIR/embedded_nul.pk3" <<'PY'
+import struct, sys, zlib
+path = sys.argv[1]
+name = b"good\x00../escape"
+payload = b"x"
+crc = zlib.crc32(payload) & 0xffffffff
+lfh = b"PK\x03\x04" + struct.pack("<HHHHHIIIHH",
+    20, 0, 0, 0, 0x0021, crc, 1, 1, len(name), 0) + name + payload
+cdr = b"PK\x01\x02" + struct.pack("<HHHHHHIIIHHHHHII",
+    20, 20, 0, 0, 0, 0x0021, crc, 1, 1, len(name), 0, 0, 0, 0, 0, 0) + name
+eocd = b"PK\x05\x06" + struct.pack("<HHHHIIH",
+    0, 0, 1, 1, len(cdr), len(lfh), 0)
+with open(path, "wb") as f:
+    f.write(lfh + cdr + eocd)
+PY
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/embedded_nul.pk3"
+    [ "$status" -ne 0 ]
+    [[ "$output$stderr" == *"control byte"* ]]
+}
+
 @test "pk3 open: rejects entry with Windows reserved device name (CON.txt)" {
     python3 - "$BATS_TEST_TMPDIR/reserved.pk3" <<'PY'
 import struct, sys, zlib
@@ -594,6 +621,46 @@ EOF
     [ "$status" -eq 0 ]
     [[ "$output" == *"alpha.txt"* ]]
     [[ "$output" != *"new.txt"* ]]
+}
+
+@test "pk3 c-api: pakka_open_entry_handle skips the name lookup" {
+    # Confirms the additive public API works against an entry pointer
+    # obtained from pakka_entry_at. The handle-keyed path is meant
+    # for callers iterating a large archive that want to avoid the
+    # O(n) find_entry name scan per open.
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH"
+    cat > "$BATS_TEST_TMPDIR/handle.c" <<'EOF'
+#include <stdio.h>
+#include <string.h>
+#include "pakka.h"
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_reader_t *r = NULL;
+    const pakka_entry_t *e = NULL;
+    char buf[64];
+    size_t nread = 0;
+    pakka_status_t s = pakka_open(argv[1], PAKKA_OPEN_READ, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "open: %s\n", err.message); return 2; }
+    /* NULL tolerance for archive/entry/out. */
+    if (pakka_open_entry_handle(NULL, NULL, &r, &err) != PAKKA_ERR_INVALID_ARGUMENT) return 3;
+    s = pakka_entry_at(a, 0, &e);
+    if (s != PAKKA_OK || e == NULL) return 4;
+    s = pakka_open_entry_handle(a, e, &r, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "handle: %s\n", err.message); return 5; }
+    s = pakka_reader_read(r, buf, sizeof(buf), &nread, &err);
+    if (s != PAKKA_OK || nread == 0) return 6;
+    pakka_reader_close(r);
+    pakka_close(a, NULL);
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/handle" \
+        "$BATS_TEST_TMPDIR/handle.c" \
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+    run "$BATS_TEST_TMPDIR/handle" "$BATS_FILE_TMPDIR/mixed.pk3"
+    [ "$status" -eq 0 ]
 }
 
 @test "pk3 c-api: rebuild rollback preserves in-memory entry offsets" {
