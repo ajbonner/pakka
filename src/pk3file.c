@@ -474,6 +474,144 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
     return PAKKA_OK;
 }
 
+/* Parsed CDR record, populated by pk3_validate_cdr_record. The
+ * caller is responsible for copying the name out of the CDR buffer
+ * + linking the entry; this struct just carries the validated
+ * field values plus a sentinel telling the caller to skip a
+ * directory entry without erroring. */
+typedef struct {
+    uint16_t method;
+    uint16_t flags;
+    uint16_t name_len;
+    uint16_t extra_len;
+    uint16_t comment_len;
+    uint32_t crc;
+    uint32_t csize;
+    uint32_t usize;
+    uint32_t ext_attrs;
+    uint32_t lfh_offset;
+    int      is_dir_entry;       /* skip-and-continue marker */
+} pk3_cdr_record_t;
+
+/* Read + validate one CDR record at cdr[pos]. Returns PAKKA_OK on a
+ * legal record (including a directory entry, marked via
+ * out->is_dir_entry = 1) and fills *out with the parsed fields.
+ * Returns a structured error on any rejection. Caller still owns
+ * the cdr buffer and is responsible for free() on error.
+ *
+ * Checks: record fits in cdr_size, CDR magic, name+extra+comment
+ * extent fits, no encryption / data-descriptor flag, no ZIP64
+ * sentinels, supported compression method, non-empty + bounded
+ * name length, no Unix symlink in external attrs, no control byte
+ * (< 0x20 or == 0x7F) in the full declared name range. */
+static pakka_status_t pk3_validate_cdr_record(const unsigned char *cdr,
+                                              size_t cdr_size,
+                                              size_t pos,
+                                              size_t i,
+                                              pk3_cdr_record_t *out,
+                                              pakka_error_t *err) {
+    if (pos + PK3_CDR_SIZE > cdr_size) {
+        return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "ZIP CDR truncated at entry %zu", i);
+    }
+    if (memcmp(&cdr[pos], PK3_CDR_SIGNATURE,
+               PAKFILE_SIGNATURE_LEN) != 0) {
+        return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "Bad CDR signature at entry %zu", i);
+    }
+
+    out->flags       = pk3_read_u16(&cdr[pos + 8]);
+    out->method      = pk3_read_u16(&cdr[pos + 10]);
+    out->crc         = pk3_read_u32(&cdr[pos + 16]);
+    out->csize       = pk3_read_u32(&cdr[pos + 20]);
+    out->usize       = pk3_read_u32(&cdr[pos + 24]);
+    out->name_len    = pk3_read_u16(&cdr[pos + 28]);
+    out->extra_len   = pk3_read_u16(&cdr[pos + 30]);
+    out->comment_len = pk3_read_u16(&cdr[pos + 32]);
+    out->ext_attrs   = pk3_read_u32(&cdr[pos + 38]);
+    out->lfh_offset  = pk3_read_u32(&cdr[pos + 42]);
+    out->is_dir_entry = 0;
+
+    if (pos + PK3_CDR_SIZE + out->name_len + out->extra_len
+        + out->comment_len > cdr_size) {
+        return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "ZIP CDR entry %zu extends past CDR end", i);
+    }
+    if (out->flags & 0x1u) {
+        return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "Encrypted ZIP entries are not supported");
+    }
+    if (out->flags & 0x8u) {
+        return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "ZIP data descriptors are not supported");
+    }
+    if (out->csize == 0xFFFFFFFFu || out->usize == 0xFFFFFFFFu
+        || out->lfh_offset == 0xFFFFFFFFu) {
+        return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "ZIP64 per-entry fields are not supported");
+    }
+    if (out->method != PK3_METHOD_STORED
+        && out->method != PK3_METHOD_DEFLATE) {
+        return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "ZIP compression method %u is not supported",
+                            (unsigned)out->method);
+    }
+    if (out->name_len == 0) {
+        return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "ZIP entry %zu has empty filename", i);
+    }
+    if (out->name_len >= PAKKA_ENTRY_NAME_SIZE) {
+        return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "ZIP entry %zu name too long (%u bytes, max %u)",
+                            i, (unsigned)out->name_len,
+                            (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
+    }
+    if (((out->ext_attrs >> 16) & PK3_UNIX_IFMT) == PK3_UNIX_IFLNK) {
+        return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "ZIP entry %zu is a symlink", i);
+    }
+
+    /* Directory entry (name ends in '/', size == 0): not an error,
+     * but the caller should skip linking and just advance pos. */
+    if (cdr[pos + PK3_CDR_SIZE + out->name_len - 1] == '/'
+        && out->usize == 0 && out->csize == 0) {
+        out->is_dir_entry = 1;
+        return PAKKA_OK;
+    }
+
+    /* Reject control bytes across the FULL declared name length, not
+     * just the C-string view. Without this, a crafted
+     * "good.txt\0../escape" would NUL-terminate to "good.txt" in
+     * memory while the on-disk record carries the full evil name.
+     * Cutoff matches pakka_unsafe_entry_name + the CLI sanitizer:
+     * < 0x20 or == 0x7F is control; >= 0x80 is allowed for UTF-8 /
+     * CP437. */
+    {
+        uint16_t k;
+        for (k = 0; k < out->name_len; k++) {
+            unsigned char b = cdr[pos + PK3_CDR_SIZE + k];
+            if (b < 0x20 || b == 0x7F) {
+                return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                                    "ZIP entry %zu name contains control "
+                                    "byte 0x%02x at position %u",
+                                    i, (unsigned)b, (unsigned)k);
+            }
+        }
+    }
+    return PAKKA_OK;
+}
+
 static pakka_status_t pk3_load_cdr(Pak_t *pak,
                                    uint32_t cdr_offset,
                                    uint32_t cdr_size,
@@ -536,101 +674,19 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
 
     for (i = 0; i < entry_count; i++) {
         Pakfileentry_t *entry;
-        uint16_t method, flags, name_len, extra_len, comment_len;
-        uint32_t crc, csize, usize, ext_attrs, lfh_offset;
-
-        if (pos + PK3_CDR_SIZE > cdr_size) {
+        pk3_cdr_record_t rec;
+        pakka_status_t vs = pk3_validate_cdr_record(cdr, cdr_size, pos,
+                                                    i, &rec, err);
+        if (vs != PAKKA_OK) {
             free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open",
-                                "ZIP CDR truncated at entry %zu", i);
+            return vs;
         }
-        if (memcmp(&cdr[pos], PK3_CDR_SIGNATURE,
-                   PAKFILE_SIGNATURE_LEN) != 0) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open",
-                                "Bad CDR signature at entry %zu", i);
-        }
-
-        flags        = pk3_read_u16(&cdr[pos + 8]);
-        method       = pk3_read_u16(&cdr[pos + 10]);
-        crc          = pk3_read_u32(&cdr[pos + 16]);
-        csize        = pk3_read_u32(&cdr[pos + 20]);
-        usize        = pk3_read_u32(&cdr[pos + 24]);
-        name_len     = pk3_read_u16(&cdr[pos + 28]);
-        extra_len    = pk3_read_u16(&cdr[pos + 30]);
-        comment_len  = pk3_read_u16(&cdr[pos + 32]);
-        ext_attrs    = pk3_read_u32(&cdr[pos + 38]);
-        lfh_offset   = pk3_read_u32(&cdr[pos + 42]);
-
-        if (pos + PK3_CDR_SIZE + name_len + extra_len + comment_len
-            > cdr_size) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open",
-                                "ZIP CDR entry %zu extends past CDR end",
-                                i);
-        }
-
-        /* Refuse encrypted / data-descriptor flagged entries up-front;
-         * LFH validation reasserts. */
-        if (flags & 0x1u) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "Encrypted ZIP entries are not supported");
-        }
-        if (flags & 0x8u) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "ZIP data descriptors are not supported");
-        }
-        /* ZIP64 sentinels in per-entry fields */
-        if (csize == 0xFFFFFFFFu || usize == 0xFFFFFFFFu
-            || lfh_offset == 0xFFFFFFFFu) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "ZIP64 per-entry fields are not supported");
-        }
-        if (method != PK3_METHOD_STORED && method != PK3_METHOD_DEFLATE) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "ZIP compression method %u is not supported",
-                                (unsigned)method);
-        }
-        if (name_len == 0) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open",
-                                "ZIP entry %zu has empty filename", i);
-        }
-        if (name_len >= PAKKA_ENTRY_NAME_SIZE) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE,
-                                0, "open",
-                                "ZIP entry %zu name too long (%u bytes, max %u)",
-                                i, (unsigned)name_len,
-                                (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
-        }
-        /* Refuse Unix symlink entries via external-attrs file-type bits */
-        if (((ext_attrs >> 16) & PK3_UNIX_IFMT) == PK3_UNIX_IFLNK) {
-            free(cdr);
-            return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                "ZIP entry %zu is a symlink", i);
-        }
-
-        /* Directory entries (name ends in '/', size == 0): silently
-         * skipped. ZIP tools commonly emit them; rejecting would break
-         * real-world PK3/PK4 archives. */
-        if (cdr[pos + PK3_CDR_SIZE + name_len - 1] == '/'
-            && usize == 0 && csize == 0) {
+        if (rec.is_dir_entry) {
+            /* Directory marker — ZIP tools commonly emit these;
+             * rejecting would break real-world PK3/PK4 archives. */
             skipped_dirs++;
-            pos += PK3_CDR_SIZE + name_len + extra_len + comment_len;
+            pos += PK3_CDR_SIZE + rec.name_len + rec.extra_len
+                 + rec.comment_len;
             continue;
         }
 
@@ -641,40 +697,14 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
                                 0, "open",
                                 "Cannot allocate ZIP entry");
         }
-        /* Reject embedded NUL or control bytes across the FULL CDR
-         * name length, not just the C-string view. Without this, a
-         * crafted "good.txt\0../escape" would NUL-terminate to
-         * "good.txt" for the in-memory list, but duplicate checks /
-         * verify / extract would all see the truncated form while
-         * the on-disk CDR record carries the full evil name. Cutoff
-         * matches pakka_unsafe_entry_name + the CLI sanitizer: any
-         * byte < 0x20 or == 0x7F is a control byte; high-bit bytes
-         * (>= 0x80) are allowed since ZIP names may carry UTF-8 /
-         * CP437. */
-        {
-            uint16_t k;
-            for (k = 0; k < name_len; k++) {
-                unsigned char b = cdr[pos + PK3_CDR_SIZE + k];
-                if (b < 0x20 || b == 0x7F) {
-                    pakka_entry_free(entry);
-                    free(cdr);
-                    return pk3_err_fill(err, PAKKA_ERR_FORMAT,
-                                        PAKKA_ERR_DOMAIN_NONE, 0, "open",
-                                        "ZIP entry %u name contains "
-                                        "control byte 0x%02x at "
-                                        "position %u",
-                                        i, (unsigned)b, (unsigned)k);
-                }
-            }
-        }
-        memcpy(entry->filename, &cdr[pos + PK3_CDR_SIZE], name_len);
-        entry->filename[name_len] = '\0';
-        entry->pk3_method = method;
-        entry->pk3_crc32 = crc;
-        entry->pk3_compressed_size = csize;
-        entry->length = usize;
-        entry->offset = lfh_offset;        /* placeholder; payload_offset is the real one */
-        entry->pk3_lfh_offset = lfh_offset;
+        memcpy(entry->filename, &cdr[pos + PK3_CDR_SIZE], rec.name_len);
+        entry->filename[rec.name_len] = '\0';
+        entry->pk3_method = rec.method;
+        entry->pk3_crc32 = rec.crc;
+        entry->pk3_compressed_size = rec.csize;
+        entry->length = rec.usize;
+        entry->offset = rec.lfh_offset;     /* placeholder; payload_offset is the real one */
+        entry->pk3_lfh_offset = rec.lfh_offset;
 
         if (pak->head == NULL) {
             pak->head = entry;
@@ -683,7 +713,8 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
         }
         tail = entry;
 
-        pos += PK3_CDR_SIZE + name_len + extra_len + comment_len;
+        pos += PK3_CDR_SIZE + rec.name_len + rec.extra_len
+             + rec.comment_len;
     }
 
     /* CDR must be exactly consumed — extra bytes are suspect. */

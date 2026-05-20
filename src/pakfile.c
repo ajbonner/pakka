@@ -1818,7 +1818,24 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
  * The is_new case (after pakka_create) writes header+directory the same
  * as a regular add commit; the temp file is renamed to new_pakpath by
  * pakka_close, not here. */
-pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
+/* PAK-format rebuild commit. Triggered when needs_rebuild is set —
+ * i.e. some pakka_delete touched the in-memory list and the byte
+ * layout no longer matches the directory order. Copies surviving
+ * entries to a temp scratch in in-memory list order (the new
+ * directory order), writes the new directory,
+ * fclose-checks the temp before rename so disk-full surfaces here
+ * rather than after publishing the temp, and renames the scratch
+ * over the original. Rollback semantics: all in-memory offset
+ * mutations are reversible until the rename succeeds. After the
+ * rename, the scratch IS the canonical content, so any
+ * post-publish failure (reopen) keeps the new offsets installed.
+ *
+ * Extracted from pakka_commit so the main commit function stays
+ * scannable — this block alone was ~200 LOC of bookkeeping (entry
+ * counting, scratch path, mkstemp, copy loop, new-offset install,
+ * old-offset snapshot, two error rollback variants, rename, reopen). */
+static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
+                                           pakka_error_t *err) {
     Pakfileentry_t *current;
     Pakfileentry_t *new_head = NULL;
     Pakfileentry_t *new_tail = NULL;
@@ -1826,6 +1843,216 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
     FILE *old_fp;
     int saved_errno;
     pakka_status_t status = PAKKA_OK;
+
+    char rebuild_scratch[OS_PATH_MAX];
+    const char *dir_hint;
+    const char *rename_target;
+    /* Parallel arrays of survivors. entry_ptrs[] is the in-memory
+     * list pointer; new_offsets[] is the byte offset each entry
+     * will have AFTER the rebuild. We install new offsets only
+     * once every copy AND the directory write AND the fclose of
+     * the temp succeed. Until then, entry->offset still describes
+     * archive->fp's pre-rebuild byte layout, so an error path can
+     * return without touching archive state. */
+    uint32_t *new_offsets = NULL;
+    Pakfileentry_t **entry_ptrs = NULL;
+    size_t n_entries = 0;
+    size_t i;
+
+    dir_hint = archive->is_new ? archive->tmp_pakpath
+                               : archive->cur_pakpath;
+    rename_target = dir_hint;       /* same path, after rename */
+
+    for (current = archive->head; current != NULL;
+         current = current->next) {
+        n_entries++;
+    }
+    if (n_entries > 0) {
+        new_offsets = malloc(sizeof(uint32_t) * n_entries);
+        entry_ptrs = malloc(sizeof(Pakfileentry_t *) * n_entries);
+        if (new_offsets == NULL || entry_ptrs == NULL) {
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_NOMEM,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                            "Cannot allocate rebuild bookkeeping");
+        }
+        i = 0;
+        for (current = archive->head; current != NULL;
+             current = current->next) {
+            entry_ptrs[i++] = current;
+        }
+    }
+
+    tfd = pakka_compat_mkstemp_open(dir_hint, "pakkaXXXXXX",
+                              rebuild_scratch,
+                              sizeof(rebuild_scratch));
+    if (tfd == NULL) {
+        saved_errno = errno;
+        free(new_offsets);
+        free(entry_ptrs);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot create rebuild scratch near %s",
+                        dir_hint);
+    }
+    if (pakka_compat_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
+        saved_errno = errno;
+        fclose(tfd);
+        (void)remove(rebuild_scratch);
+        free(new_offsets);
+        free(entry_ptrs);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot seek in rebuild scratch");
+    }
+
+    /* Copy survivors. entry->offset is NOT mutated by
+     * copy_between_paks (it returns the new offset via out param).
+     * On failure here, nothing in archive state has changed. */
+    for (i = 0; i < n_entries; i++) {
+        status = copy_between_paks(entry_ptrs[i], archive->fp, tfd,
+                                   &new_offsets[i], err);
+        if (status != PAKKA_OK) {
+            fclose(tfd);
+            (void)remove(rebuild_scratch);
+            free(new_offsets);
+            free(entry_ptrs);
+            return status;
+        }
+        if (new_tail == NULL) {
+            new_head = entry_ptrs[i];
+        } else {
+            new_tail->next = entry_ptrs[i];
+        }
+        new_tail = entry_ptrs[i];
+    }
+    if (new_tail != NULL) {
+        new_tail->next = NULL;
+    }
+
+    /* write_pak_directory needs to see the new offsets. Install
+     * them now (still rollback-safe; archive->head order is
+     * already the new layout, and pak->fp hasn't been swapped to
+     * the scratch yet). Save the prior values in old_offsets_swap
+     * so we can revert if the directory write or close fails. */
+    archive->head = new_head;
+    {
+        uint32_t *old_offsets_swap;
+        old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
+        if (old_offsets_swap == NULL && n_entries > 0) {
+            fclose(tfd);
+            (void)remove(rebuild_scratch);
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_NOMEM,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "commit",
+                            "Cannot allocate rollback buffer");
+        }
+        for (i = 0; i < n_entries; i++) {
+            old_offsets_swap[i] = entry_ptrs[i]->offset;
+            entry_ptrs[i]->offset = new_offsets[i];
+        }
+
+        old_fp = archive->fp;
+        archive->fp = tfd;
+        status = write_pak_directory(archive, err);
+        archive->fp = old_fp;
+        if (status != PAKKA_OK) {
+            for (i = 0; i < n_entries; i++) {
+                entry_ptrs[i]->offset = old_offsets_swap[i];
+            }
+            fclose(tfd);
+            (void)remove(rebuild_scratch);
+            free(old_offsets_swap);
+            free(new_offsets);
+            free(entry_ptrs);
+            return status;
+        }
+        if (fclose(tfd) != 0) {
+            saved_errno = errno;
+            for (i = 0; i < n_entries; i++) {
+                entry_ptrs[i]->offset = old_offsets_swap[i];
+            }
+            (void)remove(rebuild_scratch);
+            free(old_offsets_swap);
+            free(new_offsets);
+            free(entry_ptrs);
+            return err_fill(err, PAKKA_ERR_IO,
+                            PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Cannot finalize rebuild scratch %s "
+                            "(disk full or I/O error)",
+                            rebuild_scratch);
+        }
+
+        /* Past this point the new layout is durably on disk in
+         * rebuild_scratch. Close original, rename. If rename or
+         * reopen fails we keep the new offsets installed (the
+         * scratch IS the canonical content even if not yet
+         * renamed; rolling back would mismatch what we just wrote). */
+        fclose(archive->fp);
+        archive->fp = NULL;
+
+        {
+            uint32_t win32_code = 0;
+            if (pakka_compat_rename_replace(rebuild_scratch, rename_target,
+                                      &win32_code) != 0) {
+                saved_errno = errno;
+                /* Best-effort restore: revert offsets, drop the
+                 * scratch, and reopen the un-renamed original so
+                 * the archive handle is at least readable. */
+                for (i = 0; i < n_entries; i++) {
+                    entry_ptrs[i]->offset = old_offsets_swap[i];
+                }
+                (void)remove(rebuild_scratch);
+                archive->fp = fopen(rename_target, "r+b");
+                free(old_offsets_swap);
+                free(new_offsets);
+                free(entry_ptrs);
+#ifdef _WIN32
+                return err_fill(err, PAKKA_ERR_IO,
+                                PAKKA_ERR_DOMAIN_WIN32, win32_code,
+                                "commit",
+                                "Could not rename %s to %s "
+                                "(Win32 error %u)",
+                                rebuild_scratch, rename_target,
+                                (unsigned)win32_code);
+#else
+                (void)win32_code;
+                return err_fill(err, PAKKA_ERR_IO,
+                                PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "commit",
+                                "Could not rename %s to %s",
+                                rebuild_scratch, rename_target);
+#endif
+            }
+        }
+
+        free(old_offsets_swap);
+    }
+
+    archive->fp = fopen(rename_target, "r+b");
+    if (archive->fp == NULL) {
+        saved_errno = errno;
+        free(new_offsets);
+        free(entry_ptrs);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot reopen %s after rebuild",
+                        rename_target);
+    }
+
+    free(new_offsets);
+    free(entry_ptrs);
+    archive->dirty = 0;
+    archive->needs_rebuild = 0;
+    return status;
+}
+
+pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
+    int saved_errno;
+    pakka_status_t status;
 
     if (archive == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
@@ -1871,220 +2098,7 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
         return PAKKA_OK;
     }
 
-    /* Rebuild path (needs_rebuild=1 because at least one pakka_delete).
-     * The byte layout no longer matches the directory order — id's
-     * non-sequential pak0.pak would shift wrong if we tried in-place.
-     *
-     * Use a LOCAL scratch path rather than the archive's tmp_pakpath:
-     * for an is_new archive, tmp_pakpath is the path of the original
-     * pakka_create temp which pakka_close will rename to new_pakpath.
-     * Overwriting tmp_pakpath here would lose that target. */
-    {
-        char rebuild_scratch[OS_PATH_MAX];
-        const char *dir_hint;
-        const char *rename_target;
-        /* Parallel arrays of survivors. entry_ptrs[] is the in-memory
-         * list pointer; new_offsets[] is the byte offset each entry
-         * will have AFTER the rebuild. We install new offsets only
-         * once every copy AND the directory write AND the fclose of
-         * the temp succeed. Until then, entry->offset still describes
-         * archive->fp's pre-rebuild byte layout, so an error path can
-         * return without touching archive state. */
-        uint32_t *new_offsets = NULL;
-        Pakfileentry_t **entry_ptrs = NULL;
-        size_t n_entries = 0;
-        size_t i;
-
-        dir_hint = archive->is_new ? archive->tmp_pakpath
-                                   : archive->cur_pakpath;
-        rename_target = dir_hint;       /* same path, after rename */
-
-        for (current = archive->head; current != NULL;
-             current = current->next) {
-            n_entries++;
-        }
-        if (n_entries > 0) {
-            new_offsets = malloc(sizeof(uint32_t) * n_entries);
-            entry_ptrs = malloc(sizeof(Pakfileentry_t *) * n_entries);
-            if (new_offsets == NULL || entry_ptrs == NULL) {
-                free(new_offsets);
-                free(entry_ptrs);
-                return err_fill(err, PAKKA_ERR_NOMEM,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "commit",
-                                "Cannot allocate rebuild bookkeeping");
-            }
-            i = 0;
-            for (current = archive->head; current != NULL;
-                 current = current->next) {
-                entry_ptrs[i++] = current;
-            }
-        }
-
-        tfd = pakka_compat_mkstemp_open(dir_hint, "pakkaXXXXXX",
-                                  rebuild_scratch,
-                                  sizeof(rebuild_scratch));
-        if (tfd == NULL) {
-            saved_errno = errno;
-            free(new_offsets);
-            free(entry_ptrs);
-            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "commit",
-                            "Cannot create rebuild scratch near %s",
-                            dir_hint);
-        }
-        if (pakka_compat_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
-            saved_errno = errno;
-            fclose(tfd);
-            (void)remove(rebuild_scratch);
-            free(new_offsets);
-            free(entry_ptrs);
-            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "commit",
-                            "Cannot seek in rebuild scratch");
-        }
-
-        /* Copy survivors. entry->offset is NOT mutated by
-         * copy_between_paks (it returns the new offset via out param).
-         * On failure here, nothing in archive state has changed. */
-        for (i = 0; i < n_entries; i++) {
-            status = copy_between_paks(entry_ptrs[i], archive->fp, tfd,
-                                       &new_offsets[i], err);
-            if (status != PAKKA_OK) {
-                fclose(tfd);
-                (void)remove(rebuild_scratch);
-                free(new_offsets);
-                free(entry_ptrs);
-                return status;
-            }
-            if (new_tail == NULL) {
-                new_head = entry_ptrs[i];
-            } else {
-                new_tail->next = entry_ptrs[i];
-            }
-            new_tail = entry_ptrs[i];
-        }
-        if (new_tail != NULL) {
-            new_tail->next = NULL;
-        }
-
-        /* write_pak_directory needs to see the new offsets. Install
-         * them now (still rollback-safe; archive->head order is
-         * already the new layout, and pak->fp hasn't been swapped to
-         * the scratch yet). Save the prior values in old_offsets_swap
-         * so we can revert if the directory write or close fails. */
-        archive->head = new_head;
-        {
-            uint32_t *old_offsets_swap;
-            old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
-            if (old_offsets_swap == NULL && n_entries > 0) {
-                fclose(tfd);
-                (void)remove(rebuild_scratch);
-                free(new_offsets);
-                free(entry_ptrs);
-                return err_fill(err, PAKKA_ERR_NOMEM,
-                                PAKKA_ERR_DOMAIN_NONE, 0, "commit",
-                                "Cannot allocate rollback buffer");
-            }
-            for (i = 0; i < n_entries; i++) {
-                old_offsets_swap[i] = entry_ptrs[i]->offset;
-                entry_ptrs[i]->offset = new_offsets[i];
-            }
-
-            old_fp = archive->fp;
-            archive->fp = tfd;
-            status = write_pak_directory(archive, err);
-            archive->fp = old_fp;
-            if (status != PAKKA_OK) {
-                for (i = 0; i < n_entries; i++) {
-                    entry_ptrs[i]->offset = old_offsets_swap[i];
-                }
-                fclose(tfd);
-                (void)remove(rebuild_scratch);
-                free(old_offsets_swap);
-                free(new_offsets);
-                free(entry_ptrs);
-                return status;
-            }
-            if (fclose(tfd) != 0) {
-                saved_errno = errno;
-                for (i = 0; i < n_entries; i++) {
-                    entry_ptrs[i]->offset = old_offsets_swap[i];
-                }
-                (void)remove(rebuild_scratch);
-                free(old_offsets_swap);
-                free(new_offsets);
-                free(entry_ptrs);
-                return err_fill(err, PAKKA_ERR_IO,
-                                PAKKA_ERR_DOMAIN_ERRNO,
-                                (uint32_t)saved_errno, "commit",
-                                "Cannot finalize rebuild scratch %s "
-                                "(disk full or I/O error)",
-                                rebuild_scratch);
-            }
-
-            /* Past this point the new layout is durably on disk in
-             * rebuild_scratch. Close original, rename. If rename or
-             * reopen fails we keep the new offsets installed (the
-             * scratch IS the canonical content even if not yet
-             * renamed; rolling back would mismatch what we just wrote). */
-            fclose(archive->fp);
-            archive->fp = NULL;
-
-            {
-                uint32_t win32_code = 0;
-                if (pakka_compat_rename_replace(rebuild_scratch, rename_target,
-                                          &win32_code) != 0) {
-                    saved_errno = errno;
-                    /* Best-effort restore: revert offsets, drop the
-                     * scratch, and reopen the un-renamed original so
-                     * the archive handle is at least readable. */
-                    for (i = 0; i < n_entries; i++) {
-                        entry_ptrs[i]->offset = old_offsets_swap[i];
-                    }
-                    (void)remove(rebuild_scratch);
-                    archive->fp = fopen(rename_target, "r+b");
-                    free(old_offsets_swap);
-                    free(new_offsets);
-                    free(entry_ptrs);
-#ifdef _WIN32
-                    return err_fill(err, PAKKA_ERR_IO,
-                                    PAKKA_ERR_DOMAIN_WIN32, win32_code,
-                                    "commit",
-                                    "Could not rename %s to %s "
-                                    "(Win32 error %u)",
-                                    rebuild_scratch, rename_target,
-                                    (unsigned)win32_code);
-#else
-                    (void)win32_code;
-                    return err_fill(err, PAKKA_ERR_IO,
-                                    PAKKA_ERR_DOMAIN_ERRNO,
-                                    (uint32_t)saved_errno, "commit",
-                                    "Could not rename %s to %s",
-                                    rebuild_scratch, rename_target);
-#endif
-                }
-            }
-
-            free(old_offsets_swap);
-        }
-
-        archive->fp = fopen(rename_target, "r+b");
-        if (archive->fp == NULL) {
-            saved_errno = errno;
-            free(new_offsets);
-            free(entry_ptrs);
-            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "commit",
-                            "Cannot reopen %s after rebuild",
-                            rename_target);
-        }
-
-        free(new_offsets);
-        free(entry_ptrs);
-        archive->dirty = 0;
-        archive->needs_rebuild = 0;
-    }
-    return status;
+    return pakka_commit_rebuild(archive, err);
 }
 
 /* { normalized, original } record used by pakka_verify's collision
@@ -2150,6 +2164,223 @@ static void verify_record_error(pakka_report_fn report, void *userdata,
     }
 }
 
+/* Verify one entry's structural integrity. Records findings via
+ * verify_report (every finding) and verify_record_error (the first
+ * error, which populates the out pakka_error_t). Updates
+ * *first_error so the outer pakka_verify can return the first
+ * error status rather than the last. Every "this entry is busted,
+ * skip the rest" exit in the original inline loop became a `return`
+ * here. The buf parameter is a caller-owned scratch the read loop
+ * streams payload bytes through. */
+static void verify_entry(pakka_archive_t *archive,
+                         Pakfileentry_t *current,
+                         unsigned flags,
+                         pakka_report_fn report, void *userdata,
+                         char *buf, size_t buf_size,
+                         pakka_status_t *first_error,
+                         pakka_error_t *err) {
+    uint32_t verify_offset;
+    uint32_t verify_length;
+    uint64_t remaining;
+    int io_failed;
+
+    if (pakka_unsafe_entry_name(current->filename)) {
+        verify_record_error(report, userdata, PAKKA_ERR_UNSAFE_NAME,
+                            err, first_error, current->filename,
+                            PAKKA_ERR_DOMAIN_NONE, 0,
+                            (uint64_t)current->offset,
+                            (uint64_t)current->length,
+                            "Entry name is not safe to extract");
+        return;        /* skip payload read for unsafe names */
+    }
+
+    if (current->length == 0) {
+        verify_report(report, userdata, PAKKA_REPORT_INFO,
+                      PAKKA_OK, current->filename,
+                      "OK (0 bytes)");
+        return;
+    }
+
+    /* Skip queued-add ZIP entries (H2): their payload isn't on
+     * pak->fp yet — it lives in pk3_pending_source/_data and gets
+     * published at commit time. */
+    if (pakka_format_is_zip(archive->format)
+        && (current->pk3_pending_source != NULL
+            || current->pk3_pending_data != NULL)) {
+        verify_report(report, userdata, PAKKA_REPORT_INFO,
+                      PAKKA_OK, current->filename,
+                      "pending add (not yet committed)");
+        return;
+    }
+
+    /* ZIP entries: on-disk payload is pk3_compressed_size bytes at
+     * pk3_payload_offset; entry->length is uncompressed. DK
+     * compressed: dk_compressed_size is the on-disk extent. */
+    verify_offset = current->offset;
+    verify_length = current->length;
+    if (pakka_format_is_zip(archive->format)) {
+        verify_offset = current->pk3_payload_offset;
+        verify_length = current->pk3_compressed_size;
+    } else if (current->dk_is_compressed) {
+        verify_length = current->dk_compressed_size;
+    }
+    if (pakka_compat_fseek(archive->fp,
+                           (int64_t)verify_offset, SEEK_SET) != 0) {
+        int seek_errno = errno;
+        verify_record_error(report, userdata, PAKKA_ERR_IO, err,
+                            first_error, current->filename,
+                            PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)seek_errno,
+                            (uint64_t)verify_offset,
+                            (uint64_t)verify_length,
+                            "Cannot seek to entry payload at "
+                            "offset %" PRIu32, verify_offset);
+        return;
+    }
+
+    remaining = (uint64_t)verify_length;
+    io_failed = 0;
+    while (remaining > 0) {
+        size_t chunk = remaining > buf_size
+                     ? buf_size : (size_t)remaining;
+        if (fread(buf, 1, chunk, archive->fp) != chunk) {
+            int read_errno = errno;
+            uint64_t at = (uint64_t)verify_offset
+                        + ((uint64_t)verify_length - remaining);
+            verify_record_error(report, userdata, PAKKA_ERR_IO,
+                                err, first_error,
+                                current->filename,
+                                PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)read_errno,
+                                at, (uint64_t)verify_length,
+                                "Cannot read entry payload "
+                                "(short read at offset %"
+                                PRIu64 ")", at);
+            io_failed = 1;
+            break;
+        }
+        remaining -= chunk;
+    }
+    if (io_failed) return;
+
+    /* Deep verify (ZIP): decompress + CRC32 check via the impl. */
+    if (pakka_format_is_zip(archive->format)
+        && (flags & PAKKA_VERIFY_DEEP)) {
+        pakka_error_t deep_err;
+        pakka_status_t dv = pakka_pk3_deep_verify_entry(
+            archive, current, &deep_err);
+        if (dv != PAKKA_OK) {
+            verify_report(report, userdata,
+                          PAKKA_REPORT_ERROR, dv,
+                          current->filename,
+                          "%s", deep_err.message);
+            if (*first_error == PAKKA_OK) {
+                if (err != NULL) *err = deep_err;
+                *first_error = dv;
+            }
+            return;
+        }
+    }
+    /* Deep verify (DK compressed): decode + confirm byte count. DK
+     * has no per-entry CRC. */
+    if (archive->format == PAKKA_FORMAT_DAIKATANA
+        && current->dk_is_compressed
+        && (flags & PAKKA_VERIFY_DEEP)) {
+        pakka_error_t deep_err;
+        pakka_status_t dv;
+        unsigned char *cbuf = NULL;
+        unsigned char *ubuf = NULL;
+        uint32_t clen = current->dk_compressed_size;
+        uint32_t ulen = current->length;
+
+        /* Same cap pakka_open_entry enforces. Without this, a
+         * hostile DK archive can force ulen-byte allocations
+         * during --verify --deep regardless of
+         * pakka_set_max_decompressed_size. */
+        if (archive->max_decompressed > 0
+            && ((uint64_t)ulen > archive->max_decompressed
+                || (uint64_t)clen > archive->max_decompressed)) {
+            verify_record_error(report, userdata,
+                                PAKKA_ERR_LIMIT, err,
+                                first_error,
+                                current->filename,
+                                PAKKA_ERR_DOMAIN_NONE, 0,
+                                0, (uint64_t)ulen,
+                                "DK entry exceeds "
+                                "max_decompressed_size "
+                                "(uncompressed=%u, compressed=%u, "
+                                "cap=%" PRIu64 ")",
+                                (unsigned)ulen, (unsigned)clen,
+                                archive->max_decompressed);
+            return;
+        }
+
+        cbuf = (clen > 0) ? malloc(clen) : NULL;
+        if (clen > 0 && cbuf == NULL) {
+            verify_report(report, userdata,
+                          PAKKA_REPORT_ERROR,
+                          PAKKA_ERR_NOMEM, current->filename,
+                          "Cannot allocate DK deep-verify "
+                          "compressed buffer (%u bytes)",
+                          (unsigned)clen);
+            if (*first_error == PAKKA_OK) {
+                *first_error = PAKKA_ERR_NOMEM;
+            }
+            return;
+        }
+        if (clen > 0) {
+            if (pakka_compat_fseek(archive->fp,
+                                   (int64_t)current->offset,
+                                   SEEK_SET) != 0
+                || fread(cbuf, 1, clen, archive->fp) != clen) {
+                free(cbuf);
+                verify_report(report, userdata,
+                              PAKKA_REPORT_ERROR,
+                              PAKKA_ERR_IO, current->filename,
+                              "Cannot reread DK payload for "
+                              "deep verify");
+                if (*first_error == PAKKA_OK) {
+                    *first_error = PAKKA_ERR_IO;
+                }
+                return;
+            }
+        }
+        ubuf = (ulen > 0) ? malloc(ulen) : NULL;
+        if (ulen > 0 && ubuf == NULL) {
+            free(cbuf);
+            verify_report(report, userdata,
+                          PAKKA_REPORT_ERROR,
+                          PAKKA_ERR_NOMEM, current->filename,
+                          "Cannot allocate DK deep-verify "
+                          "output buffer (%u bytes)",
+                          (unsigned)ulen);
+            if (*first_error == PAKKA_OK) {
+                *first_error = PAKKA_ERR_NOMEM;
+            }
+            return;
+        }
+        dv = pakka_dk_inflate(cbuf, clen, ubuf, ulen,
+                              &deep_err);
+        free(cbuf);
+        free(ubuf);
+        if (dv != PAKKA_OK) {
+            verify_report(report, userdata,
+                          PAKKA_REPORT_ERROR, dv,
+                          current->filename,
+                          "%s", deep_err.message);
+            if (*first_error == PAKKA_OK) {
+                if (err != NULL) *err = deep_err;
+                *first_error = dv;
+            }
+            return;
+        }
+    }
+    verify_report(report, userdata, PAKKA_REPORT_INFO,
+                  PAKKA_OK, current->filename,
+                  "OK (%" PRIu32 " bytes)",
+                  current->length);
+}
+
 pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_report_fn report, void *userdata,
                             pakka_error_t *err) {
@@ -2179,219 +2410,8 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
     /* Pass A: per-entry name and payload integrity. */
     for (current = archive->head; current != NULL; current = current->next) {
         n_entries++;
-
-        if (pakka_unsafe_entry_name(current->filename)) {
-            verify_record_error(report, userdata, PAKKA_ERR_UNSAFE_NAME,
-                                err, &first_error, current->filename,
-                                PAKKA_ERR_DOMAIN_NONE, 0,
-                                (uint64_t)current->offset,
-                                (uint64_t)current->length,
-                                "Entry name is not safe to extract");
-            continue;        /* skip payload read for unsafe names */
-        }
-
-        if (current->length == 0) {
-            verify_report(report, userdata, PAKKA_REPORT_INFO,
-                          PAKKA_OK, current->filename,
-                          "OK (0 bytes)");
-            continue;
-        }
-
-        /* Skip queued-add ZIP entries (H2): their payload isn't on
-         * pak->fp yet — it lives in pk3_pending_source/_data and gets
-         * published at commit time. A seek to pk3_payload_offset == 0
-         * would read unrelated header bytes and report spurious
-         * findings. Pending entries are visible to pakka_verify so
-         * the entry-count is honest, just without an on-disk read. */
-        if (pakka_format_is_zip(archive->format)
-            && (current->pk3_pending_source != NULL
-                || current->pk3_pending_data != NULL)) {
-            verify_report(report, userdata, PAKKA_REPORT_INFO,
-                          PAKKA_OK, current->filename,
-                          "pending add (not yet committed)");
-            continue;
-        }
-
-        /* ZIP entries (PK3/PK4): on-disk payload is pk3_compressed_size bytes
-         * at pk3_payload_offset; entry->length is the UNCOMPRESSED
-         * size (which the PAK reads-stream-length convention doesn't
-         * match for DEFLATE entries). DK compressed entries use
-         * dk_compressed_size for the same reason — entry->length is the
-         * uncompressed payload size in that case. */
-        {
-            uint32_t verify_offset = current->offset;
-            uint32_t verify_length = current->length;
-            if (pakka_format_is_zip(archive->format)) {
-                verify_offset = current->pk3_payload_offset;
-                verify_length = current->pk3_compressed_size;
-            } else if (current->dk_is_compressed) {
-                verify_length = current->dk_compressed_size;
-            }
-            if (pakka_compat_fseek(archive->fp, (int64_t)verify_offset, SEEK_SET) != 0) {
-                int seek_errno = errno;
-                verify_record_error(report, userdata, PAKKA_ERR_IO, err,
-                                    &first_error, current->filename,
-                                    PAKKA_ERR_DOMAIN_ERRNO,
-                                    (uint32_t)seek_errno,
-                                    (uint64_t)verify_offset,
-                                    (uint64_t)verify_length,
-                                    "Cannot seek to entry payload at "
-                                    "offset %" PRIu32, verify_offset);
-                continue;
-            }
-            {
-                uint64_t remaining = (uint64_t)verify_length;
-                int io_failed = 0;
-                while (remaining > 0) {
-                    size_t chunk = remaining > sizeof(buf)
-                                 ? sizeof(buf) : (size_t)remaining;
-                    if (fread(buf, 1, chunk, archive->fp) != chunk) {
-                        int read_errno = errno;
-                        uint64_t at = (uint64_t)verify_offset
-                                    + ((uint64_t)verify_length - remaining);
-                        verify_record_error(report, userdata, PAKKA_ERR_IO,
-                                            err, &first_error,
-                                            current->filename,
-                                            PAKKA_ERR_DOMAIN_ERRNO,
-                                            (uint32_t)read_errno,
-                                            at, (uint64_t)verify_length,
-                                            "Cannot read entry payload "
-                                            "(short read at offset %"
-                                            PRIu64 ")", at);
-                        io_failed = 1;
-                        break;
-                    }
-                    remaining -= chunk;
-                }
-                if (!io_failed) {
-                    /* Deep verify (ZIP only): decompress + CRC32 check.
-                     * Structural read above already confirmed the
-                     * compressed bytes are readable; this catches
-                     * bit-rot in the payload, CRC mismatch, and
-                     * trailing junk in the deflate stream. */
-                    if (pakka_format_is_zip(archive->format)
-                        && (flags & PAKKA_VERIFY_DEEP)) {
-                        pakka_error_t deep_err;
-                        pakka_status_t dv = pakka_pk3_deep_verify_entry(
-                            archive, current, &deep_err);
-                        if (dv != PAKKA_OK) {
-                            verify_report(report, userdata,
-                                          PAKKA_REPORT_ERROR, dv,
-                                          current->filename,
-                                          "%s", deep_err.message);
-                            if (first_error == PAKKA_OK) {
-                                if (err != NULL) *err = deep_err;
-                                first_error = dv;
-                            }
-                            continue;
-                        }
-                    }
-                    /* Deep verify for Daikatana compressed entries:
-                     * decode through pakka_dk_inflate() and confirm the
-                     * produced byte count matches entry->length. DK has
-                     * no per-entry CRC, so byte count is the only
-                     * post-decode signal available. */
-                    if (archive->format == PAKKA_FORMAT_DAIKATANA
-                        && current->dk_is_compressed
-                        && (flags & PAKKA_VERIFY_DEEP)) {
-                        pakka_error_t deep_err;
-                        pakka_status_t dv;
-                        unsigned char *cbuf = NULL;
-                        unsigned char *ubuf = NULL;
-                        uint32_t clen = current->dk_compressed_size;
-                        uint32_t ulen = current->length;
-
-                        /* Same cap that pakka_open_entry enforces.
-                         * Without this, --verify --deep on a hostile DK
-                         * archive can allocate ulen bytes regardless of
-                         * pakka_set_max_decompressed_size. */
-                        if (archive->max_decompressed > 0
-                            && ((uint64_t)ulen > archive->max_decompressed
-                                || (uint64_t)clen > archive->max_decompressed)) {
-                            verify_record_error(report, userdata,
-                                                PAKKA_ERR_LIMIT, err,
-                                                &first_error,
-                                                current->filename,
-                                                PAKKA_ERR_DOMAIN_NONE, 0,
-                                                0, (uint64_t)ulen,
-                                                "DK entry exceeds "
-                                                "max_decompressed_size "
-                                                "(uncompressed=%u, "
-                                                "compressed=%u, "
-                                                "cap=%" PRIu64 ")",
-                                                (unsigned)ulen,
-                                                (unsigned)clen,
-                                                archive->max_decompressed);
-                            continue;
-                        }
-
-                        cbuf = (clen > 0) ? malloc(clen) : NULL;
-                        if (clen > 0 && cbuf == NULL) {
-                            verify_report(report, userdata,
-                                          PAKKA_REPORT_ERROR,
-                                          PAKKA_ERR_NOMEM, current->filename,
-                                          "Cannot allocate DK deep-verify "
-                                          "compressed buffer (%u bytes)",
-                                          (unsigned)clen);
-                            if (first_error == PAKKA_OK) {
-                                first_error = PAKKA_ERR_NOMEM;
-                            }
-                            continue;
-                        }
-                        if (clen > 0) {
-                            if (pakka_compat_fseek(archive->fp,
-                                                   (int64_t)current->offset,
-                                                   SEEK_SET) != 0
-                                || fread(cbuf, 1, clen, archive->fp) != clen) {
-                                free(cbuf);
-                                verify_report(report, userdata,
-                                              PAKKA_REPORT_ERROR,
-                                              PAKKA_ERR_IO, current->filename,
-                                              "Cannot reread DK payload for "
-                                              "deep verify");
-                                if (first_error == PAKKA_OK) {
-                                    first_error = PAKKA_ERR_IO;
-                                }
-                                continue;
-                            }
-                        }
-                        ubuf = (ulen > 0) ? malloc(ulen) : NULL;
-                        if (ulen > 0 && ubuf == NULL) {
-                            free(cbuf);
-                            verify_report(report, userdata,
-                                          PAKKA_REPORT_ERROR,
-                                          PAKKA_ERR_NOMEM, current->filename,
-                                          "Cannot allocate DK deep-verify "
-                                          "output buffer (%u bytes)",
-                                          (unsigned)ulen);
-                            if (first_error == PAKKA_OK) {
-                                first_error = PAKKA_ERR_NOMEM;
-                            }
-                            continue;
-                        }
-                        dv = pakka_dk_inflate(cbuf, clen, ubuf, ulen,
-                                              &deep_err);
-                        free(cbuf);
-                        free(ubuf);
-                        if (dv != PAKKA_OK) {
-                            verify_report(report, userdata,
-                                          PAKKA_REPORT_ERROR, dv,
-                                          current->filename,
-                                          "%s", deep_err.message);
-                            if (first_error == PAKKA_OK) {
-                                if (err != NULL) *err = deep_err;
-                                first_error = dv;
-                            }
-                            continue;
-                        }
-                    }
-                    verify_report(report, userdata, PAKKA_REPORT_INFO,
-                                  PAKKA_OK, current->filename,
-                                  "OK (%" PRIu32 " bytes)",
-                                  current->length);
-                }
-            }
-        }
+        verify_entry(archive, current, flags, report, userdata,
+                     buf, sizeof(buf), &first_error, err);
     }
 
     /* Pass B: normalized-collision scan. Builds one array of
