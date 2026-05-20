@@ -78,6 +78,36 @@ Q3DEMO_SHA256=e9f89ef064317634aab3b3a3add131887967fc04744526bd624e1914b1e25b3e
 Q3DEMO_ZIP=$(TEST_DIR)/q3demo.zip
 Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 
+# GoldSrc PAK fixtures — two real Valve-built PACK archives from the
+# Half-Life 1 lineage. GoldSrc PAK is bit-identical to Quake/Q2 PAK
+# (same 12-byte header, 56-byte names, 64-byte entries), so these are
+# parity-confirmation fixtures against real Valve writer output, not a
+# separate code path. Driven by `slow-test-goldsrc` (separate from the
+# Q3 demo's `slow-test`); default `make test` leaves them untouched
+# and tests/pak_goldsrc.bats skips when the env vars are unset.
+#
+# Both wrappers are plain ZIPs from archive.org; we unzip then copy
+# the inner pak0 out to a canonical path under build/test/. unzip is
+# in every base Linux/BSD/macOS install plus MSYS2 — no extra
+# dependency vs. the 7z/unrar paths the upstream archive uploaders
+# could have chosen.
+#
+# Fixture A: Half-Life Uplink (1999 free demo). 48 MiB zip from the
+# half-life-day-one archive.org item (the same item also wraps Day
+# One and Opposing Force). Inner path Half-LifeUplink/valve/pak0.PAK
+# (uppercase extension, as Valve shipped it).
+# Fixture B: Half-Life: Day One (1998 OEM video-card-bundled demo).
+# 90 MiB zip. Inner path Half-Life Day One/valve/pak0.pak.
+GOLDSRC_UPLINK_URL=https://archive.org/download/half-life-day-one/Half-LifeUplink.zip
+GOLDSRC_UPLINK_SHA256=6e06a9f25d36ec12750da8f94af24a71f26af2330a665a9d4922421db4459aa4
+GOLDSRC_UPLINK_WRAPPER=$(TEST_DIR)/hl-uplink.zip
+GOLDSRC_UPLINK_PAK0=$(TEST_DIR)/hl-uplink/valve/pak0.pak
+
+GOLDSRC_DAYONE_URL=https://archive.org/download/half-life-day-one/Half-Life%20Day%20One.zip
+GOLDSRC_DAYONE_SHA256=35098523a078cd2cde858a261e7071f1e1e79ae0c38fac9302186d3cd9bd001d
+GOLDSRC_DAYONE_WRAPPER=$(TEST_DIR)/hl-dayone.zip
+GOLDSRC_DAYONE_PAK0=$(TEST_DIR)/hl-dayone/valve/pak0.pak
+
 CLANG_TIDY ?= clang-tidy
 NM ?= nm
 
@@ -86,7 +116,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header lint-advisory coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
+.PHONY: all clean test test-clean distclean lint lint-header lint-advisory coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture slow-test slow-test-goldsrc
 
 # Force serial execution. force-relink (below) deletes $(TARGET) and
 # $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
@@ -316,9 +346,67 @@ $(Q3DEMO_PAK0_PK3): $(TARGET) verify-q3demo
 	@cp $(TEST_DIR)/q3demo_raw/Quake\ 3\ Arena\ Demo/demoq3/pak0.pk3 $(Q3DEMO_PAK0_PK3)
 	@echo "==> Q3 demo pak0.pk3 ready: $(Q3DEMO_PAK0_PK3)"
 
+# GoldSrc fixture download + SHA verify + extract. Both wrappers are
+# plain ZIPs; we unzip then copy the inner pak file out to the
+# canonical $(GOLDSRC_*_PAK0) path. The inner paths use the names
+# Valve shipped (spaces, uppercase .PAK) — we normalize to lowercase
+# valve/pak0.pak on copy so the bats env vars point at a predictable
+# location.
+$(GOLDSRC_UPLINK_WRAPPER):
+	@mkdir -p $(TEST_DIR)
+	@echo "==> Downloading Half-Life Uplink demo ($(GOLDSRC_UPLINK_URL))"
+	@curl -fsSL -o $(GOLDSRC_UPLINK_WRAPPER) "$(GOLDSRC_UPLINK_URL)"
+
+verify-goldsrc-uplink: $(GOLDSRC_UPLINK_WRAPPER)
+	@actual=`openssl dgst -sha256 $(GOLDSRC_UPLINK_WRAPPER) | awk '{print $$NF}'`; \
+	if [ "$$actual" != "$(GOLDSRC_UPLINK_SHA256)" ]; then \
+		echo "==> SHA256 mismatch on Half-Life Uplink: expected $(GOLDSRC_UPLINK_SHA256), got $$actual" >&2; \
+		rm -f $(GOLDSRC_UPLINK_WRAPPER); \
+		exit 1; \
+	fi
+
+$(GOLDSRC_UPLINK_PAK0): verify-goldsrc-uplink
+	@command -v unzip >/dev/null 2>&1 || { echo "goldsrc fixture: unzip not found" >&2; exit 1; }
+	@mkdir -p $(TEST_DIR)/hl-uplink-raw $(TEST_DIR)/hl-uplink/valve
+	unzip -q -o -d $(TEST_DIR)/hl-uplink-raw $(GOLDSRC_UPLINK_WRAPPER)
+	@cp "$(TEST_DIR)/hl-uplink-raw/Half-LifeUplink/valve/pak0.PAK" $(GOLDSRC_UPLINK_PAK0)
+	@echo "==> Half-Life Uplink pak0.pak ready: $(GOLDSRC_UPLINK_PAK0)"
+
+$(GOLDSRC_DAYONE_WRAPPER):
+	@mkdir -p $(TEST_DIR)
+	@echo "==> Downloading Half-Life: Day One demo ($(GOLDSRC_DAYONE_URL))"
+	@curl -fsSL -o $(GOLDSRC_DAYONE_WRAPPER) "$(GOLDSRC_DAYONE_URL)"
+
+verify-goldsrc-dayone: $(GOLDSRC_DAYONE_WRAPPER)
+	@actual=`openssl dgst -sha256 $(GOLDSRC_DAYONE_WRAPPER) | awk '{print $$NF}'`; \
+	if [ "$$actual" != "$(GOLDSRC_DAYONE_SHA256)" ]; then \
+		echo "==> SHA256 mismatch on Half-Life: Day One: expected $(GOLDSRC_DAYONE_SHA256), got $$actual" >&2; \
+		rm -f $(GOLDSRC_DAYONE_WRAPPER); \
+		exit 1; \
+	fi
+
+$(GOLDSRC_DAYONE_PAK0): verify-goldsrc-dayone
+	@command -v unzip >/dev/null 2>&1 || { echo "goldsrc fixture: unzip not found" >&2; exit 1; }
+	@mkdir -p $(TEST_DIR)/hl-dayone-raw $(TEST_DIR)/hl-dayone/valve
+	unzip -q -o -d $(TEST_DIR)/hl-dayone-raw $(GOLDSRC_DAYONE_WRAPPER)
+	@cp "$(TEST_DIR)/hl-dayone-raw/Half-Life Day One/valve/pak0.pak" $(GOLDSRC_DAYONE_PAK0)
+	@echo "==> Half-Life: Day One pak0.pak ready: $(GOLDSRC_DAYONE_PAK0)"
+
 # Optional: full PK3 suite against id's real Q3 demo pak0.pk3. Pulls
 # 93 MiB from archive.org, so kept out of `make test`. CI can opt in
 # by running `make slow-test` on a single representative job.
 slow-test: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats tests/pk3_q3demo.bats
+
+# GoldSrc parity-confirmation suite. Kept separate from slow-test
+# because the GoldSrc fixtures are heavier (~138 MiB combined) and add
+# a second archive.org dependency on top of the Q3 demo path. Pulls
+# the Uplink (48 MiB) and Day One (90 MiB) zip wrappers, extracts
+# valve/pak0.pak from each, and runs tests/pak_goldsrc.bats against
+# both real Valve-built archives.
+slow-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) symbol-audit
+	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
+	GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
+	GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \
+	bats tests/pak_goldsrc.bats

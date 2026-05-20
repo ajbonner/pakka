@@ -839,12 +839,17 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
             if (src + 1 >= argc) {
                 fprintf(stderr,
                         "--format requires one argument: "
-                        "pak | sin | daikatana | pk3 | pk4\n");
+                        "pak | goldsrc | hl | sin | daikatana | pk3 | pk4\n");
                 usage();
             }
             {
                 const char *name = argv[src + 1];
-                if (strcmp(name, "pak") == 0) {
+                /* GoldSrc PAKs (Half-Life 1, CS 1.6, TFC, ...) are
+                 * bit-identical to Quake/Q2 PAK; the aliases give modders
+                 * a discoverable name on --help. */
+                if (strcmp(name, "pak") == 0
+                    || strcmp(name, "goldsrc") == 0
+                    || strcmp(name, "hl") == 0) {
                     opts->format = PAKKA_FORMAT_PAK;
                 } else if (strcmp(name, "sin") == 0) {
                     opts->format = PAKKA_FORMAT_SIN;
@@ -860,7 +865,7 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
                 } else {
                     fprintf(stderr,
                             "Unknown --format value: %s "
-                            "(use pak, sin, daikatana, pk3, or pk4)\n",
+                            "(use pak, goldsrc, hl, sin, daikatana, pk3, or pk4)\n",
                             name);
                     usage();
                 }
@@ -1010,7 +1015,8 @@ static void version(void) {
     printf("libpakka %s (linked)\n", pakka_version());
     printf("\n");
     printf("Supported formats:\n");
-    printf("  pak         Quake 1 / 2          read + write\n");
+    printf("  pak         Quake 1 / 2 and GoldSrc (Half-Life 1, CS 1.6, TFC, ...)  read + write\n");
+    printf("              (--format goldsrc and --format hl are aliases for pak)\n");
     printf("  sin         Ritual SiN (1998)    read + write\n");
     printf("  daikatana   Ion Storm (2000)     read-only (custom codec, no encoder)\n");
     printf("  pk3         Quake 3 / ZIP        read + write (STORED on write; STORED + DEFLATE on read)\n");
@@ -1048,6 +1054,7 @@ static void help(void) {
     fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");
     fprintf(stderr, "                                 (repeat --as for multiple aliased pairs; may mix with plain paths)\n");
     fprintf(stderr, " --format <name>                 pin archive format: pak, sin, daikatana, pk3, pk4\n");
+    fprintf(stderr, "                                 (goldsrc and hl are aliases for pak — Half-Life 1 / CS 1.6 / TFC use Quake PAK)\n");
     fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
     fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");
     fprintf(stderr, "\nExamples:\n");

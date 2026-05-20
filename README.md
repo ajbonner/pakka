@@ -1,7 +1,8 @@
 # Pakka
-A command line utility for working with Quake 1 / 2 `.pak` files,
-SiN `.sin` archives, Daikatana `.pak` archives (read-only),
-Quake 3 `.pk3` files, and Doom 3 `.pk4` files.
+A command line utility for working with Quake 1 / 2 and GoldSrc
+(Half-Life 1, Counter-Strike 1.6, TFC, ...) `.pak` files, SiN `.sin`
+archives, Daikatana `.pak` archives (read-only), Quake 3 `.pk3` files,
+and Doom 3 `.pk4` files.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -45,12 +46,16 @@ the same `src/*.c` (including `src/pk3file.c` and the vendored
 
 ## Usage
 Pakka has 6 major modes (one per invocation), each working on `.pak`
-(Quake 1 / 2), `.sin` (SiN), Daikatana `.pak` (read-only), `.pk3`
-(Quake 3), and `.pk4` (Doom 3) archives. PK3 and PK4 are byte-identical
-ZIP containers; the extension only changes the label returned by
-`pakka_format()`. Daikatana shares Quake's `"PACK"` magic — pakka
-probes both directory layouts at open time, and `--format daikatana`
-pins the decision when the archive is ambiguous.
+(Quake 1 / 2 and GoldSrc — Half-Life 1, CS 1.6, TFC, Sven Co-op, ...),
+`.sin` (SiN), Daikatana `.pak` (read-only), `.pk3` (Quake 3), and
+`.pk4` (Doom 3) archives. GoldSrc PAKs are bit-identical to Quake/Q2
+PAKs (same `"PACK"` magic, 56-byte names, 64-byte directory entries),
+so `--format pak` (or its `goldsrc` / `hl` aliases) covers them with
+the same code path. PK3 and PK4 are byte-identical ZIP containers; the
+extension only changes the label returned by `pakka_format()`. Daikatana
+shares Quake's `"PACK"` magic — pakka probes both directory layouts at
+open time, and `--format daikatana` pins the decision when the archive
+is ambiguous.
 
 The archive path is the first positional argument; any further
 positionals are entry names (for `-x` / `-d`) or source files (for `-a`
@@ -69,9 +74,9 @@ first positional.
 * Create: `./pakka -c <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * Format is picked from the destination extension (case-insensitive):
     `.pk3` → PK3, `.pk4` → PK4, `.sin` → SiN, anything else → PAK.
-    `--format <name>` (`pak`, `sin`, `pk3`, `pk4`) overrides the
-    extension. `--format daikatana` is rejected on `-c` (Daikatana
-    archives are read-only).
+    `--format <name>` (`pak` — also `goldsrc` / `hl`, `sin`, `pk3`,
+    `pk4`) overrides the extension. `--format daikatana` is rejected on
+    `-c` (Daikatana archives are read-only).
 * Add to archive: `./pakka -a <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
     entry name (the source path on disk and the name stored in the archive
@@ -92,7 +97,7 @@ supported-format matrix.
 
 | Format | Read | List | Extract | Create | Add | Delete | Verify |
 |---|---|---|---|---|---|---|---|
-| Quake 1 / 2 PAK | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
+| Quake 1 / 2 PAK (also GoldSrc: Half-Life 1, CS 1.6, TFC, Sven Co-op) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | SiN (`SPAK`, 120-byte names) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Daikatana (`PACK`, 72-byte entries, custom codec) | ✓ | ✓ | ✓ | — | — | — | ✓ |
 | Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ (STORED) | ✓ (STORED) | ✓ | ✓ |
