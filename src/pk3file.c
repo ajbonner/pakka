@@ -1812,8 +1812,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                 e->filename);
                         }
                         recomputed_crc = pk3_crc32_update(recomputed_crc,
-                                                         copy_buf,
-                                                         (size_t)got);
+                                                         copy_buf, got);
                         remaining -= (uint64_t)got;
                     }
                     fclose(src);

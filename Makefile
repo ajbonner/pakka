@@ -199,7 +199,8 @@ lint-win32:
 		$(CPPFLAGS) \
 		--target=x86_64-w64-mingw32 \
 		-isystem $(WIN32_HEADERS) \
-		-Isrc -Isrc/vendor/wingetopt -Isrc/vendor/dirent \
+		-Isrc \
+		-isystem src/vendor/wingetopt -isystem src/vendor/dirent \
 		--std=c99 \
 		-Wno-pragma-pack -Wno-pragma-system-header-outside-header
 
@@ -279,7 +280,13 @@ coverage:
 	lcov --capture --directory $(BUILD_DIR)/obj-test \
 	     --output-file $(BUILD_DIR)/coverage/coverage.info \
 	     --rc geninfo_unexecuted_blocks=1
+	# --ignore-errors unused: lcov 2.x treats "exclude pattern matched
+	# zero files" as a hard error. /usr/* and /Library/* are platform-
+	# specific noise that may or may not be present in the .info file
+	# depending on which host ran the build; suppressing the unused-
+	# pattern check lets a single pattern set serve macOS + Linux.
 	lcov --remove $(BUILD_DIR)/coverage/coverage.info '*/src/vendor/*' '/usr/*' '/Library/*' \
+	     --ignore-errors unused \
 	     --output-file $(BUILD_DIR)/coverage/filtered.info
 	genhtml $(BUILD_DIR)/coverage/filtered.info --output-directory $(BUILD_DIR)/coverage/html \
 	        --legend --quiet
