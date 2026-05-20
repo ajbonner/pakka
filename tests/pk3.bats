@@ -398,6 +398,156 @@ EOF
     [ "$status" -eq 0 ]
 }
 
+@test "pk3 c-api: verify --deep respects max_decompressed_size cap" {
+    # M4 regression: pakka_verify with PAKKA_VERIFY_DEEP previously
+    # bypassed pak->max_decompressed and could allocate compressed +
+    # inflated buffers up to entry->length regardless of the configured
+    # cap. Now both ZIP and DK deep-verify enforce the same cap that
+    # pakka_open_entry does.
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH (MSYS2 / MSVC build)"
+    cat > "$BATS_TEST_TMPDIR/verify_cap.c" <<'EOF'
+#include <stdio.h>
+#include "pakka.h"
+static int saw_limit = 0;
+static void cb(void *userdata, pakka_report_severity_t sev,
+               pakka_status_t status,
+               const char *entry_name, const char *message) {
+    (void)userdata; (void)sev; (void)entry_name; (void)message;
+    if (status == PAKKA_ERR_LIMIT) saw_limit = 1;
+}
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s = pakka_open(argv[1], PAKKA_OPEN_READ, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "open: %s\n", err.message); return 2; }
+    s = pakka_set_max_decompressed_size(a, 100, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "cap: %s\n", err.message); return 3; }
+    s = pakka_verify(a, PAKKA_VERIFY_DEEP, cb, NULL, &err);
+    pakka_close(a, &err);
+    if (s != PAKKA_ERR_LIMIT) {
+        fprintf(stderr, "expected PAKKA_ERR_LIMIT, got %d\n", (int)s);
+        return 4;
+    }
+    if (!saw_limit) { fprintf(stderr, "no LIMIT report fired\n"); return 5; }
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/verify_cap" \
+        "$BATS_TEST_TMPDIR/verify_cap.c" \
+        "${PROJECT_ROOT}/build/lib/libpakka.a"
+    run "$BATS_TEST_TMPDIR/verify_cap" "$BATS_FILE_TMPDIR/mixed.pk3"
+    [ "$status" -eq 0 ]
+}
+
+@test "pk3 commit: truncates stale EOCD comment" {
+    # H4 regression: before the ftruncate in pakka_pk3_commit_impl,
+    # an archive opened with a long EOCD comment would keep stale
+    # trailing bytes after a commit that produced a shorter file. The
+    # next open would find the OLD EOCD bytes (whose CDR pointer now
+    # references bytes overwritten by the new payload) and treat the
+    # archive as corrupt or report wrong entries.
+
+    # zip -z reads the comment from stdin and stores it in the EOCD.
+    # The comment is long enough that the post-pakka commit must
+    # actively truncate to drop it.
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "alpha" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/commented.pk3" alpha.txt)
+    printf '%500s' "PAKKA-EOCD-COMMENT-PADDING" \
+        | zip -q -z "$BATS_TEST_TMPDIR/commented.pk3"
+    pre=$(wc -c < "$BATS_TEST_TMPDIR/commented.pk3")
+
+    # Add one entry then implicitly commit on close.
+    echo "beta" > "$BATS_TEST_TMPDIR/beta.txt"
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/commented.pk3" \
+        --as "beta.txt" "$BATS_TEST_TMPDIR/beta.txt"
+    [ "$status" -eq 0 ]
+
+    # Reopen and confirm pakka sees BOTH entries — the old EOCD would
+    # have been found first and reported only alpha.txt or errored.
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/commented.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"alpha.txt"* ]]
+    [[ "$output" == *"beta.txt"* ]]
+
+    # File must have shrunk: 500-byte comment is gone.
+    post=$(wc -c < "$BATS_TEST_TMPDIR/commented.pk3")
+    [ "$post" -lt "$pre" ]
+}
+
+@test "pk3 add: rejects symlink source via --as" {
+    # H1 regression: before the preflight hoist, the ZIP add path
+    # dispatched to pakka_pk3_add_file_impl before pakka_add_file ran
+    # the symlink/regular-file checks. A --as pointing at a symlink
+    # would follow it for .pk3/.pk4 while the same call against a PAK
+    # archive refused. Both branches now share the source preflight.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    printf 'real\n' > "$BATS_TEST_TMPDIR/real.txt"
+    ln -s "$BATS_TEST_TMPDIR/real.txt" "$BATS_TEST_TMPDIR/link.txt"
+
+    # Start from an empty .pk3 so we don't depend on shared fixtures.
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pk3" \
+        --as "alias.txt" "$BATS_TEST_TMPDIR/link.txt"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "symlink"
+
+    # And the same archive should still be readable + empty.
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/work.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" != *"alias.txt"* ]]
+}
+
+@test "pk4 add: rejects symlink source via --as" {
+    # Same H1 regression, .pk4 twin. PK3 and PK4 share the dispatch
+    # branch but the format label differs — explicit coverage so a
+    # future change that splits them can't regress one silently.
+    case "$PAKKA" in *.exe) skip "POSIX-only test" ;; esac
+
+    printf 'real\n' > "$BATS_TEST_TMPDIR/real.txt"
+    ln -s "$BATS_TEST_TMPDIR/real.txt" "$BATS_TEST_TMPDIR/link.txt"
+
+    run "$PAKKA" -c "$BATS_TEST_TMPDIR/work.pk4"
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -a "$BATS_TEST_TMPDIR/work.pk4" \
+        --as "alias.txt" "$BATS_TEST_TMPDIR/link.txt"
+    [ "$status" -ne 0 ]
+    echo "$output" | grep -q -i "symlink"
+}
+
+@test "pk3 commit: rebuild path also drops stale EOCD comment" {
+    # H4 follow-up: the add-only commit truncates; the rebuild commit
+    # (any pakka_delete touched the list) writes through a fresh temp
+    # file so trailing bytes can't survive — but pin it with a test so
+    # a future refactor that drops the temp-rename can't regress.
+    mkdir -p "$BATS_TEST_TMPDIR/src"
+    echo "alpha" > "$BATS_TEST_TMPDIR/src/alpha.txt"
+    echo "gamma" > "$BATS_TEST_TMPDIR/src/gamma.txt"
+    (cd "$BATS_TEST_TMPDIR/src" \
+        && zip -q "$BATS_TEST_TMPDIR/commented.pk3" alpha.txt gamma.txt)
+    printf '%500s' "PAKKA-EOCD-COMMENT-PADDING" \
+        | zip -q -z "$BATS_TEST_TMPDIR/commented.pk3"
+    pre=$(wc -c < "$BATS_TEST_TMPDIR/commented.pk3")
+
+    # Delete forces the rebuild path on commit.
+    run "$PAKKA" -d "$BATS_TEST_TMPDIR/commented.pk3" gamma.txt
+    [ "$status" -eq 0 ]
+
+    run "$PAKKA" -l "$BATS_TEST_TMPDIR/commented.pk3"
+    [ "$status" -eq 0 ]
+    [[ "$output" == *"alpha.txt"* ]]
+    [[ "$output" != *"gamma.txt"* ]]
+
+    post=$(wc -c < "$BATS_TEST_TMPDIR/commented.pk3")
+    [ "$post" -lt "$pre" ]
+}
+
 @test "pk3 open: directory entries (trailing /) are silently skipped" {
     # zip -r includes empty subdirs as size-zero entries named "foo/"
     mkdir -p "$BATS_TEST_TMPDIR/dirsrc/empty_dir"

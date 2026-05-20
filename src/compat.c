@@ -212,6 +212,20 @@ int pakka_compat_rename_noreplace(const char *src, const char *dst,
     return -1;
 }
 
+int pakka_compat_ftruncate(FILE *fp, int64_t length) {
+    int err;
+    if (fflush(fp) != 0) {
+        return -1;
+    }
+    /* _chsize_s returns 0 on success, otherwise an errno value. */
+    err = _chsize_s(_fileno(fp), (__int64)length);
+    if (err != 0) {
+        errno = err;
+        return -1;
+    }
+    return 0;
+}
+
 int pakka_compat_lstat(const char *path, struct stat *sb) {
     /* Windows has no POSIX symlinks. The recursive-add path checks
      * for reparse points via pakka_compat_is_reparse_or_symlink — keep
@@ -496,6 +510,13 @@ int pakka_compat_rename_noreplace(const char *src, const char *dst,
         return -1;
     }
     return 0;
+}
+
+int pakka_compat_ftruncate(FILE *fp, int64_t length) {
+    if (fflush(fp) != 0) {
+        return -1;
+    }
+    return ftruncate(fileno(fp), (off_t)length);
 }
 
 int pakka_compat_lstat(const char *path, struct stat *sb) {

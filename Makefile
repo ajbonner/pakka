@@ -95,7 +95,7 @@ lint: lint-header
 # C identifiers can't contain a dot, so this can't hide a pakka leak.
 symbol-audit: $(LIBPAKKA)
 	@all=`$(NM) -g $(LIBPAKKA) | awk 'NF == 3 && $$2 ~ /^[TDBRSC]$$/ { sub(/^_/, "", $$3); if ($$3 ~ /\./) next; print $$3 }' | sort -u`; \
-	bad=`printf '%s\n' "$$all" | grep -v '^pakka_' || true`; \
+	bad=`printf '%s\n' "$$all" | grep -v '^pakka_' | grep -Ev '^(_+(asan|ubsan|tsan|msan|hwasan|lsan)_|_*asan\.module_ctor|_*asan\.module_dtor)' || true`; \
 	printf '%s\n' "$$all"; \
 	if [ -n "$$bad" ]; then \
 		echo "" >&2; \

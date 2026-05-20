@@ -92,6 +92,35 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
+  # ASan + UBSan canary. Linked against libpakka.a + the CLI under
+  # -fsanitize=address,undefined with -fno-sanitize-recover=undefined so
+  # any UB during the bats suite is a hard failure. -O1 keeps inlining
+  # readable in error traces; the assumption is that this job catches
+  # leaks, use-after-free, and signed overflow, NOT logical archive
+  # corruption — fault-injection bats (separate harness) covers that.
+  asan-ubsan-x86_64:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl zip python3
+      - run: |
+          make CFLAGS="-g -O1 -Wall --std=c99 --pedantic \
+              -fno-omit-frame-pointer \
+              -fsanitize=address,undefined \
+              -fno-sanitize-recover=undefined" \
+              test
+        env:
+          ASAN_OPTIONS: detect_leaks=1:abort_on_error=1:halt_on_error=1
+          UBSAN_OPTIONS: print_stacktrace=1:halt_on_error=1
+
   linux-glibc-arm64:
     runs-on: ubuntu-24.04-arm
     steps:

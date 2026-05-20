@@ -52,6 +52,18 @@
  * Q3 content (largest demo asset is ~5 MiB) while bounding peak RSS. */
 #define PK3_DEFAULT_MAX_DECOMPRESSED ((uint64_t)64u * 1024u * 1024u)
 
+/* Hard ceiling on the EOCD-declared CDR size at open time. cdr_size
+ * is a u32 (up to 4 GiB); a hostile archive can declare an inflated
+ * value and force malloc(cdr_size) before any per-entry validation
+ * runs. 64 MiB is an intentional metadata cap that clears every
+ * realistic PK3 / PK4 the formats target; the standard spec permits
+ * larger CDRs (extras/comments can run to u16 max per record), so
+ * the gate is a pakka policy, not a spec limit. Distinct from
+ * max_decompressed because pk3_load_cdr runs inside
+ * pakka_pk3_open_impl, before the caller can call
+ * pakka_set_max_decompressed_size. */
+#define PK3_MAX_CDR_SIZE ((uint64_t)64u * 1024u * 1024u)
+
 /* These struct tags match the opaque forward declarations in
  * include/pakka.h. Public consumers see only the tag; the full
  * definitions stay internal. */

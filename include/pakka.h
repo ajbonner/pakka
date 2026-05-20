@@ -209,13 +209,22 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                             pakka_report_fn report, void *userdata,
                             pakka_error_t *err);
 
-/* Cap the maximum decompressed payload size that pakka_open_entry and
- * pakka_read_entry_alloc will accept for archives with compressed
- * entries (PK3/PK4 DEFLATE and Daikatana). Set to 0 to disable the
- * cap. Default is 64 MiB. Applies to both compressed and uncompressed
- * sides — peak resident bytes during inflate are bounded by 2x this
- * value per open reader. No effect on Quake PAK / SiN archives or
- * STORED ZIP entries (no decompression step). */
+/* Cap the maximum payload size that pakka_open_entry and
+ * pakka_read_entry_alloc will accept. Set to 0 to disable the cap.
+ * Default is 64 MiB.
+ *
+ * Coverage by format:
+ *   - PK3 / PK4 (every entry, STORED or DEFLATE): caps both the
+ *     declared uncompressed size and the on-disk compressed size,
+ *     so peak resident bytes during inflate are bounded by 2x the
+ *     cap per open reader.
+ *   - Daikatana compressed entries: same as ZIP — caps both sides.
+ *   - Quake PAK / SiN / Daikatana STORED: no effect (no decompression
+ *     step; the on-disk size IS the payload size).
+ *
+ * Also gates the open-time ZIP CDR allocation against a separate,
+ * non-tunable PK3_MAX_CDR_SIZE so a hostile EOCD-declared cdr_size
+ * can't force a multi-GiB malloc before per-entry validation runs. */
 pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive,
                                                uint64_t max_bytes,
                                                pakka_error_t *err);

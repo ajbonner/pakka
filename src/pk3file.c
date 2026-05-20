@@ -445,6 +445,21 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
                             (unsigned)entry_count, (unsigned)cdr_size);
     }
 
+    /* Cap CDR-size against a separate open-time constant. EOCD's
+     * cdr_size is a u32 and an attacker can declare it inflated to
+     * force a 4 GiB malloc here, before per-entry validation runs.
+     * Not gated on pak->max_decompressed because that knob is set
+     * earlier in this same call (no caller-visible window). See
+     * PK3_MAX_CDR_SIZE in src/common.h for the rationale. */
+    if ((uint64_t)cdr_size > PK3_MAX_CDR_SIZE) {
+        return pk3_err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "ZIP CDR size (%u) exceeds open-time cap "
+                            "(%" PRIu64 ")",
+                            (unsigned)cdr_size,
+                            (uint64_t)PK3_MAX_CDR_SIZE);
+    }
+
     cdr = malloc(cdr_size);
     if (cdr == NULL) {
         return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -876,6 +891,25 @@ pakka_status_t pakka_pk3_deep_verify_entry(Pak_t *pak, Pakfileentry_t *entry,
     uint32_t crc;
     pakka_status_t s;
     int rc;
+
+    /* Enforce the same decompressed-size cap that pakka_open_entry
+     * applies. --verify --deep on a hostile archive can otherwise force
+     * unbounded compressed and inflated allocations regardless of the
+     * caller's pakka_set_max_decompressed_size choice. */
+    if (pak->max_decompressed > 0) {
+        if ((uint64_t)entry->length > pak->max_decompressed
+            || (uint64_t)entry->pk3_compressed_size > pak->max_decompressed) {
+            return pk3_err_fill(err, PAKKA_ERR_LIMIT,
+                                PAKKA_ERR_DOMAIN_NONE, 0, "verify",
+                                "ZIP entry %s exceeds max_decompressed_size "
+                                "(uncompressed=%u, compressed=%u, cap=%"
+                                PRIu64 ")",
+                                entry->filename,
+                                (unsigned)entry->length,
+                                (unsigned)entry->pk3_compressed_size,
+                                pak->max_decompressed);
+        }
+    }
 
     /* Zero-byte entry: CRC32 of empty is 0; only validate CRC.
      * No on-disk bytes to read or decompress. */
@@ -1524,10 +1558,22 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                             "Cannot flush ZIP commit");
     }
 
-    /* Update file_size cache for any subsequent reads. */
-    if (pakka_compat_fseek(pak->fp, 0, SEEK_END) == 0) {
-        int64_t n = pakka_compat_ftell(pak->fp);
-        if (n > 0) pak->file_size = (uint64_t)n;
+    /* Drop any bytes past the new EOCD. An EOCD comment from the
+     * pre-commit archive (or a longer prior CDR after deletes) can
+     * outlive the new EOCD record, and pk3_find_eocd scans for
+     * EOCD+comment ending exactly at EOF — without truncation, reopen
+     * would find the stale tail instead of the new EOCD. */
+    {
+        int64_t new_eof = (int64_t)pak->pk3_cdr_offset
+                        + (int64_t)cdr_size
+                        + (int64_t)PK3_EOCD_SIZE;
+        if (pakka_compat_ftruncate(pak->fp, new_eof) != 0) {
+            saved_errno = errno;
+            return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "commit",
+                                "Cannot truncate ZIP after EOCD");
+        }
+        pak->file_size = (uint64_t)new_eof;
     }
 
     pak->dirty = 0;

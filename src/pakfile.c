@@ -1273,6 +1273,85 @@ static pakka_status_t refuse_dk_mutation(pakka_archive_t *archive,
     return PAKKA_OK;
 }
 
+/* Format-specific entry-name length cap. PAK rows are sized by
+ * geometry (Quake 56, SiN 120); ZIP uses PAKKA_ENTRY_NAME_SIZE (256). */
+static size_t pak_entry_name_cap(const Pak_t *archive) {
+    if (pakka_format_is_zip(archive->format)) {
+        return PAKKA_ENTRY_NAME_SIZE;
+    } else {
+        const pakka_pak_geometry_t *g = pakka_pak_geometry(archive->format);
+        return (g != NULL) ? g->name_field_len : PAKFILE_PATH_MAX;
+    }
+}
+
+/* Cross-format add preflight: entry-name cap + safety + duplicate.
+ * Runs for both PAK and ZIP before format dispatch so a single source
+ * of truth covers every add. Order matches the pre-libpakka PAK path:
+ * name-cap first (most specific), unsafe-name, then duplicate. Drift
+ * here previously let .pk3/.pk4 adds skip source-side hardening — keep
+ * new checks in one branch only. */
+static pakka_status_t pak_add_preflight(Pak_t *archive,
+                                        const char *entry_name,
+                                        const char *op_name,
+                                        pakka_error_t *err) {
+    size_t name_len = strlen(entry_name);
+    size_t name_cap = pak_entry_name_cap(archive);
+    if (name_len >= name_cap) {
+        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                 op_name, "Entry name too long for pak "
+                 "(%zu bytes, max %zu)", name_len, name_cap - 1);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_LIMIT;
+    }
+    if (pakka_unsafe_entry_name(entry_name)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 op_name, "Entry name is not safe to extract: %s",
+                 entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+    if (find_entry(archive, (char *)entry_name) != NULL) {
+        err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
+                 op_name, "Duplicate entry: %s already exists in pak",
+                 entry_name);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_DUPLICATE;
+    }
+    return PAKKA_OK;
+}
+
+/* Source-side hardening: reject symlink/reparse points and any
+ * non-regular file (FIFO, socket, char/block device). add_memory has no
+ * source path so it skips this; add_file calls it for both PAK and ZIP. */
+static pakka_status_t pak_add_source_preflight(const char *source_path,
+                                               const char *entry_name,
+                                               const char *op_name,
+                                               pakka_error_t *err) {
+    struct stat sb;
+    int saved_errno;
+    if (pakka_compat_is_reparse_or_symlink(source_path)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 op_name, "Refusing symlink/reparse source: %s",
+                 source_path);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+    if (pakka_compat_lstat(source_path, &sb) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, op_name,
+                        "Cannot stat source %s", source_path);
+    }
+    if (!S_ISREG(sb.st_mode)) {
+        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
+                 op_name, "Source is not a regular file: %s",
+                 source_path);
+        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_UNSAFE_NAME;
+    }
+    return PAKKA_OK;
+}
+
 pakka_status_t pakka_add_file(pakka_archive_t *archive,
                               const char *source_path,
                               const char *entry_name,
@@ -1284,11 +1363,10 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     Pakfileentry_t *entry = NULL;
     char *bytes = NULL;
     size_t name_len;
-    size_t name_cap;
     size_t remaining;
     int saved_errno;
-    const pakka_pak_geometry_t *geom;
     pakka_status_t dk_s;
+    pakka_status_t pre_s;
 
     if (archive == NULL || source_path == NULL || entry_name == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
@@ -1305,87 +1383,20 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                         "or no live file handle");
     }
 
+    pre_s = pak_add_preflight(archive, entry_name, "add_file", err);
+    if (pre_s != PAKKA_OK) return pre_s;
+    pre_s = pak_add_source_preflight(source_path, entry_name,
+                                     "add_file", err);
+    if (pre_s != PAKKA_OK) return pre_s;
+
     if (pakka_format_is_zip(archive->format)) {
-        if (pakka_unsafe_entry_name(entry_name)) {
-            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
-                     "add_file", "Refusing unsafe entry name %s",
-                     entry_name);
-            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-            return PAKKA_ERR_UNSAFE_NAME;
-        }
-        /* Reject duplicate entry name — same handling as PAK. */
-        if (find_entry(archive, (char *)entry_name) != NULL) {
-            err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
-                     "add_file",
-                     "Refusing duplicate entry name %s", entry_name);
-            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-            return PAKKA_ERR_DUPLICATE;
-        }
         return pakka_pk3_add_file_impl(archive, source_path, entry_name,
                                        err);
     }
 
-    /* On-disk filename field is name_field_len bytes (56 for Quake PAK,
-     * 120 for SiN); longest legal name is one less to leave room for a
-     * NUL when read back. */
-    geom = pakka_pak_geometry(archive->format);
-    name_cap = (geom != NULL) ? geom->name_field_len : PAKFILE_PATH_MAX;
+    /* PAK path. Preflight already enforced the name cap for this
+     * format's row (Quake 56, SiN 120). */
     name_len = strlen(entry_name);
-    if (name_len >= name_cap) {
-        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_file",
-                 "Entry name too long for pak (%zu bytes, max %zu)",
-                 name_len, name_cap - 1);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_LIMIT;
-    }
-
-    /* Refuse to bake an entry name that pakka itself would refuse to
-     * extract. Catches absolute paths, traversal, Windows reserved
-     * names, control bytes. */
-    if (pakka_unsafe_entry_name(entry_name)) {
-        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_file",
-                 "Entry name is not safe to extract: %s", entry_name);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_UNSAFE_NAME;
-    }
-
-    if (find_entry(archive, (char *)entry_name) != NULL) {
-        err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_file",
-                 "Entry already exists in pak: %s", entry_name);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_DUPLICATE;
-    }
-
-    /* Source-side hardening: reject symlink/reparse points and any
-     * non-regular file (FIFO, socket, char/block device). Mirrors the
-     * checks legacy add_folder_r runs on every recursive entry; a
-     * direct pakka_add_file caller needs the same. */
-    if (pakka_compat_is_reparse_or_symlink(source_path)) {
-        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_file",
-                 "Refusing symlink/reparse source: %s", source_path);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_UNSAFE_NAME;
-    }
-    {
-        struct stat sb;
-        if (pakka_compat_lstat(source_path, &sb) != 0) {
-            saved_errno = errno;
-            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                            (uint32_t)saved_errno, "add_file",
-                            "Cannot stat source %s", source_path);
-        }
-        if (!S_ISREG(sb.st_mode)) {
-            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
-                     0, "add_file",
-                     "Source is not a regular file: %s", source_path);
-            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-            return PAKKA_ERR_UNSAFE_NAME;
-        }
-    }
 
     src_fp = fopen(source_path, "rb");
     if (src_fp == NULL) {
@@ -1515,9 +1526,7 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     Pakfileentry_t *entry;
     uint64_t append_offset;
     size_t name_len;
-    size_t name_cap;
     int saved_errno;
-    const pakka_pak_geometry_t *geom;
     pakka_status_t dk_s;
 
     if (archive == NULL || entry_name == NULL || (data == NULL && len > 0)) {
@@ -1535,50 +1544,19 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                         "or no live file handle");
     }
 
+    {
+        pakka_status_t pre_s = pak_add_preflight(archive, entry_name,
+                                                 "add_memory", err);
+        if (pre_s != PAKKA_OK) return pre_s;
+    }
+
     if (pakka_format_is_zip(archive->format)) {
-        if (pakka_unsafe_entry_name(entry_name)) {
-            err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
-                     "add_memory", "Refusing unsafe entry name %s",
-                     entry_name);
-            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-            return PAKKA_ERR_UNSAFE_NAME;
-        }
-        if (find_entry(archive, (char *)entry_name) != NULL) {
-            err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
-                     "add_memory",
-                     "Refusing duplicate entry name %s", entry_name);
-            err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-            return PAKKA_ERR_DUPLICATE;
-        }
         return pakka_pk3_add_memory_impl(archive, entry_name, data, len,
                                          err);
     }
 
-    geom = pakka_pak_geometry(archive->format);
-    name_cap = (geom != NULL) ? geom->name_field_len : PAKFILE_PATH_MAX;
+    /* PAK path. Preflight already enforced the name cap. */
     name_len = strlen(entry_name);
-    if (name_len >= name_cap) {
-        err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_memory",
-                 "Entry name too long for pak (%zu bytes, max %zu)",
-                 name_len, name_cap - 1);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_LIMIT;
-    }
-    if (pakka_unsafe_entry_name(entry_name)) {
-        err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_memory",
-                 "Entry name is not safe to extract: %s", entry_name);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_UNSAFE_NAME;
-    }
-    if (find_entry(archive, (char *)entry_name) != NULL) {
-        err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
-                 "add_memory",
-                 "Entry already exists in pak: %s", entry_name);
-        err_set_entry(err, entry_name, (size_t)-1, 0, 0);
-        return PAKKA_ERR_DUPLICATE;
-    }
     if (len > UINT32_MAX) {
         err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                  "add_memory",
@@ -1682,6 +1660,29 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
         return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                         "read_entry_alloc",
                         "Entry size exceeds SIZE_MAX on this host");
+    }
+    /* Enforce the configured cap BEFORE the malloc, but only for
+     * formats where pakka_open_entry would also enforce it: ZIP
+     * (any method) and DK compressed. PAK / SiN / DK-STORED are
+     * uncompressed and the public docs at include/pakka.h say the
+     * cap does not apply there — so allocate without a gate. Without
+     * this restriction we'd reject a legitimate >64 MiB PAK read at
+     * the default cap. */
+    {
+        int cap_applies = pakka_format_is_zip(archive->format)
+            || (archive->format == PAKKA_FORMAT_DAIKATANA
+                && entry->dk_is_compressed);
+        if (cap_applies
+            && archive->max_decompressed > 0
+            && total > archive->max_decompressed) {
+            err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "read_entry_alloc",
+                     "Entry %s size (%" PRIu64 ") exceeds "
+                     "max_decompressed_size (%" PRIu64 ")",
+                     entry_name, total, archive->max_decompressed);
+            err_set_entry(err, entry_name, (size_t)-1, 0, total);
+            return PAKKA_ERR_LIMIT;
+        }
     }
 
     buf = malloc((size_t)total);
@@ -2237,6 +2238,41 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
                         unsigned char *ubuf = NULL;
                         uint32_t clen = current->dk_compressed_size;
                         uint32_t ulen = current->length;
+
+                        /* Same cap that pakka_open_entry enforces.
+                         * Without this, --verify --deep on a hostile DK
+                         * archive can allocate ulen bytes regardless of
+                         * pakka_set_max_decompressed_size. */
+                        if (archive->max_decompressed > 0
+                            && ((uint64_t)ulen > archive->max_decompressed
+                                || (uint64_t)clen > archive->max_decompressed)) {
+                            verify_report(report, userdata,
+                                          PAKKA_REPORT_ERROR,
+                                          PAKKA_ERR_LIMIT, current->filename,
+                                          "DK entry exceeds "
+                                          "max_decompressed_size "
+                                          "(uncompressed=%u, compressed=%u, "
+                                          "cap=%" PRIu64 ")",
+                                          (unsigned)ulen, (unsigned)clen,
+                                          archive->max_decompressed);
+                            if (first_error == PAKKA_OK) {
+                                err_fill(err, PAKKA_ERR_LIMIT,
+                                         PAKKA_ERR_DOMAIN_NONE, 0,
+                                         "verify",
+                                         "DK entry %s exceeds "
+                                         "max_decompressed_size "
+                                         "(uncompressed=%u, compressed=%u, "
+                                         "cap=%" PRIu64 ")",
+                                         current->filename,
+                                         (unsigned)ulen, (unsigned)clen,
+                                         archive->max_decompressed);
+                                err_set_entry(err, current->filename,
+                                              (size_t)-1, 0,
+                                              (uint64_t)ulen);
+                                first_error = PAKKA_ERR_LIMIT;
+                            }
+                            continue;
+                        }
 
                         cbuf = (clen > 0) ? malloc(clen) : NULL;
                         if (clen > 0 && cbuf == NULL) {

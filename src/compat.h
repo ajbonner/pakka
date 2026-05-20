@@ -147,4 +147,12 @@ int pakka_compat_rename_replace(const char *src, const char *dst,
 int pakka_compat_rename_noreplace(const char *src, const char *dst,
                             uint32_t *win32_code);
 
+/* Truncate (or extend) the file backing fp to exactly `length` bytes.
+ * fflushes the FILE* first so CRT buffers don't fight the kernel-side
+ * truncation. Forwards to ftruncate(2) on POSIX, _chsize_s on MSVC.
+ * Returns 0 on success, -1 on failure (errno set). Used by the ZIP
+ * commit path to drop stale trailing bytes — without it, an older
+ * EOCD comment can outlive the new EOCD and corrupt the archive. */
+int pakka_compat_ftruncate(FILE *fp, int64_t length);
+
 #endif
