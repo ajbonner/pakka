@@ -623,6 +623,54 @@ EOF
     [[ "$output" != *"new.txt"* ]]
 }
 
+@test "pk3 c-api: open_entry_handle on pending entry respects max_decompressed cap" {
+    # Pending-entry reads route into the same cap check that the
+    # name-keyed open_entry uses. Without the cap the handle path
+    # could load a multi-GiB payload from a pending source into
+    # inflated_buf regardless of what the caller asked for.
+    command -v ${CC:-cc} >/dev/null 2>&1 || skip "no cc in PATH"
+    # Build a 4 KB payload — well above the 200-byte cap the test sets.
+    python3 -c "open('$BATS_TEST_TMPDIR/big.txt','w').write('x' * 4096)"
+
+    cat > "$BATS_TEST_TMPDIR/handle_cap.c" <<'EOF'
+#include <stdio.h>
+#include "pakka.h"
+int main(int argc, char **argv) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_reader_t *r = NULL;
+    const pakka_entry_t *e = NULL;
+    pakka_status_t s;
+    s = pakka_create(argv[1], PAKKA_FORMAT_PK3, 0, &a, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "create: %s\n", err.message); return 2; }
+    s = pakka_add_file(a, argv[2], "big.txt", &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "add: %s\n", err.message); return 3; }
+    s = pakka_set_max_decompressed_size(a, 200, &err);
+    if (s != PAKKA_OK) { fprintf(stderr, "cap: %s\n", err.message); return 4; }
+    /* Entry is pending; the handle lookup must hit the LIMIT check
+     * before allocating the inflated_buf. */
+    s = pakka_find_entry(a, "big.txt", &e);
+    if (s != PAKKA_OK || e == NULL) { fprintf(stderr, "find\n"); return 5; }
+    s = pakka_open_entry_handle(a, e, &r, &err);
+    if (s != PAKKA_ERR_LIMIT) {
+        fprintf(stderr, "expected LIMIT, got %d: %s\n", (int)s, err.message);
+        return 6;
+    }
+    if (r != NULL) { fprintf(stderr, "reader leaked on cap rejection\n"); return 7; }
+    pakka_close(a, NULL);
+    return 0;
+}
+EOF
+    ${CC:-cc} ${CFLAGS:-} -I"${PROJECT_ROOT}/include" \
+        -o "$BATS_TEST_TMPDIR/handle_cap" \
+        "$BATS_TEST_TMPDIR/handle_cap.c" \
+        "${LIBPAKKA:-${PROJECT_ROOT}/build/lib-prod/libpakka.a}"
+    run "$BATS_TEST_TMPDIR/handle_cap" \
+        "$BATS_TEST_TMPDIR/handle_cap.pk3" \
+        "$BATS_TEST_TMPDIR/big.txt"
+    [ "$status" -eq 0 ]
+}
+
 @test "pk3 c-api: pakka_open_entry_handle skips the name lookup" {
     # Confirms the additive public API works against an entry pointer
     # obtained from pakka_entry_at. The handle-keyed path is meant

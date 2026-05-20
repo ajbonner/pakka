@@ -181,7 +181,8 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
  *     with a symlink causes PAKKA_ERR_UNSAFE_NAME. This is what makes
  *     ZIP adds atomic against partial-write failures — the archive on
  *     disk isn't touched until the commit-time temp-file rename
- *     succeeds. PK3 / PK4 daikatana is read-only.
+ *     succeeds. Daikatana archives are read-only on every format
+ *     (no published encoder for the custom byte-codec).
  *
  * Use pakka_add_memory if you want the payload bytes pinned at call
  * time on every format. */

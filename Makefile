@@ -88,6 +88,14 @@ PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
 .PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
 
+# Force serial execution. force-relink (below) deletes $(TARGET) and
+# $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
+# that races with the link rules and the c_api_test / dk_codec_test
+# recipes that read $(LIBPAKKA). pakka is small enough that serial
+# build is under a few seconds — the parallel-make speedup wouldn't
+# be worth the race fragility.
+.NOTPARALLEL:
+
 all: force-relink $(TARGET)
 
 # Always rebuild the top-level binary and per-mode libpakka.a. GNU
