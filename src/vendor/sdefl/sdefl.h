@@ -228,10 +228,18 @@ pakka_sdefl_ilog2(int n) {
 }
 static unsigned
 pakka_sdefl_uload32(const void *p) {
-  /* hopefully will be optimized to an unaligned read */
-  unsigned n = 0;
-  memcpy(&n, p, sizeof(n));
-  return n;
+  /* pakka local modification: explicit little-endian byte-shift load.
+   * Upstream memcpy(&n, p, 4) loads in host byte order, which makes
+   * the hash differ between LE and BE hosts. Different hashes still
+   * produce VALID (but non-deterministic across hosts) DEFLATE
+   * output, but pinning to LE means a PK3 written on s390x BE
+   * round-trips byte-identically against one written on x86 LE —
+   * what the BE CI job exercises end-to-end. */
+  const unsigned char *b = (const unsigned char *)p;
+  return  (unsigned)b[0]
+       | ((unsigned)b[1] << 8)
+       | ((unsigned)b[2] << 16)
+       | ((unsigned)b[3] << 24);
 }
 static unsigned
 pakka_sdefl_hash32(const void *p) {

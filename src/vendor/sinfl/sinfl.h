@@ -207,9 +207,24 @@ pakka_sinfl_bsr(unsigned long n) {
 }
 static unsigned long long
 pakka_sinfl_read64(const void *p) {
-  unsigned long long n;
-  memcpy(&n, p, 8);
-  return n;
+  /* pakka local modification: explicit little-endian byte-shift load.
+   * Upstream used memcpy(&n, p, 8) which loads bytes in host byte
+   * order — correct on LE but wrong on big-endian hosts (s390x in
+   * pakka's CI). The DEFLATE bitstream is LSB-first and requires
+   * byte 0 of the input to occupy the low byte of bitbuf so that
+   * bit 0 of byte 0 is bit 0 of bitbuf. The shift-based load below
+   * is endian-independent and lets the BE QEMU job decode
+   * correctly. The cost vs memcpy is one or two cycles per refill;
+   * negligible against I/O and Huffman decode. */
+  const unsigned char *b = (const unsigned char *)p;
+  return  (unsigned long long)b[0]
+       | ((unsigned long long)b[1] << 8)
+       | ((unsigned long long)b[2] << 16)
+       | ((unsigned long long)b[3] << 24)
+       | ((unsigned long long)b[4] << 32)
+       | ((unsigned long long)b[5] << 40)
+       | ((unsigned long long)b[6] << 48)
+       | ((unsigned long long)b[7] << 56);
 }
 static void
 pakka_sinfl_copy64(unsigned char **dst, unsigned char **src) {

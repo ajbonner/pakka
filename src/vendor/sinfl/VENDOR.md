@@ -69,6 +69,15 @@ via its existing checks. See `src/vendor/sinfl/sinfl.h` for the
 patched code; the change is small enough to re-apply mechanically
 on an upstream rebase.
 
+**Local mod — explicit LE byte-shift in pakka_sinfl_read64.**
+Upstream `memcpy(&n, p, 8)` reads bytes in HOST byte order. The
+DEFLATE bitstream is LSB-first and requires byte 0 of input to land
+in the low byte of `bitbuf` so bit 0 of byte 0 == bit 0 of bitbuf —
+correct on little-endian, inverted on big-endian. The
+`linux-glibc-s390x-be` CI job decodes garbage without this patch.
+Replaced the memcpy with an explicit 8-byte LE shift load. Cost is
+a few cycles per refill (negligible against Huffman decode).
+
 Why replace puff? Author symmetry with sdefl — same code style,
 same dual MIT/PD license, same memcpy-based load pattern, same
 portability bar. Net code reduction: ~840 LOC puff → ~621 LOC sinfl.

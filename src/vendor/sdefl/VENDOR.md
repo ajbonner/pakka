@@ -54,7 +54,16 @@ Two passes applied at vendor time:
    - Internal `sdefl_*` statics renamed for consistency, though they
      don't appear in `nm -g` and would pass symbol-audit unrenamed.
 
-2. **Compilation unit split.** Added a small `sdefl.c` shim that
+2. **Explicit LE byte-shift in pakka_sdefl_uload32.** Upstream's
+   `memcpy(&n, p, 4)` returns bytes in host byte order, which makes
+   the hash differ between little-endian and big-endian encoders.
+   Different hashes still produce valid DEFLATE, but byte-identical
+   round-trips across LE/BE hosts (what the `linux-glibc-s390x-be`
+   CI job exercises) require a fixed byte order. Replaced with an
+   explicit 4-byte LE shift load. Same rationale as the sinfl
+   read64 patch — see src/vendor/sinfl/VENDOR.md.
+
+3. **Compilation unit split.** Added a small `sdefl.c` shim that
    defines `PAKKA_SDEFL_IMPLEMENTATION` before including `sdefl.h`.
    The upstream single-header pattern needs exactly one TU to compile
    the impl; the rest of pakka can include `sdefl.h` decl-only via
