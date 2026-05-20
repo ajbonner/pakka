@@ -23,8 +23,11 @@ Same portability properties as `sdefl` (its encoder sibling):
 
 - ~621 LOC single header.
 - No `malloc`; all state is stack-local in `pakka_sinflate()`.
-- Endianness-safe via `memcpy(&n, p, 8)` reads — no unaligned u64
-  casts that would trip `-Wpedantic` or break on big-endian s390x.
+- Endianness-correct on big-endian s390x: the upstream `memcpy(&n,
+  p, 8)` would have returned host-order bytes (load-bearing bug on
+  BE — DEFLATE is LSB-first); pakka's local patch in
+  `pakka_sinfl_read64` replaces that with an explicit LE byte-shift
+  load. No unaligned u64 casts that would trip `-Wpedantic`.
 - Optional NEON / SSE2 fast paths are gated behind
   `PAKKA_SINFL_NO_SIMD`. **pakka forces `PAKKA_SINFL_NO_SIMD` on**
   in `sinfl.c` because: (a) the CI matrix runs big-endian s390x and

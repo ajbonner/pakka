@@ -61,12 +61,20 @@ pakka_status_t pakka_deflate_compress(const unsigned char *src,
  * bytes written; *in_consumed receives the number of compressed
  * bytes consumed.
  *
- * Both backends require that the entire compressed input is consumed
- * on a successful decode (*in_consumed == src_len). This matches the
- * current pakka contract enforced at the call sites in
- * src/pk3file.c (open_entry + deep_verify) — trailing bytes inside
- * the declared compressed payload indicate either corruption or a
- * malformed archive and must be rejected.
+ * Bytes-consumed reporting differs per backend:
+ *   - zlib backend reports the exact consumed-bytes count via
+ *     z.total_in. The pk3file.c call sites compare *in_consumed
+ *     against src_len and reject mismatches as PAKKA_ERR_FORMAT
+ *     (trailing bytes inside the declared LFH csize indicate
+ *     corruption or a malformed archive).
+ *   - vendored backend (sinfl) cannot surface consumed-bytes — the
+ *     upstream pakka_sinflate returns only the output count. The
+ *     wrapper therefore unconditionally reports *in_consumed ==
+ *     src_len on a successful decode and silently accepts trailing
+ *     garbage inside the LFH csize. See src/deflate/deflate_vendored.c
+ *     header and src/vendor/sinfl/VENDOR.md for the full caveat.
+ *     pakka_pk3_deep_verify_entry's CRC32 cross-check is the end-to-
+ *     end integrity backstop on the vendored backend.
  *
  * out == NULL && out_cap == 0 is a scan-only mode: the stream is
  * decoded but no bytes are emitted. *out_len is still populated with
@@ -77,13 +85,13 @@ pakka_status_t pakka_deflate_compress(const unsigned char *src,
  * output (the empty end-of-block marker), the call returns PAKKA_OK
  * with *out_len == 0.
  *
- * Returns PAKKA_ERR_FORMAT on: malformed input, output size > out_cap,
- * input not fully consumed, or any backend-specific decode error.
- * Returns PAKKA_ERR_LIMIT when src_len > INT_MAX or out_cap > INT_MAX
- * for the vendored backend (sinfl takes `int`); the zlib backend
- * accepts the full u32 range. err is populated with
- * operation="inflate" and a descriptive message in every non-OK
- * path. */
+ * Returns PAKKA_ERR_FORMAT on: malformed input, output size >
+ * out_cap, or any backend-specific decode error (and, for zlib only,
+ * trailing-bytes inside src). Returns PAKKA_ERR_LIMIT when src_len >
+ * INT_MAX or out_cap > INT_MAX for the vendored backend (sinfl
+ * takes `int`); the zlib backend accepts the full u32 range. err is
+ * populated with operation="inflate" and a descriptive message in
+ * every non-OK path. */
 pakka_status_t pakka_deflate_inflate(const unsigned char *src,
                                      size_t src_len,
                                      unsigned char *out,

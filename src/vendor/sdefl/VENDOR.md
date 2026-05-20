@@ -21,8 +21,11 @@ the header comment in `sdefl.h`. Compatible with pakka's MIT.
   hash + prev arrays), allocated by the caller.
 - No SIMD intrinsics; `__builtin_clz` / `_BitScanReverse` are guarded
   with a portable fallback for hosts that lack them.
-- Endianness-correct on big-endian s390x: every multi-byte load goes
-  through `memcpy(&n, p, sizeof n)`, no `*(uint32_t*)p` casts.
+- Endianness-correct on big-endian s390x: the upstream `memcpy(&n, p,
+  4)` would have returned host-order bytes (broken on BE for
+  cross-host stream determinism); pakka's local patch in
+  `pakka_sdefl_uload32` replaces that with an explicit LE byte-shift
+  load. No unaligned `*(uint32_t*)p` casts.
 - Produces raw RFC 1951 DEFLATE via `pakka_sdeflate()` (and zlib-
   wrapped DEFLATE via `pakka_zsdeflate()`, unused by pakka — ZIP LFH
   payload is raw DEFLATE).

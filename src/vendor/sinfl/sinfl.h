@@ -470,7 +470,21 @@ pakka_sinfl_decompress(unsigned char *out, int cap, const unsigned char *in, int
       pakka_sinfl__get(&s,s.bitcnt & 7);
       len = (unsigned short)pakka_sinfl__get(&s,16);
       nlen = (unsigned short)pakka_sinfl__get(&s,16);
-      s.bitptr -= s.bitcnt / 8;
+      /* pakka local modification: clamp the bitptr rewind so it can't
+       * form a pointer before `in`. With the bounded refill above, a
+       * truncated input can leave bitptr near `in` while bitcnt is
+       * still ~56 (since refill always sets bitcnt |= 56 even on a
+       * short load that returned zero-filled bits). The unconditional
+       * `bitptr -= bitcnt/8` would then produce a pointer below the
+       * input object (C UB). The LEN/NLEN mismatch check below still
+       * catches malformed truncated streams, but we should not form
+       * an invalid pointer regardless. */
+      {
+        size_t rewind = (size_t)s.bitcnt / 8;
+        size_t consumed = (size_t)(s.bitptr - in);
+        if (rewind > consumed) rewind = consumed;
+        s.bitptr -= rewind;
+      }
       s.bitbuf = s.bitcnt = 0;
 
       if ((unsigned short)len != (unsigned short)~nlen)
