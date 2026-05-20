@@ -123,7 +123,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header lint-advisory coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture slow-test slow-test-goldsrc
+.PHONY: all clean test test-clean distclean lint lint-header lint-advisory lint-win32 coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture slow-test slow-test-goldsrc
 
 # Force serial execution. force-relink (below) deletes $(TARGET) and
 # $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
@@ -162,6 +162,32 @@ lint-header:
 
 lint: lint-header lint-advisory
 	$(CLANG_TIDY) --quiet $(SOURCES) $(PUBLIC_HEADERS) -- $(CPPFLAGS) --std=c99
+
+# Cross-arm lint: run clang-tidy against the _WIN32 branch of every
+# compat-sensitive source. Linux's mingw-w64 headers stand in for
+# the MSVC SDK so we can syntax-check the Windows arm without an
+# MSVC toolchain. Catches regressions where someone touches
+# src/compat.{h,c} or the Win32-only paths in src/cli.c and ships a
+# subtle break that only the windows-msvc job would catch. Skips
+# cleanly when the cross-headers are absent (e.g. on macOS without
+# `brew install mingw-w64`). On Ubuntu the apt package `mingw-w64`
+# drops them at /usr/x86_64-w64-mingw32/include/.
+.PHONY: lint-win32
+WIN32_HEADERS ?= /usr/x86_64-w64-mingw32/include
+lint-win32:
+	@if [ ! -d "$(WIN32_HEADERS)" ]; then \
+		echo "lint-win32: Mingw cross-headers not found at $(WIN32_HEADERS)"; \
+		echo "lint-win32: install via apt-get install mingw-w64 on Linux"; \
+		echo "lint-win32: or brew install mingw-w64 on macOS; skipping"; \
+		exit 0; \
+	fi; \
+	$(CLANG_TIDY) --quiet src/cli.c src/compat.c $(PUBLIC_HEADERS) -- \
+		--target=x86_64-w64-mingw32 \
+		-D_WIN32 \
+		-isystem $(WIN32_HEADERS) \
+		-Iinclude -Isrc -Isrc/vendor/wingetopt -Isrc/vendor/dirent \
+		--std=c99 \
+		-Wno-pragma-pack -Wno-pragma-system-header-outside-header
 
 # Advisory lints — print warnings but don't fail the build. Today this
 # is the add-path symmetry check (catches re-divergence of the H1
