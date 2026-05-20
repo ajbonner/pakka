@@ -57,13 +57,19 @@ SOURCES=$(wildcard $(SRC_DIR)/*.c)
 # which the top-level wildcard above doesn't reach, so the conditional
 # below is the only way they enter the source list.
 PAKKA_DEFLATE_BACKEND ?= vendored
+# Two-level if/else rather than `else ifeq` — GNU make 3.79.1 (the
+# legacy floor; default on Red Hat 9 / Sarge) errors out on the
+# combined form. The nested shape works on every supported make
+# version from 3.79.1 forward.
 ifeq ($(PAKKA_DEFLATE_BACKEND),zlib)
     DEFLATE_SOURCES=$(SRC_DIR)/deflate/deflate_zlib.c
     LDLIBS += -lz
-else ifeq ($(PAKKA_DEFLATE_BACKEND),vendored)
+else
+ifeq ($(PAKKA_DEFLATE_BACKEND),vendored)
     DEFLATE_SOURCES=$(SRC_DIR)/deflate/deflate_vendored.c
 else
     $(error PAKKA_DEFLATE_BACKEND must be 'vendored' or 'zlib', got '$(PAKKA_DEFLATE_BACKEND)')
+endif
 endif
 
 # Vendored sources live under src/vendor/. Kept out of $(SOURCES) so
