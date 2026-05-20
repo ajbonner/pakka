@@ -86,7 +86,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
+.PHONY: all clean test test-clean distclean lint lint-header lint-advisory coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo fixture slow-test
 
 # Force serial execution. force-relink (below) deletes $(TARGET) and
 # $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
@@ -109,7 +109,7 @@ force-relink:
 	@rm -f $(TARGET) $(LIBPAKKA)
 
 clean:
-	rm -rf $(BUILD_DIR)/obj-* $(BUILD_DIR)/lib-* $(TARGET)
+	rm -rf $(BUILD_DIR)/obj-* $(BUILD_DIR)/lib-* $(BUILD_DIR)/fuzz $(BUILD_DIR)/coverage $(TARGET)
 
 test-clean:
 	rm -rf $(TEST_DIR)/extracted $(TEST_DIR)/re_extracted $(TEST_DIR)/rebuilt.pak $(TEST_DIR)/crud $(TEST_DIR)/id1
@@ -123,8 +123,90 @@ distclean:
 lint-header:
 	$(CC) $(CFLAGS) -fsyntax-only -x c $(PUBLIC_HEADERS)
 
-lint: lint-header
+lint: lint-header lint-advisory
 	$(CLANG_TIDY) --quiet $(SOURCES) $(PUBLIC_HEADERS) -- $(CPPFLAGS) --std=c99
+
+# Advisory lints — print warnings but don't fail the build. Today this
+# is the add-path symmetry check (catches re-divergence of the H1
+# hardening). Set STRICT=1 to make it fail on findings. Kept out of
+# clang-tidy because the rule isn't easily expressed as a tidy check
+# and we want it as a tripwire, not a gate.
+.PHONY: lint-advisory
+lint-advisory:
+	@dev/lint/add-path-symmetry.sh $(CURDIR)
+
+# Coverage report. Builds with -fprofile-arcs -ftest-coverage, runs
+# the full bats suite, and renders an HTML lcov tree under
+# build/coverage/. Needs lcov + genhtml; on macOS install via
+# `brew install lcov`. Not wired into `make test` because the
+# instrumented build adds ~30% runtime to bats and the report is only
+# useful as a periodic artifact, not on every iteration.
+
+# libFuzzer harnesses. Need clang with -fsanitize=fuzzer (Ubuntu's
+# clang ships this by default; macOS needs `brew install llvm` +
+# `CC=$(brew --prefix llvm)/bin/clang`). Built into build/fuzz/ with
+# ASan as the bug oracle and the seed corpora living in dev/fuzz/.
+# `make fuzz` builds all three; the per-target rules (fuzz-open,
+# fuzz-dk, fuzz-roundtrip) build one harness each. CI runs each for
+# 60s on push to master.
+FUZZ_CC ?= clang
+FUZZ_DIR := $(BUILD_DIR)/fuzz
+FUZZ_CFLAGS := -g -O1 -Wall --std=c99 \
+               -fsanitize=fuzzer,address,undefined \
+               -fno-sanitize-recover=undefined \
+               -fno-omit-frame-pointer
+
+.PHONY: fuzz fuzz-open fuzz-dk fuzz-roundtrip
+fuzz: fuzz-open fuzz-dk fuzz-roundtrip
+
+# Each fuzzer compiles ALL library sources from scratch with the fuzz
+# CFLAGS — libpakka-prod / libpakka-test were built without
+# -fsanitize=fuzzer so we can't reuse them. The footprint is small
+# (one .o file per source per harness) and the alternative is a
+# third per-mode library that few people use.
+# Compile flags shared by every fuzz harness. Mirrors the standard
+# CPPFLAGS minus -DPAKKA_TEST_BUILD (no fault hooks needed) and minus
+# -D_DEBUG so libFuzzer's stdout doesn't compete with library debug
+# prints.
+FUZZ_CPPFLAGS := -Iinclude -Isrc -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 \
+                 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) \
+                 -DBUILD_DATE=$(BUILD_DATE)
+
+$(FUZZ_DIR)/pakka_fuzz_open: dev/fuzz/pakka_fuzz_open.c $(LIB_SOURCES) $(VENDOR_SOURCES)
+	@mkdir -p $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_CPPFLAGS) -o $@ $^
+
+$(FUZZ_DIR)/pakka_fuzz_dk_inflate: dev/fuzz/pakka_fuzz_dk_inflate.c $(LIB_SOURCES) $(VENDOR_SOURCES)
+	@mkdir -p $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_CPPFLAGS) -o $@ $^
+
+$(FUZZ_DIR)/pakka_fuzz_roundtrip: dev/fuzz/pakka_fuzz_roundtrip.c $(LIB_SOURCES) $(VENDOR_SOURCES)
+	@mkdir -p $(FUZZ_DIR)
+	$(FUZZ_CC) $(FUZZ_CFLAGS) $(FUZZ_CPPFLAGS) -o $@ $^
+
+fuzz-open: $(FUZZ_DIR)/pakka_fuzz_open
+fuzz-dk: $(FUZZ_DIR)/pakka_fuzz_dk_inflate
+fuzz-roundtrip: $(FUZZ_DIR)/pakka_fuzz_roundtrip
+
+.PHONY: coverage
+coverage:
+	@command -v lcov >/dev/null 2>&1 || { echo "coverage: lcov not found (brew install lcov / apt-get install lcov)" >&2; exit 1; }
+	@command -v genhtml >/dev/null 2>&1 || { echo "coverage: genhtml not found" >&2; exit 1; }
+	$(MAKE) clean
+	$(MAKE) CFLAGS="-g -O0 -Wall --std=c99 --pedantic -fprofile-arcs -ftest-coverage" test
+	@mkdir -p $(BUILD_DIR)/coverage
+	# Inner $(MAKE) ... test sets PAKKA_BUILD_MODE=test, so .gcno/.gcda
+	# land in build/obj-test/. Outer make sees no test goal and
+	# would otherwise resolve $(OBJ_DIR) to build/obj-prod/ — capture
+	# from the actual instrumented directory by name.
+	lcov --capture --directory $(BUILD_DIR)/obj-test \
+	     --output-file $(BUILD_DIR)/coverage/coverage.info \
+	     --rc geninfo_unexecuted_blocks=1
+	lcov --remove $(BUILD_DIR)/coverage/coverage.info '*/src/vendor/*' '/usr/*' '/Library/*' \
+	     --output-file $(BUILD_DIR)/coverage/filtered.info
+	genhtml $(BUILD_DIR)/coverage/filtered.info --output-directory $(BUILD_DIR)/coverage/html \
+	        --legend --quiet
+	@echo "==> Coverage report: $(BUILD_DIR)/coverage/html/index.html"
 
 # Hard gate against non-pakka_ defined globals leaking out of
 # libpakka.a. Prints the full list AND exits non-zero on any violation;

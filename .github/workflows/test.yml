@@ -92,6 +92,60 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl zip python3
       - run: make test
 
+  # libFuzzer smoke. Builds each harness under -fsanitize=fuzzer,
+  # address,undefined and runs it for 60s against the seed corpus.
+  # Catches parser-side memory corruption (open path), opcode
+  # bound-check regressions (DK codec), and structural-invariant
+  # breaks across the open→commit→reopen cycle (roundtrip). Runs
+  # only on push to master and schedule — too slow for every PR but
+  # enough cadence to catch regressions before release. The `clang`
+  # apt package brings libclang_rt.fuzzer along with the compiler;
+  # gcc by itself does not ship libFuzzer.
+  fuzz:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential clang
+      - run: make FUZZ_CC=clang fuzz
+      - name: fuzz pakka_open (60s)
+        run: ./build/fuzz/pakka_fuzz_open dev/fuzz/corpus_open -max_total_time=60 -print_final_stats=1
+      - name: fuzz pakka_dk_inflate (60s)
+        run: ./build/fuzz/pakka_fuzz_dk_inflate dev/fuzz/corpus_dk -max_total_time=60 -print_final_stats=1
+      - name: fuzz open+commit roundtrip (60s)
+        run: ./build/fuzz/pakka_fuzz_roundtrip dev/fuzz/corpus_roundtrip -max_total_time=60 -print_final_stats=1
+
+  # Coverage report. Runs the full bats suite under
+  # -fprofile-arcs -ftest-coverage and uploads the lcov HTML tree as
+  # an artifact. Useful for spotting under-tested code paths
+  # (deep-verify branches, fault-injected error returns); not a gate
+  # — the bats suite is the gate. Runs only on push to master and
+  # schedule to keep PR builds quick.
+  coverage:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/quakesw.tar.gz
+          key: quakesw-${{ hashFiles('Makefile') }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl zip python3 lcov
+      - run: make coverage
+      - uses: actions/upload-artifact@v4
+        with:
+          name: coverage-html
+          path: build/coverage/html
+          retention-days: 14
+
   # ASan + UBSan canary. Linked against libpakka.a + the CLI under
   # -fsanitize=address,undefined with -fno-sanitize-recover=undefined so
   # any UB during the bats suite is a hard failure. -O1 keeps inlining

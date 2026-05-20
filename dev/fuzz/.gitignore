@@ -1,0 +1,6 @@
+# libFuzzer auto-generated corpus entries (SHA1-named additions
+# discovered during fuzzing). We check in only the hand-crafted seed
+# inputs ending in .bin; libFuzzer's coverage-guided mutation rebuilds
+# the rest on demand and we don't want every fuzz run to bloat the repo.
+corpus_*/[!.]*
+!corpus_*/*.bin
