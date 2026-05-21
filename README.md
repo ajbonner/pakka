@@ -306,6 +306,17 @@ runs the full read / list / extract / structural-verify / deep-verify
 sequence against it. Not part of `make test` because of the download
 size and archive.org's intermittent availability.
 
+The Windows MSVC build can't drive `make slow-test` / `make slow-test-goldsrc`
+directly — those targets depend on the cc-built `pakka` binary and on
+`symbol-audit` against `libpakka.a`, neither of which exist in the
+CMake/Ninja path. Use `dev/win/slow-test.sh` from MSYS2 instead; it
+reuses the Makefile's download + SHA-verify steps and drives the
+extract / bats invocations against `build/cmake/pakka.exe`:
+
+    $ dev/win/slow-test.sh            # both suites
+    $ dev/win/slow-test.sh q3         # Q3 demo PK3 only (~93 MiB)
+    $ dev/win/slow-test.sh goldsrc    # Half-Life PAK fixtures (~138 MiB)
+
 `make lint` runs [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) with
 a curated check set (`.clang-tidy` at the repo root). On macOS, install via
 `brew install llvm` and either add `$(brew --prefix llvm)/bin` to `PATH` or

@@ -111,7 +111,13 @@ skip_if_dayone_missing() {
     # victim is the only entry that disappeared. This is stronger than
     # "count went down by one" — it catches a delete that removes the
     # wrong entry or a rebuild that drops more than the named victim.
-    before_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak")
+    #
+    # `tr -d '\r'` normalizes line endings: the MSVC-built pakka.exe
+    # emits CRLF on stdout, and MSYS2 grep strips the CR on output —
+    # so without normalization the `expected` capture (filtered via
+    # grep) ends up LF-only while `after_list` (direct from pakka.exe)
+    # keeps CRLF, and every line's terminator mismatches. No-op on Unix.
+    before_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak" | tr -d '\r')
     before=$(echo "$before_list" | wc -l | tr -d ' ')
     # pakka -l renders "entry/name (NNN bytes)" — strip the byte suffix.
     victim=$(echo "$before_list" | head -n 1 | awk '{print $1}')
@@ -120,7 +126,7 @@ skip_if_dayone_missing() {
     run "$PAKKA" -d "$BATS_TEST_TMPDIR/uplink-mut.pak" "$victim"
     [ "$status" -eq 0 ]
 
-    after_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak")
+    after_list=$("$PAKKA" -l "$BATS_TEST_TMPDIR/uplink-mut.pak" | tr -d '\r')
     after=$(echo "$after_list" | wc -l | tr -d ' ')
     [ "$((before - after))" -eq 1 ]
     [ "$after_list" = "$expected" ]
