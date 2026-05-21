@@ -297,7 +297,7 @@ relative path resolves wrong and every test fails to find the binary.
     $ /tmp/bats-core/install.sh /usr/local
 
 MSYS2 packages needed alongside bats: `pacman -S --needed bash coreutils curl
-diffutils git openssl tar make`.
+diffutils git openssl tar make python3 zip unzip`.
 
 `make slow-test` is an opt-in heavier suite. It downloads id's Q3 demo
 wrapper from archive.org (~93 MiB, SHA256-pinned), uses pakka itself to
