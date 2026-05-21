@@ -158,7 +158,9 @@ int main(int argc, char *argv[]) {
     if (opts.compress) {
         if (opts.format == PAKKA_FORMAT_PAK
             || opts.format == PAKKA_FORMAT_SIN
-            || opts.format == PAKKA_FORMAT_DAIKATANA) {
+            || opts.format == PAKKA_FORMAT_DAIKATANA
+            || opts.format == PAKKA_FORMAT_IWAD
+            || opts.format == PAKKA_FORMAT_PWAD) {
             pakka_die("--compress (DEFLATE) is only valid for PK3 / PK4 "
                       "archives, not the requested PAK-class format");
         }
@@ -167,7 +169,9 @@ int main(int argc, char *argv[]) {
     if (opts.mode == PAK_CREATE) {
         /* Format selection from --format if explicit, else from
          * extension (case-insensitive): .pk3 → PK3 (Quake 3), .pk4 →
-         * PK4 (Doom 3), .sin → SiN (Ritual), anything else → PAK.
+         * PK4 (Doom 3), .sin → SiN (Ritual), .wad → PWAD (Doom 1/2
+         * patch — IWAD authoring is rare; users explicitly pass
+         * --format iwad when they want it), anything else → PAK.
          * PK3/PK4 default to STORED on write; pass --compress to enable
          * DEFLATE (pakka_set_compression is invoked after create below). */
         pakka_format_t fmt = opts.format;
@@ -191,6 +195,13 @@ int main(int argc, char *argv[]) {
                     && (opts.pakfile[plen - 2] == 'i' || opts.pakfile[plen - 2] == 'I')
                     && (opts.pakfile[plen - 1] == 'n' || opts.pakfile[plen - 1] == 'N')) {
                     fmt = PAKKA_FORMAT_SIN;
+                }
+                if (plen >= 4
+                    && (opts.pakfile[plen - 4] == '.')
+                    && (opts.pakfile[plen - 3] == 'w' || opts.pakfile[plen - 3] == 'W')
+                    && (opts.pakfile[plen - 2] == 'a' || opts.pakfile[plen - 2] == 'A')
+                    && (opts.pakfile[plen - 1] == 'd' || opts.pakfile[plen - 1] == 'D')) {
+                    fmt = PAKKA_FORMAT_PWAD;
                 }
             }
         }
@@ -543,9 +554,20 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         if (path_count == 0) {
             matched = 1;
         } else {
+            int wad = pakka_format_is_wad(pakka_format(pak));
             matched = 0;
             for (i = 0; i < path_count; i++) {
                 if (strcmp(name, paths[i]) == 0) {
+                    /* Doom IWADs/PWADs deliberately ship duplicate lump
+                     * names (every map repeats THINGS, LINEDEFS, SECTORS,
+                     * etc.). Extract-by-name selects only the first
+                     * match per path argument — extracting all matches
+                     * would collide on disk. C API consumers iterate
+                     * with pakka_entry_at + pakka_open_entry_handle for
+                     * index-based access. */
+                    if (wad && path_matched[i]) {
+                        continue;
+                    }
                     matched = 1;
                     path_matched[i] = 1;
                 }
@@ -640,7 +662,12 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         }
 
         if (size > 0) {
-            s = pakka_open_entry(pak, name, &reader, &err);
+            /* Reopen via handle, not by name: WADs may have duplicate
+             * lump names (THINGS, LINEDEFS, ...) and a by-name lookup
+             * would re-read the first match for every iteration of this
+             * loop. The handle path is also a small perf win on every
+             * format — no O(n) name scan per entry. */
+            s = pakka_open_entry_handle(pak, entry, &reader, &err);
             if (s != PAKKA_OK) {
                 fclose(tfd);
                 fail_from_err(&err);
@@ -871,14 +898,16 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
             if (src + 1 >= argc) {
                 fprintf(stderr,
                         "--format requires one argument: "
-                        "pak | goldsrc | hl | sin | daikatana | pk3 | pk4\n");
+                        "pak | goldsrc | hl | sin | daikatana | iwad | pwad | pk3 | pk4\n");
                 usage();
             }
             {
                 const char *name = argv[src + 1];
                 /* GoldSrc PAKs (Half-Life 1, CS 1.6, TFC, ...) are
                  * bit-identical to Quake/Q2 PAK; the aliases give modders
-                 * a discoverable name on --help. */
+                 * a discoverable name on --help. IWAD and PWAD are not
+                 * bit-identical (different 4-byte magic), so they get
+                 * their own tokens — no shared "wad" alias. */
                 if (strcmp(name, "pak") == 0
                     || strcmp(name, "goldsrc") == 0
                     || strcmp(name, "hl") == 0) {
@@ -888,6 +917,10 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
                 } else if (strcmp(name, "daikatana") == 0
                            || strcmp(name, "dk") == 0) {
                     opts->format = PAKKA_FORMAT_DAIKATANA;
+                } else if (strcmp(name, "iwad") == 0) {
+                    opts->format = PAKKA_FORMAT_IWAD;
+                } else if (strcmp(name, "pwad") == 0) {
+                    opts->format = PAKKA_FORMAT_PWAD;
                 } else if (strcmp(name, "pk3") == 0) {
                     opts->format = PAKKA_FORMAT_PK3;
                 } else if (strcmp(name, "pk4") == 0) {
@@ -897,7 +930,7 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
                 } else {
                     fprintf(stderr,
                             "Unknown --format value: %s "
-                            "(use pak, goldsrc, hl, sin, daikatana, pk3, or pk4)\n",
+                            "(use pak, goldsrc, hl, sin, daikatana, iwad, pwad, pk3, or pk4)\n",
                             name);
                     usage();
                 }
@@ -1051,6 +1084,8 @@ static void version(void) {
     printf("              (--format goldsrc and --format hl are aliases for pak)\n");
     printf("  sin         Ritual SiN (1998)    read + write\n");
     printf("  daikatana   Ion Storm (2000)     read + write (.tga/.bmp/.wal/.pcx/.bsp auto-compressed)\n");
+    printf("  iwad        id Doom 1 / 2 base   read + write (8-byte lump names; duplicates allowed)\n");
+    printf("  pwad        id Doom 1 / 2 patch  read + write (same shape as IWAD; .wad extension defaults here)\n");
     printf("  pk3         Quake 3 / ZIP        read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
     printf("  pk4         Doom 3 / ZIP         read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
     printf("\n");
@@ -1085,7 +1120,7 @@ static void help(void) {
     fprintf(stderr, " --tree                          list pak contents as a directory tree (only with -l)\n");
     fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");
     fprintf(stderr, "                                 (repeat --as for multiple aliased pairs; may mix with plain paths)\n");
-    fprintf(stderr, " --format <name>                 pin archive format: pak, sin, daikatana, pk3, pk4\n");
+    fprintf(stderr, " --format <name>                 pin archive format: pak, sin, daikatana, iwad, pwad, pk3, pk4\n");
     fprintf(stderr, "                                 (goldsrc and hl are aliases for pak — Half-Life 1 / CS 1.6 / TFC use Quake PAK)\n");
     fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
     fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");

@@ -932,6 +932,72 @@ static int test_zip_format_label_roundtrip(const char *scratch_dir) {
     return 0;
 }
 
+/* IWAD and PWAD share every byte on disk except the 4-byte magic.
+ * Confirm both create and open route the label through correctly, that
+ * the magic the open path sees matches the enum the caller asked for,
+ * and that the WAD-specific duplicate-name allowance holds end-to-end
+ * via pakka_add_memory. */
+static int check_wad_roundtrip(const char *path, pakka_format_t fmt,
+                               const char *expected_magic) {
+    pakka_archive_t *arc = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    FILE *fp;
+    unsigned char magic[4];
+
+    (void)remove(path);
+
+    s = pakka_create(path, fmt, PAKKA_CREATE_DEFAULT, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create WAD label");
+    /* Duplicate entry names — illegal on every other format, expected
+     * here since WAD authoring relies on it. */
+    s = pakka_add_memory(arc, "THINGS", "map01", 5, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add_memory WAD entry 1");
+    s = pakka_add_memory(arc, "THINGS", "map02", 5, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add_memory WAD duplicate entry");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close WAD");
+
+    /* Confirm on-disk magic matches the requested label. */
+    fp = fopen(path, "rb");
+    if (fp == NULL) {
+        FAIL("created WAD not found at %s", path);
+    }
+    if (fread(magic, 1, 4, fp) != 4) {
+        fclose(fp);
+        FAIL("created WAD shorter than 4-byte magic");
+    }
+    fclose(fp);
+    if (memcmp(magic, expected_magic, 4) != 0) {
+        FAIL("WAD magic mismatch: got %.4s, want %s",
+             (const char *)magic, expected_magic);
+    }
+
+    s = pakka_open(path, PAKKA_OPEN_READ, &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen WAD");
+    EXPECT_EQ(pakka_format(arc), fmt, "format == requested WAD label");
+    EXPECT_EQ((int)pakka_entry_count(arc), 2, "WAD entry count includes dup");
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close WAD reopen");
+    return 0;
+}
+
+static int test_wad_format_label_roundtrip(const char *scratch_dir) {
+    char iwad_path[1024];
+    char pwad_path[1024];
+    snprintf(iwad_path, sizeof(iwad_path), "%s/c_api_label.iwad",
+             scratch_dir);
+    snprintf(pwad_path, sizeof(pwad_path), "%s/c_api_label.pwad",
+             scratch_dir);
+    if (check_wad_roundtrip(iwad_path, PAKKA_FORMAT_IWAD, "IWAD") != 0) {
+        return 1;
+    }
+    if (check_wad_roundtrip(pwad_path, PAKKA_FORMAT_PWAD, "PWAD") != 0) {
+        return 1;
+    }
+    return 0;
+}
+
 /* SiN round-trip via the public C API: create an SPAK archive,
  * pakka_add_memory a 120-byte-name and one ordinary entry, close, then
  * reopen and confirm pakka_format() reports SIN and both entries are
@@ -1286,6 +1352,7 @@ int main(int argc, char **argv) {
     if (test_open_rejects_duplicates(argv[2]) != 0) return 1;
     if (test_open_rejects_malformed_pk3(argv[2]) != 0) return 1;
     if (test_zip_format_label_roundtrip(argv[2]) != 0) return 1;
+    if (test_wad_format_label_roundtrip(argv[2]) != 0) return 1;
     if (test_sin_roundtrip(argv[2]) != 0) return 1;
     if (test_daikatana_write_roundtrip(argv[2]) != 0) return 1;
     if (test_open_ex_hint_mismatch(argv[2]) != 0) return 1;

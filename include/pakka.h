@@ -32,7 +32,9 @@ typedef enum {
     PAKKA_FORMAT_PK3,
     PAKKA_FORMAT_PK4,
     PAKKA_FORMAT_SIN,        /* Ritual 1998, SPAK + 120-byte names */
-    PAKKA_FORMAT_DAIKATANA   /* Ion Storm 2000, PACK + 72-byte directory entries */
+    PAKKA_FORMAT_DAIKATANA,  /* Ion Storm 2000, PACK + 72-byte directory entries */
+    PAKKA_FORMAT_IWAD,       /* id Doom 1/2 base archive — IWAD magic, 16-byte directory entries */
+    PAKKA_FORMAT_PWAD        /* id Doom 1/2 patch archive — PWAD magic, otherwise identical to IWAD */
 } pakka_format_t;
 
 typedef enum {
@@ -102,6 +104,8 @@ pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode,
  *   - PAKKA_FORMAT_SIN: requires "SPAK" magic
  *   - PAKKA_FORMAT_PAK / PAKKA_FORMAT_DAIKATANA: requires "PACK" magic
  *   - PAKKA_FORMAT_PK3 / PAKKA_FORMAT_PK4: requires "PK\3\4" / "PK\5\6"
+ *   - PAKKA_FORMAT_IWAD: requires "IWAD" magic
+ *   - PAKKA_FORMAT_PWAD: requires "PWAD" magic
  * Mismatch returns PAKKA_ERR_INVALID_ARGUMENT. */
 pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
                              pakka_format_t format_hint,
@@ -168,6 +172,14 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
  * + unsafe-name + duplicate + source symlink/regular-file checks +
  * u32 size cap.
  *
+ * Duplicate-name policy: every format except IWAD/PWAD rejects a
+ * second add of the same entry_name with PAKKA_ERR_DUPLICATE. WAD
+ * archives accept the duplicate (Doom IWADs/PWADs deliberately use
+ * repeated lump names — e.g. THINGS / LINEDEFS / SECTORS appear once
+ * per map — and engines walk the directory positionally, so pakka
+ * preserves the duplicates rather than rejecting authorings that mirror
+ * the on-disk pattern).
+ *
  * Format-specific timing of the source read:
  *   - PAK / SiN: source bytes are read and written into the archive
  *     immediately. After return, source_path can be freely modified or
@@ -206,7 +218,9 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                               pakka_error_t *err);
 /* Add an entry whose payload comes from an in-memory buffer rather
  * than a source file. Same validation as pakka_add_file (entry-name
- * length, unsafe-name, duplicate, u32 size cap, append overflow).
+ * length, unsafe-name, duplicate, u32 size cap, append overflow),
+ * including the IWAD/PWAD exception that allows duplicate entry names
+ * — see pakka_add_file for the policy rationale.
  * len == 0 produces a zero-byte entry. The buffer is copied
  * synchronously (PAK / SiN write it to the archive, PK3 / PK4 store
  * an owned copy until commit), so the caller can free `data` as soon
@@ -246,6 +260,9 @@ void pakka_free(void *ptr);
  *   - flags collisions after portable-union normalization (case fold,
  *     slash/backslash, trailing dot/space) — extracting such a pak
  *     would silently overwrite files on Windows/HFS+
+ *   - duplicate entry names are reported as PAKKA_REPORT_WARNING on
+ *     IWAD/PWAD (Doom IWADs deliberately reuse lump names per map);
+ *     on every other format they remain PAKKA_REPORT_ERROR
  *   - with PAKKA_VERIFY_DEEP: also decodes every DEFLATE entry and
  *     confirms uncompressed size + CRC32 match the central directory
  *

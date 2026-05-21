@@ -51,11 +51,19 @@ int pakka_write_u32_le(FILE *fp, uint32_t value) {
 
 /* PAK-class geometry rows. Quake (PAK) and Daikatana share the 56-byte
  * name field but Daikatana appends two u32s per entry (compressed_size +
- * is_compressed). SiN widens the name field to 120 bytes. */
+ * is_compressed). SiN widens the name field to 120 bytes. WAD (Doom
+ * 1/2 IWAD/PWAD) shares the 12-byte header shape but reorders the
+ * directory entry (filepos + size + name[8]) and reorders the header
+ * (numlumps-in-entries + infotableofs) — those divergences are handled
+ * by pakka_format_is_wad branches at the five read/write sites, not by
+ * extra fields here. The table captures only per-entry name + row
+ * dimensions and per-format signature. */
 static const pakka_pak_geometry_t pakka_pak_geometry_rows[] = {
     /* PAK        */ { "PACK", 56,  64, 0 },
     /* SIN        */ { "SPAK", 120, 128, 0 },
-    /* DAIKATANA  */ { "PACK", 56,  72, 1 }
+    /* DAIKATANA  */ { "PACK", 56,  72, 1 },
+    /* IWAD       */ { "IWAD", 8,   16, 0 },
+    /* PWAD       */ { "PWAD", 8,   16, 0 }
 };
 
 const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt) {
@@ -63,6 +71,8 @@ const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt) {
         case PAKKA_FORMAT_PAK:       return &pakka_pak_geometry_rows[0];
         case PAKKA_FORMAT_SIN:       return &pakka_pak_geometry_rows[1];
         case PAKKA_FORMAT_DAIKATANA: return &pakka_pak_geometry_rows[2];
+        case PAKKA_FORMAT_IWAD:      return &pakka_pak_geometry_rows[3];
+        case PAKKA_FORMAT_PWAD:      return &pakka_pak_geometry_rows[4];
         default:                     return NULL;
     }
 }

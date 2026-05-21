@@ -99,6 +99,8 @@ static pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err);
 static uint64_t compute_payload_end(Pak_t *pak);
 static Pakfileentry_t *find_tail(Pak_t *pak);
 static void init_pak_header(Pak_t *pak);
+static pakka_status_t write_pak_header(Pak_t *pak, const char *op_name,
+                                       pakka_error_t *err);
 static pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err);
 static Pakfileentry_t *find_entry(Pak_t *pak, char *path);
 static pakka_status_t copy_between_paks(Pakfileentry_t *entry,
@@ -166,13 +168,22 @@ static void destroy_pak(Pak_t *pak) {
 
 /* Open-time duplicate-name validation. Builds a temporary sorted array
  * of name pointers and scans for adjacent equals. O(n log n); the array
- * is freed before pakka_open returns. */
+ * is freed before pakka_open returns.
+ *
+ * WAD archives (IWAD/PWAD) deliberately ship duplicate lump names —
+ * every Doom map repeats THINGS, LINEDEFS, SECTORS, etc., and engines
+ * walk the directory positionally rather than by name. Pakka treats
+ * WAD as positional too; downstream find_entry/CLI extract use the
+ * first match and document the limitation. */
 static pakka_status_t validate_no_duplicates(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *entry;
     const char **names;
     size_t i = 0;
     size_t j;
 
+    if (pakka_format_is_wad(pak->format)) {
+        return PAKKA_OK;
+    }
     if (pak->num_entries <= 1) {
         return PAKKA_OK;
     }
@@ -243,7 +254,9 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
         && format_hint != PAKKA_FORMAT_PK3
         && format_hint != PAKKA_FORMAT_PK4
         && format_hint != PAKKA_FORMAT_SIN
-        && format_hint != PAKKA_FORMAT_DAIKATANA) {
+        && format_hint != PAKKA_FORMAT_DAIKATANA
+        && format_hint != PAKKA_FORMAT_IWAD
+        && format_hint != PAKKA_FORMAT_PWAD) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "open",
                         "pakka_open: unknown format_hint value %d",
@@ -352,6 +365,8 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
         && format != PAKKA_FORMAT_PK4
         && format != PAKKA_FORMAT_SIN
         && format != PAKKA_FORMAT_DAIKATANA
+        && format != PAKKA_FORMAT_IWAD
+        && format != PAKKA_FORMAT_PWAD
         && format != PAKKA_FORMAT_AUTO) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "create",
@@ -417,15 +432,20 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
         return PAKKA_OK;
     }
 
-    /* PAK-class path (PAK / SiN / Daikatana). The signature stamped
-     * into the initial header comes from the format geometry — "PACK"
-     * for Quake/DK, "SPAK" for SiN — and the directory-entry row width
-     * (64 / 128 / 72) is picked up from pakka_pak_geometry() at every
-     * commit-time write site. AUTO defaults to Quake PAK. */
+    /* PAK-class path (PAK / SiN / Daikatana / IWAD / PWAD). The
+     * signature stamped into the initial header comes from the format
+     * geometry — "PACK" for Quake/DK, "SPAK" for SiN, "IWAD"/"PWAD" for
+     * the Doom labels — and the directory-entry row width is picked up
+     * from pakka_pak_geometry() at every commit-time write site. AUTO
+     * defaults to Quake PAK. */
     if (format == PAKKA_FORMAT_SIN) {
         pak->format = PAKKA_FORMAT_SIN;
     } else if (format == PAKKA_FORMAT_DAIKATANA) {
         pak->format = PAKKA_FORMAT_DAIKATANA;
+    } else if (format == PAKKA_FORMAT_IWAD) {
+        pak->format = PAKKA_FORMAT_IWAD;
+    } else if (format == PAKKA_FORMAT_PWAD) {
+        pak->format = PAKKA_FORMAT_PWAD;
     } else {
         pak->format = PAKKA_FORMAT_PAK;
     }
@@ -433,15 +453,15 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
 
     /* Write a valid empty header now so pakka_create + pakka_close with
      * no payload produces a well-formed 12-byte archive. A subsequent
-     * commit overwrites this header on disk. */
-    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1
-        || pakka_write_u32_le(pak->fp, pak->diroffset) != 0
-        || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
-        saved_errno = errno;
-        destroy_pak(pak);
-        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                        (uint32_t)saved_errno, "create",
-                        "Cannot write initial pak header to %s", path);
+     * commit overwrites this header on disk. Routing through
+     * write_pak_header here (rather than an inline duplicate) keeps the
+     * WAD field-order branch single-sourced. */
+    {
+        pakka_status_t hs = write_pak_header(pak, "create", err);
+        if (hs != PAKKA_OK) {
+            destroy_pak(pak);
+            return hs;
+        }
     }
 
     *out = pak;
@@ -702,17 +722,69 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
         pak->format = (pak->format_hint == PAKKA_FORMAT_DAIKATANA)
                           ? PAKKA_FORMAT_DAIKATANA
                           : PAKKA_FORMAT_PAK;
+    } else if (memcmp(pak->signature, "IWAD", PAKFILE_SIGNATURE_LEN) == 0) {
+        if (pak->format_hint != PAKKA_FORMAT_AUTO
+            && pak->format_hint != PAKKA_FORMAT_IWAD) {
+            return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "format_hint does not match IWAD magic");
+        }
+        pak->format = PAKKA_FORMAT_IWAD;
+    } else if (memcmp(pak->signature, "PWAD", PAKFILE_SIGNATURE_LEN) == 0) {
+        if (pak->format_hint != PAKKA_FORMAT_AUTO
+            && pak->format_hint != PAKKA_FORMAT_PWAD) {
+            return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                            PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                            "format_hint does not match PWAD magic");
+        }
+        pak->format = PAKKA_FORMAT_PWAD;
     } else {
         return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
                         "open", "Not a pak file (bad signature)");
     }
 
-    if (pakka_read_u32_le(pak->fp, &pak->diroffset) != 0
-        || pakka_read_u32_le(pak->fp, &pak->dirlength) != 0) {
-        saved_errno = errno;
-        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                        (uint32_t)saved_errno, "open",
-                        "Cannot read pak header (diroffset/dirlength)");
+    /* Header field order: Quake-class PAKs store (diroffset, dirlength
+     * in bytes); WADs store (numlumps in entries, infotableofs). Both
+     * are little-endian u32s; here we read in the on-disk order and
+     * normalize the in-memory representation so every downstream site
+     * sees (pak->diroffset = byte offset to directory, pak->dirlength
+     * = directory bytes) regardless of format. */
+    if (pakka_format_is_wad(pak->format)) {
+        /* IWAD/PWAD format was settled from the signature above (no PACK
+         * vs Daikatana probe to flip it), so we can fetch the geometry
+         * row early and source dir_entry_size from the table instead of
+         * a magic literal here. The post-probe geom fetch below still
+         * runs and remains the single source of truth for downstream
+         * sites. */
+        const pakka_pak_geometry_t *wad_geom = pakka_pak_geometry(pak->format);
+        uint32_t numlumps;
+        uint32_t infotableofs;
+        if (pakka_read_u32_le(pak->fp, &numlumps) != 0
+            || pakka_read_u32_le(pak->fp, &infotableofs) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "open",
+                            "Cannot read WAD header (numlumps/infotableofs)");
+        }
+        if (numlumps > PAKFILE_MAX_ENTRIES) {
+            return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open",
+                            "WAD has too many entries (%" PRIu32 ", max %u)",
+                            numlumps, PAKFILE_MAX_ENTRIES);
+        }
+        /* numlumps * dir_entry_size fits in u32: PAKFILE_MAX_ENTRIES
+         * (1 Mi) times the WAD row's 16-byte entry is 16 MiB, far below
+         * UINT32_MAX. */
+        pak->dirlength = numlumps * (uint32_t)wad_geom->dir_entry_size;
+        pak->diroffset = infotableofs;
+    } else {
+        if (pakka_read_u32_le(pak->fp, &pak->diroffset) != 0
+            || pakka_read_u32_le(pak->fp, &pak->dirlength) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "open",
+                            "Cannot read pak header (diroffset/dirlength)");
+        }
     }
 
     if (pak->diroffset < PAKFILE_HEADER_SIZE) {
@@ -732,10 +804,12 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
     }
 
     /* Probe between Q2 PAK (64-byte entries) and Daikatana (72-byte
-     * entries) for PACK magic. SPAK is unambiguous. Empty archive
-     * (dirlength == 0) parses cleanly under both layouts — bias to PAK
-     * unless DAIKATANA was explicitly requested. */
-    if (pak->format != PAKKA_FORMAT_SIN
+     * entries) for PACK magic. SPAK and IWAD/PWAD are unambiguous and
+     * skip the probe entirely. Empty archive (dirlength == 0) parses
+     * cleanly under both PACK layouts — bias to PAK unless DAIKATANA
+     * was explicitly requested. */
+    if ((pak->format == PAKKA_FORMAT_PAK
+         || pak->format == PAKKA_FORMAT_DAIKATANA)
         && pak->format_hint == PAKKA_FORMAT_AUTO) {
         pakka_status_t ok_pak = PAKKA_ERR_FORMAT;
         pakka_status_t ok_dk  = PAKKA_ERR_FORMAT;
@@ -835,7 +909,24 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
             return PAKKA_ERR_NOMEM;
         }
 
-        if (fread(current->filename, geom->name_field_len, 1, pak->fp) != 1
+        /* Directory entry on-disk field order: Quake-class PAKs store
+         * (name, offset, length); WADs store (filepos, size, name).
+         * Same widths per geometry row, different order. */
+        if (pakka_format_is_wad(pak->format)) {
+            if (pakka_read_u32_le(pak->fp, &current->offset) != 0
+                || pakka_read_u32_le(pak->fp, &current->length) != 0
+                || fread(current->filename, geom->name_field_len, 1,
+                         pak->fp) != 1) {
+                saved_errno = errno;
+                pakka_entry_free(current);
+                err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                         (uint32_t)saved_errno, "open",
+                         "Cannot read WAD directory entry %" PRIu32, i);
+                err_set_entry(err, NULL, (size_t)i - 1, entry_pos, 0);
+                return PAKKA_ERR_IO;
+            }
+        } else if (fread(current->filename, geom->name_field_len, 1,
+                         pak->fp) != 1
             || pakka_read_u32_le(pak->fp, &current->offset) != 0
             || pakka_read_u32_le(pak->fp, &current->length) != 0) {
             saved_errno = errno;
@@ -872,23 +963,34 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
          * compressed payload size; for everything else it's `length`.
          * Bounds-check against the file we actually have on disk so
          * subsequent extract/copy paths can trust the stored values
-         * without re-validating. */
-        extent = (current->dk_is_compressed != 0)
-                     ? (uint64_t)current->dk_compressed_size
-                     : (uint64_t)current->length;
-        if (current->offset < PAKFILE_HEADER_SIZE
-            || extent > pak->file_size
-            || (uint64_t)current->offset > pak->file_size - extent) {
-            err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
-                     "open",
-                     "Pak entry %" PRIu32 " bytes out of range "
-                     "(offset=%" PRIu32 ", length=%" PRIu32 ")",
-                     i, current->offset, current->length);
-            err_set_entry(err, current->filename, (size_t)i - 1,
-                          (uint64_t)current->offset,
-                          (uint64_t)current->length);
-            pakka_entry_free(current);
-            return PAKKA_ERR_FORMAT;
+         * without re-validating.
+         *
+         * WAD marker lumps (F_START / S_START / etc.) are zero-byte
+         * entries whose filepos is conventionally 0 — the engine never
+         * reads them, so the value carries no meaning. Skip the lower
+         * bound on offset when length is 0 on a WAD; the upper-bound
+         * check still catches blatant garbage. */
+        {
+            int allow_below_header =
+                (pakka_format_is_wad(pak->format) && current->length == 0);
+            extent = (current->dk_is_compressed != 0)
+                         ? (uint64_t)current->dk_compressed_size
+                         : (uint64_t)current->length;
+            if ((!allow_below_header
+                    && current->offset < PAKFILE_HEADER_SIZE)
+                || extent > pak->file_size
+                || (uint64_t)current->offset > pak->file_size - extent) {
+                err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                         "open",
+                         "Pak entry %" PRIu32 " bytes out of range "
+                         "(offset=%" PRIu32 ", length=%" PRIu32 ")",
+                         i, current->offset, current->length);
+                err_set_entry(err, current->filename, (size_t)i - 1,
+                              (uint64_t)current->offset,
+                              (uint64_t)current->length);
+                pakka_entry_free(current);
+                return PAKKA_ERR_FORMAT;
+            }
         }
 
         if (last != NULL) {
@@ -1397,10 +1499,19 @@ static pakka_status_t pak_add_preflight(Pak_t *archive,
                                         pakka_error_t *err) {
     size_t name_len = strlen(entry_name);
     size_t name_cap = pak_entry_name_cap(archive);
-    if (name_len >= name_cap) {
+    int wad = pakka_format_is_wad(archive->format);
+    /* WAD names are exactly 8 bytes on disk with no trailing NUL, so
+     * full-width names (LINEDEFS, COLORMAP, TEXTURE1, SSECTORS,
+     * BLOCKMAP) must be accepted. Every other format relies on the
+     * loader's terminating NUL at index name_field_len and therefore
+     * keeps the historical strict-less-than rule — tests/sin.bats:113
+     * deliberately pins it. */
+    int too_long = wad ? (name_len > name_cap) : (name_len >= name_cap);
+    if (too_long) {
+        size_t reported_max = wad ? name_cap : name_cap - 1;
         err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                  op_name, "Entry name too long for pak "
-                 "(%zu bytes, max %zu)", name_len, name_cap - 1);
+                 "(%zu bytes, max %zu)", name_len, reported_max);
         err_set_entry(err, entry_name, (size_t)-1, 0, 0);
         return PAKKA_ERR_LIMIT;
     }
@@ -1411,7 +1522,10 @@ static pakka_status_t pak_add_preflight(Pak_t *archive,
         err_set_entry(err, entry_name, (size_t)-1, 0, 0);
         return PAKKA_ERR_UNSAFE_NAME;
     }
-    if (find_entry(archive, (char *)entry_name) != NULL) {
+    /* WAD archives accept duplicate lump names by design. Every other
+     * format treats a second add of the same entry_name as a caller
+     * mistake. */
+    if (!wad && find_entry(archive, (char *)entry_name) != NULL) {
         err_fill(err, PAKKA_ERR_DUPLICATE, PAKKA_ERR_DOMAIN_NONE, 0,
                  op_name, "Duplicate entry: %s already exists in pak",
                  entry_name);
@@ -2656,14 +2770,28 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
         }
         qsort(recs, n_entries, sizeof(verify_collision_record_t),
               verify_collision_cmp);
+        /* Doom IWAD/PWAD deliberately ships duplicate lump names — every
+         * map repeats THINGS / LINEDEFS / SIDEDEFS / etc. — so a verify
+         * collision finding there is informational, not fatal. Emit a
+         * WARNING and leave first_error alone; every other format keeps
+         * the ERROR contract that fails pakka_verify. */
+        int wad_dup_is_warning = pakka_format_is_wad(archive->format);
         for (i = 1; i < n_entries; i++) {
             if (strcmp(recs[i - 1].norm, recs[i].norm) == 0) {
-                verify_record_error(report, userdata,
-                                    PAKKA_ERR_DUPLICATE, err,
-                                    &first_error, recs[i].original,
-                                    PAKKA_ERR_DOMAIN_NONE, 0, 0, 0,
-                                    "Normalized collision with '%s'",
-                                    recs[i - 1].original);
+                if (wad_dup_is_warning) {
+                    verify_report(report, userdata, PAKKA_REPORT_WARNING,
+                                  PAKKA_ERR_DUPLICATE, recs[i].original,
+                                  "Duplicate lump '%s' (WAD format permits "
+                                  "intentional name reuse across maps)",
+                                  recs[i - 1].original);
+                } else {
+                    verify_record_error(report, userdata,
+                                        PAKKA_ERR_DUPLICATE, err,
+                                        &first_error, recs[i].original,
+                                        PAKKA_ERR_DOMAIN_NONE, 0, 0, 0,
+                                        "Normalized collision with '%s'",
+                                        recs[i - 1].original);
+                }
             }
         }
         for (i = 0; i < n_entries; i++) free(recs[i].norm);
@@ -2962,16 +3090,46 @@ void init_pak_header(Pak_t *pak) {
 
 /* Serialize one pak header to pak->fp. Writes exactly
  * PAKFILE_HEADER_SIZE bytes — the in-memory Pak_t struct has additional
- * bookkeeping fields after dirlength that must not leak to disk. */
-static pakka_status_t write_pak_header(Pak_t *pak, pakka_error_t *err) {
+ * bookkeeping fields after dirlength that must not leak to disk.
+ *
+ * op_name lets the create-time and commit-time callers feed their own
+ * operation tag into err so a header-write failure surfaces with the
+ * right diagnostic context.
+ *
+ * Field order divergence: Quake-class PAKs serialize (diroffset,
+ * dirlength); WADs serialize (numlumps, infotableofs). In-memory both
+ * carry the byte-oriented pair; the WAD branch derives numlumps from
+ * dirlength using the geometry row's per-entry size. */
+static pakka_status_t write_pak_header(Pak_t *pak, const char *op_name,
+                                       pakka_error_t *err) {
     int saved_errno;
-    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1
-        || pakka_write_u32_le(pak->fp, pak->diroffset) != 0
-        || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
+    if (fwrite(pak->signature, PAKFILE_SIGNATURE_LEN, 1, pak->fp) != 1) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                        (uint32_t)saved_errno, "commit",
+                        (uint32_t)saved_errno, op_name,
                         "Cannot write pak header");
+    }
+    if (pakka_format_is_wad(pak->format)) {
+        const pakka_pak_geometry_t *geom = pakka_pak_geometry(pak->format);
+        uint32_t numlumps =
+            (geom != NULL && geom->dir_entry_size != 0)
+                ? (pak->dirlength / (uint32_t)geom->dir_entry_size)
+                : 0u;
+        if (pakka_write_u32_le(pak->fp, numlumps) != 0
+            || pakka_write_u32_le(pak->fp, pak->diroffset) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, op_name,
+                            "Cannot write WAD header");
+        }
+    } else {
+        if (pakka_write_u32_le(pak->fp, pak->diroffset) != 0
+            || pakka_write_u32_le(pak->fp, pak->dirlength) != 0) {
+            saved_errno = errno;
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, op_name,
+                            "Cannot write pak header");
+        }
     }
     return PAKKA_OK;
 }
@@ -3008,7 +3166,22 @@ static pakka_status_t write_pak_entry(Pak_t *pak, Pakfileentry_t *entry,
         memset(name_field + len, 0, cap - len);
     }
 
-    if (fwrite(name_field, cap, 1, pak->fp) != 1
+    /* Directory entry on-disk field order: Quake-class PAKs serialize
+     * (name, offset, length); WADs serialize (filepos, size, name).
+     * Geometry row width is the same per-format; only the order flips. */
+    if (pakka_format_is_wad(pak->format)) {
+        if (pakka_write_u32_le(pak->fp, entry->offset) != 0
+            || pakka_write_u32_le(pak->fp, entry->length) != 0
+            || fwrite(name_field, cap, 1, pak->fp) != 1) {
+            saved_errno = errno;
+            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                     (uint32_t)saved_errno, "commit",
+                     "Cannot write WAD directory entry");
+            err_set_entry(err, entry->filename, (size_t)-1, 0,
+                          (uint64_t)entry->length);
+            return PAKKA_ERR_IO;
+        }
+    } else if (fwrite(name_field, cap, 1, pak->fp) != 1
         || pakka_write_u32_le(pak->fp, entry->offset) != 0
         || pakka_write_u32_le(pak->fp, entry->length) != 0) {
         saved_errno = errno;
@@ -3064,7 +3237,7 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
                             (uint32_t)saved_errno, "commit",
                             "Cannot seek to pak header");
         }
-        return write_pak_header(pak, err);
+        return write_pak_header(pak, "commit", err);
     }
 
     tail = find_tail(pak);
@@ -3112,6 +3285,6 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
                         "Cannot seek to pak header");
     }
 
-    return write_pak_header(pak, err);
+    return write_pak_header(pak, "commit", err);
 }
 

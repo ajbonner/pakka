@@ -125,6 +125,16 @@ static inline int pakka_format_is_zip(pakka_format_t f) {
     return f == PAKKA_FORMAT_PK3 || f == PAKKA_FORMAT_PK4;
 }
 
+/* True when `f` names a Doom WAD label (IWAD or PWAD). PWAD is byte-
+ * identical to IWAD on disk except for the 4-byte magic — both share
+ * the PAK-class read/write paths in src/pakfile.c but diverge from
+ * Quake-style PAK in three places (header field order, directory entry
+ * field order, and the legal-on-load duplicate-name allowance). The
+ * five WAD-aware branches gate on this helper. */
+static inline int pakka_format_is_wad(pakka_format_t f) {
+    return f == PAKKA_FORMAT_IWAD || f == PAKKA_FORMAT_PWAD;
+}
+
 /* Per-format geometry for PAK-class archives (Quake PAK, SiN, Daikatana).
  * pakka_pak_geometry(fmt) returns NULL for ZIP-class or any non-PAK
  * label; internal callers dispatch on (geometry != NULL ? PAK-class :
