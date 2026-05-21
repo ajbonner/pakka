@@ -974,23 +974,55 @@ static int test_sin_roundtrip(const char *scratch_dir) {
     return 0;
 }
 
-/* DK archives are read-only at the API boundary: pakka_create rejects
- * the format, and the mutation APIs (add_file, add_memory, delete,
- * commit) reject DK archives opened for write. We do not have a real DK
- * fixture available, so we exercise the create-rejection path. */
-static int test_daikatana_create_rejected(const char *scratch_dir) {
+/* Public-API DK write round-trip: create a DK pak, add a small
+ * compressible-extension memory entry (driving pakka_dk_deflate with
+ * STORED auto-fallback), reopen with an explicit DK hint, and
+ * pakka_read_entry_alloc + memcmp the payload. */
+static int test_daikatana_write_roundtrip(const char *scratch_dir) {
     char path[1024];
-    int sentinel = 0;
-    pakka_archive_t *arc = (pakka_archive_t *)&sentinel;
+    pakka_archive_t *arc = NULL;
     pakka_error_t err;
     pakka_status_t s;
+    /* 256 zero bytes — encoder picks zero-run tokens. */
+    unsigned char payload[256];
+    void *out_data = NULL;
+    size_t out_len = 0;
 
-    snprintf(path, sizeof(path), "%s/c_api_dk_rejected.pak", scratch_dir);
+    memset(payload, 0, sizeof(payload));
+
+    snprintf(path, sizeof(path), "%s/c_api_dk_write.pak", scratch_dir);
+    (void)remove(path);
 
     s = pakka_create(path, PAKKA_FORMAT_DAIKATANA, PAKKA_CREATE_DEFAULT,
                      &arc, &err);
-    EXPECT_EQ(s, PAKKA_ERR_UNSUPPORTED, "create DK rejected");
-    EXPECT_EQ(arc == NULL, 1, "create DK clears *out");
+    EXPECT_EQ(s, PAKKA_OK, "create DK ok");
+    if (s != PAKKA_OK) return 1;
+
+    s = pakka_add_memory(arc, "test.bmp", payload, sizeof(payload), &err);
+    EXPECT_EQ(s, PAKKA_OK, "add_memory DK compressible ok");
+
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close DK ok");
+    arc = NULL;
+
+    /* AUTO biases empty/small PACK to Quake PAK; pass the DK hint. */
+    s = pakka_open_ex(path, PAKKA_OPEN_READ, PAKKA_FORMAT_DAIKATANA,
+                      &arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open DK ok");
+    if (s != PAKKA_OK) return 1;
+
+    s = pakka_read_entry_alloc(arc, "test.bmp", &out_data, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read DK entry ok");
+    EXPECT_EQ(out_len, sizeof(payload), "DK entry size matches");
+    if (s == PAKKA_OK && out_len == sizeof(payload)) {
+        EXPECT_EQ(memcmp(out_data, payload, sizeof(payload)), 0,
+                  "DK entry bytes match");
+    }
+    pakka_free(out_data);
+
+    s = pakka_close(arc, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close DK (reopen) ok");
+    (void)remove(path);
     return 0;
 }
 
@@ -1255,7 +1287,7 @@ int main(int argc, char **argv) {
     if (test_open_rejects_malformed_pk3(argv[2]) != 0) return 1;
     if (test_zip_format_label_roundtrip(argv[2]) != 0) return 1;
     if (test_sin_roundtrip(argv[2]) != 0) return 1;
-    if (test_daikatana_create_rejected(argv[2]) != 0) return 1;
+    if (test_daikatana_write_roundtrip(argv[2]) != 0) return 1;
     if (test_open_ex_hint_mismatch(argv[2]) != 0) return 1;
     if (test_add_commit_roundtrip(argv[2]) != 0) return 1;
     if (test_delete_commit(argv[2]) != 0) return 1;

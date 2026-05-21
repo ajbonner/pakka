@@ -140,3 +140,19 @@ if(MSVC)
 else()
     target_compile_options(c_api_test PRIVATE -Wall -pedantic)
 endif()
+
+# DK codec internals test (Makefile peer of dk_codec_test). Reaches
+# pakka_dk_inflate / pakka_dk_deflate through src/common.h; the
+# tests/dk_codec_test.bats wrapper finds the binary via DK_CODEC_TEST.
+add_executable(dk_codec_test tests/dk_codec_test.c)
+target_link_libraries(dk_codec_test PRIVATE pakka)
+target_include_directories(dk_codec_test PRIVATE src)
+if(MSVC)
+    target_compile_options(dk_codec_test PRIVATE /W4 /WX)
+    target_compile_definitions(dk_codec_test PRIVATE
+        _CRT_SECURE_NO_WARNINGS
+        _CRT_NONSTDC_NO_WARNINGS
+    )
+else()
+    target_compile_options(dk_codec_test PRIVATE -Wall -pedantic)
+endif()

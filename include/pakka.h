@@ -32,7 +32,7 @@ typedef enum {
     PAKKA_FORMAT_PK3,
     PAKKA_FORMAT_PK4,
     PAKKA_FORMAT_SIN,        /* Ritual 1998, SPAK + 120-byte names */
-    PAKKA_FORMAT_DAIKATANA   /* Ion Storm 2000, PACK + 72-byte dir entries; read-only */
+    PAKKA_FORMAT_DAIKATANA   /* Ion Storm 2000, PACK + 72-byte directory entries */
 } pakka_format_t;
 
 typedef enum {
@@ -190,8 +190,13 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
  *     actually committed. After return, source_path can be freely
  *     modified or deleted; the commit-time revalidation does NOT
  *     apply on this path (the source is captured at add time).
- *     Daikatana archives are read-only on every format (no published
- *     encoder for the custom byte-codec).
+ *   - Daikatana: source bytes are read fully into memory, encoded
+ *     through pakka_dk_deflate when the entry name ends in
+ *     .tga / .bmp / .wal / .pcx / .bsp (the DK format documentation's
+ *     compress-on-pack policy; everything else is STORED). After
+ *     return, source_path can be freely modified or deleted. Per-
+ *     entry auto-fallback to STORED when the encoded form is no
+ *     smaller than the source.
  *
  * Use pakka_add_memory if you want the payload bytes pinned at call
  * time on every format. */

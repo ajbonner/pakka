@@ -99,7 +99,7 @@ supported-format matrix.
 |---|---|---|---|---|---|---|---|
 | Quake 1 / 2 PAK (also GoldSrc: Half-Life 1, CS 1.6, TFC, Sven Co-op) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | SiN (`SPAK`, 120-byte names) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
-| Daikatana (`PACK`, 72-byte entries, custom codec) | ✓ | ✓ | ✓ | — | — | — | ✓ |
+| Daikatana (`PACK`, 72-byte entries, custom codec) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Quake 3 PK3 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 | Doom 3 PK4 (STORED + DEFLATE) | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ | ✓ |
 
@@ -109,10 +109,13 @@ CLI, or call `pakka_set_compression(archive, PAKKA_COMPRESSION_DEFLATE,
 entry auto-fallback to STORED when DEFLATE wouldn't beat STORED — see
 the "DEFLATE write" section below.
 
-Daikatana is read-only: the custom byte-codec has no published encoder,
-so `pakka_create(PAKKA_FORMAT_DAIKATANA, ...)` and the mutation modes
-(`-c`/`-a`/`-d` with `--format daikatana`) return `PAKKA_ERR_UNSUPPORTED`
-before any state changes. Compressed Daikatana entries decode through
+Daikatana write support uses `pakka_dk_deflate` (greedy LZSS-style
+encoder over the format's zero-run / byte-RLE / back-reference / literal
+opcode set). Add-time policy: entries whose name ends in `.tga` /
+`.bmp` / `.wal` / `.pcx` / `.bsp` are encoded, everything else is
+STORED — this is the documented policy from the pakextract author's
+format notes (Daniel Gibson). Per-entry auto-fallback to STORED when
+the encoder doesn't shrink the source. Compressed entries decode through
 `pakka_dk_inflate` (reference: yquake2/pakextract).
 
 Refused for PK3/PK4 archives: ZIP64, encrypted entries, data descriptors

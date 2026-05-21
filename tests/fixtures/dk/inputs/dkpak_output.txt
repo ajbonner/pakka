@@ -1,0 +1,27 @@
+PS C:\Users\aaron\Desktop\tmp\dk_stuff\inputs\tmp> ..\..\..\..\dkpak.exe -userpak
+dkpak must now be run from from the /src/data directory
+The output will be written to
+   ../../dst/base
+   ../../dst/models
+   ../../dst/maps
+Which represent the components used by the InstallShield project
+
+
+File Size  - 256 261
+Compressed - .\maps/random.bsp (0 percent)
+Adding file - maps/random.bsp
+Adding file - notes.txt
+
+File Size  - 512 30
+Compressed - .\textures/striped.tga (5 percent)
+Adding file - textures/striped.tga
+
+File Size  - 1024 17
+Compressed - .\textures/zeros.bmp (1 percent)
+Adding file - textures/zeros.bmp
+
+Number of files processed: 4
+Total Raw Size:            1825
+Total Compressed Size:     1825
+Compression          :     101 percent
+No Errors

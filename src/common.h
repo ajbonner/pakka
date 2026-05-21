@@ -277,3 +277,18 @@ pakka_status_t pakka_pk3_deep_verify_entry(struct pakka_archive *pak,
 pakka_status_t pakka_dk_inflate(const unsigned char *in, size_t in_len,
                                 unsigned char *out, size_t out_len,
                                 pakka_error_t *err);
+
+/* Daikatana byte-codec encoder. Whole-buffer encode: in/in_len is the
+ * raw payload, out/out_cap is the caller-allocated output buffer; on
+ * success *out_len receives the bytes written.
+ *
+ * Worst case is in_len + ceil(in_len / 64) + 1. Callers size out_cap
+ * to that worst case and clamp to UINT32_MAX (on-disk compressed_size
+ * is u32); if the encoded payload isn't smaller than the source, fall
+ * back to STORED.
+ *
+ * Returns PAKKA_ERR_LIMIT when out_cap can't hold the worst case.
+ * Output is decodable by pakka_dk_inflate. */
+pakka_status_t pakka_dk_deflate(const unsigned char *in, size_t in_len,
+                                unsigned char *out, size_t out_cap,
+                                size_t *out_len, pakka_error_t *err);

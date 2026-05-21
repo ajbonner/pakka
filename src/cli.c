@@ -73,10 +73,10 @@ typedef struct opts_s {
     int path_count;
     int tree;
     int deep;
-    /* --compress: enable DEFLATE compression on newly-added entries.
-     * Valid only for PK3 / PK4 archives in add (-a) or create (-c)
-     * mode; rejected for PAK/SiN/Daikatana before any file is opened.
-     * Per-entry auto-fallback to STORED when DEFLATE wouldn't win. */
+    /* --compress: PK3/PK4 only — enable DEFLATE on newly-added
+     * entries, with -c or -a. Rejected for PAK/SiN/Daikatana
+     * (DK compression is automatic by entry extension). Per-entry
+     * auto-fallback to STORED when DEFLATE wouldn't win. */
     int compress;
     /* --as <entry_name> <source_path> pairs. Parallel arrays so a
      * caller can pass any number of --as occurrences alongside plain
@@ -141,17 +141,6 @@ int main(int argc, char *argv[]) {
 
     g_argv0 = argv[0];
     parseopts(argc, argv, &opts);
-
-    /* --format daikatana applies to mutation modes only after we've
-     * confirmed they are mutation modes — but reject the explicit case
-     * here regardless, before opening or creating any file. */
-    if (opts.format == PAKKA_FORMAT_DAIKATANA
-        && (opts.mode == PAK_CREATE
-            || opts.mode == PAK_ADD
-            || opts.mode == PAK_REMOVE)) {
-        pakka_die("Daikatana archives are read-only "
-                  "(custom codec has no encoder)");
-    }
 
     /* --compress is only meaningful on create and add. For -l / -x / -d
      * / --verify there's no add path to apply compression to, so reject
@@ -1061,7 +1050,7 @@ static void version(void) {
     printf("  pak         Quake 1 / 2 and GoldSrc (Half-Life 1, CS 1.6, TFC, ...)  read + write\n");
     printf("              (--format goldsrc and --format hl are aliases for pak)\n");
     printf("  sin         Ritual SiN (1998)    read + write\n");
-    printf("  daikatana   Ion Storm (2000)     read-only (custom codec, no encoder)\n");
+    printf("  daikatana   Ion Storm (2000)     read + write (.tga/.bmp/.wal/.pcx/.bsp auto-compressed)\n");
     printf("  pk3         Quake 3 / ZIP        read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
     printf("  pk4         Doom 3 / ZIP         read + write (STORED + DEFLATE; pass --compress to encode DEFLATE)\n");
     printf("\n");

@@ -106,6 +106,14 @@ static pakka_status_t copy_between_paks(Pakfileentry_t *entry,
                                         uint32_t *new_offset_out,
                                         pakka_error_t *err);
 
+/* For DK compressed entries entry->length is the uncompressed size;
+ * the on-disk extent is dk_compressed_size. Every byte-layout walker
+ * (rebuild copy, append-point math, directory placement, verify)
+ * must consult this rather than entry->length directly. */
+static uint32_t pak_entry_on_disk_extent(const Pakfileentry_t *e) {
+    return e->dk_is_compressed ? e->dk_compressed_size : e->length;
+}
+
 /* Pick PK3 vs PK4 from the archive path's extension. The on-disk
  * content is byte-identical for both formats, so the filename is the
  * only available signal at open time. Case-insensitive match on `.pk4`
@@ -339,16 +347,11 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
                         "pakka_create: unknown flag bits 0x%x", flags);
     }
 
-    if (format == PAKKA_FORMAT_DAIKATANA) {
-        return err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                        PAKKA_ERR_DOMAIN_NONE, 0, "create",
-                        "Daikatana archives are read-only "
-                        "(custom codec has no encoder)");
-    }
     if (format != PAKKA_FORMAT_PAK
         && format != PAKKA_FORMAT_PK3
         && format != PAKKA_FORMAT_PK4
         && format != PAKKA_FORMAT_SIN
+        && format != PAKKA_FORMAT_DAIKATANA
         && format != PAKKA_FORMAT_AUTO) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "create",
@@ -362,7 +365,12 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
     }
     /* PK3/PK4 create sets pak->max_decompressed inside
      * pakka_pk3_create_impl; PAK/SiN have no compressed entries; DK
-     * create is rejected above. No init needed here. */
+     * create needs the default cap because new compressed entries we
+     * emit will be subject to pakka_set_max_decompressed_size at
+     * read-back time. */
+    if (format == PAKKA_FORMAT_DAIKATANA) {
+        pak->max_decompressed = PK3_DEFAULT_MAX_DECOMPRESSED;
+    }
 
     path_len = strlen(path);
     if (path_len >= sizeof(pak->new_pakpath)) {
@@ -409,11 +417,18 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
         return PAKKA_OK;
     }
 
-    /* PAK-class path (PAK / SiN). The signature stamped into the
-     * initial header comes from the format geometry — "PACK" for
-     * Quake/Doom-class, "SPAK" for SiN. */
-    pak->format = (format == PAKKA_FORMAT_SIN) ? PAKKA_FORMAT_SIN
-                                                : PAKKA_FORMAT_PAK;
+    /* PAK-class path (PAK / SiN / Daikatana). The signature stamped
+     * into the initial header comes from the format geometry — "PACK"
+     * for Quake/DK, "SPAK" for SiN — and the directory-entry row width
+     * (64 / 128 / 72) is picked up from pakka_pak_geometry() at every
+     * commit-time write site. AUTO defaults to Quake PAK. */
+    if (format == PAKKA_FORMAT_SIN) {
+        pak->format = PAKKA_FORMAT_SIN;
+    } else if (format == PAKKA_FORMAT_DAIKATANA) {
+        pak->format = PAKKA_FORMAT_DAIKATANA;
+    } else {
+        pak->format = PAKKA_FORMAT_PAK;
+    }
     init_pak_header(pak);
 
     /* Write a valid empty header now so pakka_create + pakka_close with
@@ -1328,22 +1343,35 @@ pakka_status_t pakka_set_compression(pakka_archive_t *archive,
     return PAKKA_OK;
 }
 
-/* Daikatana archives are read-only. The custom codec has no published
- * encoder, so add/delete/commit on a DK pak would either corrupt the
- * file (rebuild-copy treats `length` as the byte extent — wrong for
- * compressed entries) or require encoding bytes we can't encode. Reject
- * before any state mutation so a later pakka_close implicit-commit is a
- * no-op. */
-static pakka_status_t refuse_dk_mutation(pakka_archive_t *archive,
-                                         const char *operation,
-                                         pakka_error_t *err) {
-    if (archive != NULL && archive->format == PAKKA_FORMAT_DAIKATANA) {
-        return err_fill(err, PAKKA_ERR_UNSUPPORTED,
-                        PAKKA_ERR_DOMAIN_NONE, 0, operation,
-                        "Daikatana archives are read-only "
-                        "(custom codec has no encoder)");
+/* ASCII-only case-insensitive byte compare. Avoids <ctype.h>'s
+ * tolower() — locale-dependent (Turkish i↔I would mis-fold). */
+static int dk_ci_eq(unsigned char a, unsigned char b) {
+    if (a >= 'A' && a <= 'Z') a = (unsigned char)(a + 32);
+    if (b >= 'A' && b <= 'Z') b = (unsigned char)(b + 32);
+    return a == b;
+}
+
+/* DK extensions that get compressed on add: .tga .bmp .wal .pcx .bsp.
+ * Anything else stays STORED. The encoder runs automatically by
+ * extension; there is no per-add user knob. */
+static int dk_compressible_extension(const char *name) {
+    static const char exts[][3] = {
+        {'t','g','a'}, {'b','m','p'}, {'w','a','l'},
+        {'p','c','x'}, {'b','s','p'}
+    };
+    size_t n;
+    size_t i;
+    if (name == NULL) return 0;
+    n = strlen(name);
+    if (n < 4 || name[n - 4] != '.') return 0;
+    for (i = 0; i < sizeof(exts) / sizeof(exts[0]); i++) {
+        if (dk_ci_eq((unsigned char)name[n - 3], (unsigned char)exts[i][0])
+            && dk_ci_eq((unsigned char)name[n - 2], (unsigned char)exts[i][1])
+            && dk_ci_eq((unsigned char)name[n - 1], (unsigned char)exts[i][2])) {
+            return 1;
+        }
     }
-    return PAKKA_OK;
+    return 0;
 }
 
 /* Format-specific entry-name length cap. PAK rows are sized by
@@ -1438,8 +1466,16 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     size_t name_len;
     size_t remaining;
     int saved_errno;
-    pakka_status_t dk_s;
     pakka_status_t pre_s;
+    /* DK compression bookkeeping. src_buf holds the eager source
+     * read; enc_buf holds the encoded output. Both NULL means the
+     * STORED streaming path is used instead. */
+    int dk_try_compress = 0;
+    unsigned char *src_buf = NULL;
+    unsigned char *enc_buf = NULL;
+    size_t enc_len = 0;
+    int use_encoded = 0;
+    uint32_t physical_size;
 
     if (archive == NULL || source_path == NULL || entry_name == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
@@ -1447,8 +1483,6 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                         "pakka_add_file: archive, source_path, "
                         "and entry_name must be non-NULL");
     }
-    dk_s = refuse_dk_mutation(archive, "add_file", err);
-    if (dk_s != PAKKA_OK) return dk_s;
     if (!archive->writable || archive->fp == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "add_file",
@@ -1468,7 +1502,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     }
 
     /* PAK path. Preflight already enforced the name cap for this
-     * format's row (Quake 56, SiN 120). */
+     * format's row (Quake 56, SiN 120, DK 56). */
     name_len = strlen(entry_name);
 
     src_fp = fopen(source_path, "rb");
@@ -1497,6 +1531,55 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
         return PAKKA_ERR_LIMIT;
     }
 
+    /* DK compression policy: matching extension + non-empty source.
+     * worst-case encoded output is in_len + ceil(in_len/64) + 1 — if
+     * that exceeds UINT32_MAX (the on-disk compressed_size cap), skip
+     * the encoder entirely and STORED-stream. */
+    dk_try_compress = (archive->format == PAKKA_FORMAT_DAIKATANA)
+                   && src_size > 0
+                   && dk_compressible_extension(entry_name);
+
+    if (dk_try_compress) {
+        uint64_t worst = (uint64_t)src_size
+                       + ((uint64_t)src_size + 63u) / 64u + 1u;
+        if (worst <= UINT32_MAX) {
+            src_buf = malloc((size_t)src_size);
+            if (src_buf != NULL) {
+                if (fread(src_buf, 1, (size_t)src_size, src_fp)
+                        != (size_t)src_size) {
+                    saved_errno = errno;
+                    free(src_buf);
+                    fclose(src_fp);
+                    return err_fill(err, PAKKA_ERR_IO,
+                                    PAKKA_ERR_DOMAIN_ERRNO,
+                                    (uint32_t)saved_errno, "add_file",
+                                    "Cannot read %s", source_path);
+                }
+                enc_buf = malloc((size_t)worst);
+                if (enc_buf != NULL) {
+                    pakka_status_t e_s = pakka_dk_deflate(
+                        src_buf, (size_t)src_size,
+                        enc_buf, (size_t)worst, &enc_len, NULL);
+                    if (e_s == PAKKA_OK
+                            && enc_len < (size_t)src_size) {
+                        use_encoded = 1;
+                    } else {
+                        free(enc_buf);
+                        enc_buf = NULL;
+                    }
+                }
+                /* If enc_buf alloc failed, src_buf is retained for
+                 * the STORED-from-memory write below — saves a
+                 * re-read. */
+            }
+            /* If src_buf alloc failed, fall through to streaming;
+             * src_fp is still at offset 0. */
+        }
+    }
+
+    physical_size = use_encoded ? (uint32_t)enc_len
+                                : (uint32_t)src_size;
+
     /* Append at the highest byte-offset across all existing entries, not
      * the directory-order tail. Quake's pak0.pak has out-of-order
      * payloads and an orphan blob past the directory; the directory
@@ -1506,13 +1589,15 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                   ? (uint64_t)PAKFILE_HEADER_SIZE
                   : compute_payload_end(archive);
 
-    if (append_offset > UINT32_MAX - (uint64_t)src_size) {
+    if (append_offset > UINT32_MAX - (uint64_t)physical_size) {
+        free(src_buf);
+        free(enc_buf);
         fclose(src_fp);
         err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                  "add_file",
                  "Pak would exceed 4 GiB after adding %s", source_path);
         err_set_entry(err, entry_name, (size_t)-1, append_offset,
-                      (uint64_t)src_size);
+                      (uint64_t)physical_size);
         return PAKKA_ERR_LIMIT;
     }
 
@@ -1523,6 +1608,8 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
      * list from what's on disk. */
     entry = calloc(1, sizeof(Pakfileentry_t));
     if (entry == NULL) {
+        free(src_buf);
+        free(enc_buf);
         fclose(src_fp);
         return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
                         "add_file",
@@ -1532,9 +1619,15 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     entry->filename[name_len] = '\0';
     entry->offset = (uint32_t)append_offset;
     entry->length = (uint32_t)src_size;
+    if (use_encoded) {
+        entry->dk_is_compressed = 1;
+        entry->dk_compressed_size = (uint32_t)enc_len;
+    }
 
     if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
+        free(src_buf);
+        free(enc_buf);
         fclose(src_fp);
         pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -1542,7 +1635,31 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
                         "Cannot seek to append point in pak");
     }
 
-    if (src_size > 0) {
+    if (use_encoded) {
+        /* DK compressed write. */
+        if (fwrite(enc_buf, 1, enc_len, archive->fp) != enc_len) {
+            saved_errno = errno;
+            free(src_buf);
+            free(enc_buf);
+            fclose(src_fp);
+            pakka_entry_free(entry);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "add_file",
+                            "Cannot append %s to pak", entry_name);
+        }
+    } else if (src_buf != NULL) {
+        /* DK STORED-fallback after eager read. */
+        if (fwrite(src_buf, 1, (size_t)src_size, archive->fp)
+                != (size_t)src_size) {
+            saved_errno = errno;
+            free(src_buf);
+            fclose(src_fp);
+            pakka_entry_free(entry);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "add_file",
+                            "Cannot append %s to pak", entry_name);
+        }
+    } else if (src_size > 0) {
         bytes = malloc(PAKFILE_COPY_CHUNK);
         if (bytes == NULL) {
             fclose(src_fp);
@@ -1578,6 +1695,9 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
         }
         free(bytes);
     }
+
+    free(src_buf);
+    free(enc_buf);
     fclose(src_fp);
 
     if (tail == NULL) {
@@ -1600,7 +1720,12 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     uint64_t append_offset;
     size_t name_len;
     int saved_errno;
-    pakka_status_t dk_s;
+    /* DK compression bookkeeping (see pakka_add_file for the rationale). */
+    int dk_try_compress = 0;
+    unsigned char *enc_buf = NULL;
+    size_t enc_len = 0;
+    int use_encoded = 0;
+    uint32_t physical_size;
 
     if (archive == NULL || entry_name == NULL || (data == NULL && len > 0)) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
@@ -1608,8 +1733,6 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                         "pakka_add_memory: archive and entry_name must "
                         "be non-NULL; data may be NULL only when len == 0");
     }
-    dk_s = refuse_dk_mutation(archive, "add_memory", err);
-    if (dk_s != PAKKA_OK) return dk_s;
     if (!archive->writable || archive->fp == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "add_memory",
@@ -1639,21 +1762,47 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
         return PAKKA_ERR_LIMIT;
     }
 
+    /* DK compression: try-encode the in-memory payload directly. */
+    dk_try_compress = (archive->format == PAKKA_FORMAT_DAIKATANA)
+                   && len > 0
+                   && dk_compressible_extension(entry_name);
+    if (dk_try_compress) {
+        uint64_t worst = (uint64_t)len + ((uint64_t)len + 63u) / 64u + 1u;
+        if (worst <= UINT32_MAX) {
+            enc_buf = malloc((size_t)worst);
+            if (enc_buf != NULL) {
+                pakka_status_t e_s = pakka_dk_deflate(
+                    (const unsigned char *)data, len,
+                    enc_buf, (size_t)worst, &enc_len, NULL);
+                if (e_s == PAKKA_OK && enc_len < len) {
+                    use_encoded = 1;
+                } else {
+                    free(enc_buf);
+                    enc_buf = NULL;
+                }
+            }
+        }
+    }
+
+    physical_size = use_encoded ? (uint32_t)enc_len : (uint32_t)len;
+
     tail = find_tail(archive);
     append_offset = (tail == NULL)
                   ? (uint64_t)PAKFILE_HEADER_SIZE
                   : compute_payload_end(archive);
-    if (append_offset > UINT32_MAX - (uint64_t)len) {
+    if (append_offset > UINT32_MAX - (uint64_t)physical_size) {
+        free(enc_buf);
         err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
                  "add_memory",
                  "Pak would exceed 4 GiB after adding %s", entry_name);
         err_set_entry(err, entry_name, (size_t)-1, append_offset,
-                      (uint64_t)len);
+                      (uint64_t)physical_size);
         return PAKKA_ERR_LIMIT;
     }
 
     entry = calloc(1, sizeof(Pakfileentry_t));
     if (entry == NULL) {
+        free(enc_buf);
         return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
                         "add_memory",
                         "Cannot allocate pak entry for %s", entry_name);
@@ -1662,21 +1811,37 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     entry->filename[name_len] = '\0';
     entry->offset = (uint32_t)append_offset;
     entry->length = (uint32_t)len;
+    if (use_encoded) {
+        entry->dk_is_compressed = 1;
+        entry->dk_compressed_size = (uint32_t)enc_len;
+    }
 
     if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
+        free(enc_buf);
         pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "add_memory",
                         "Cannot seek to append point in pak");
     }
-    if (len > 0 && fwrite(data, 1, len, archive->fp) != len) {
+    if (use_encoded) {
+        if (fwrite(enc_buf, 1, enc_len, archive->fp) != enc_len) {
+            saved_errno = errno;
+            free(enc_buf);
+            pakka_entry_free(entry);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "add_memory",
+                            "Cannot append memory payload for %s",
+                            entry_name);
+        }
+    } else if (len > 0 && fwrite(data, 1, len, archive->fp) != len) {
         saved_errno = errno;
         pakka_entry_free(entry);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "add_memory",
                         "Cannot append memory payload for %s", entry_name);
     }
+    free(enc_buf);
 
     if (tail == NULL) {
         archive->head = entry;
@@ -1727,6 +1892,19 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
     }
     total = pakka_entry_size(entry);
     if (total == 0) {
+        /* Don't short-circuit unconditionally — for DK compressed
+         * (or ZIP DEFLATE) entries with declared uncompressed size 0
+         * but a non-empty physical payload, the codec must validate
+         * the stream and reject corruption. Run the entry through
+         * pakka_open_entry, which invokes the codec for compressed
+         * formats and rejects malformed empty-claims; then return
+         * empty data. STORED-format entries take the same path with
+         * trivial overhead. */
+        pakka_reader_t *probe_reader = NULL;
+        pakka_status_t open_s = pakka_open_entry(archive, entry_name,
+                                                 &probe_reader, err);
+        if (open_s != PAKKA_OK) return open_s;
+        pakka_reader_close(probe_reader);
         return PAKKA_OK;        /* *data stays NULL, *len stays 0 */
     }
     if (total > (uint64_t)SIZE_MAX) {
@@ -1809,7 +1987,6 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
                             pakka_error_t *err) {
     Pakfileentry_t *current;
     Pakfileentry_t *prev = NULL;
-    pakka_status_t dk_s;
 
     if (archive == NULL || entry_name == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
@@ -1817,8 +1994,6 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
                         "pakka_delete: archive and entry_name "
                         "must be non-NULL");
     }
-    dk_s = refuse_dk_mutation(archive, "delete", err);
-    if (dk_s != PAKKA_OK) return dk_s;
     if (!archive->writable || archive->fp == NULL) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "delete",
@@ -1870,12 +2045,7 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
  * over the original. Rollback semantics: all in-memory offset
  * mutations are reversible until the rename succeeds. After the
  * rename, the scratch IS the canonical content, so any
- * post-publish failure (reopen) keeps the new offsets installed.
- *
- * Extracted from pakka_commit so the main commit function stays
- * scannable — this block alone was ~200 LOC of bookkeeping (entry
- * counting, scratch path, mkstemp, copy loop, new-offset install,
- * old-offset snapshot, two error rollback variants, rename, reopen). */
+ * post-publish failure (reopen) keeps the new offsets installed. */
 static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                                            pakka_error_t *err) {
     Pakfileentry_t *current;
@@ -2102,11 +2272,6 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
                         "pakka_commit: archive must be non-NULL");
     }
 
-    {
-        pakka_status_t dk_s = refuse_dk_mutation(archive, "commit", err);
-        if (dk_s != PAKKA_OK) return dk_s;
-    }
-
     if (!archive->dirty) {
         return PAKKA_OK;        /* no-op */
     }
@@ -2206,14 +2371,10 @@ static void verify_record_error(pakka_report_fn report, void *userdata,
     }
 }
 
-/* Verify one entry's structural integrity. Records findings via
- * verify_report (every finding) and verify_record_error (the first
- * error, which populates the out pakka_error_t). Updates
- * *first_error so the outer pakka_verify can return the first
- * error status rather than the last. Every "this entry is busted,
- * skip the rest" exit in the original inline loop became a `return`
- * here. The buf parameter is a caller-owned scratch the read loop
- * streams payload bytes through. */
+/* Verify one entry's structural integrity. Reports every finding via
+ * verify_report; the first error also populates *first_error and the
+ * out pakka_error_t so the outer pakka_verify returns the first
+ * status, not the last. `buf` is caller-owned payload scratch. */
 static void verify_entry(pakka_archive_t *archive,
                          Pakfileentry_t *current,
                          unsigned flags,
@@ -2234,13 +2395,6 @@ static void verify_entry(pakka_archive_t *archive,
                             (uint64_t)current->length,
                             "Entry name is not safe to extract");
         return;        /* skip payload read for unsafe names */
-    }
-
-    if (current->length == 0) {
-        verify_report(report, userdata, PAKKA_REPORT_INFO,
-                      PAKKA_OK, current->filename,
-                      "OK (0 bytes)");
-        return;
     }
 
     /* Skip queued-add ZIP entries (H2): their payload isn't on
@@ -2265,6 +2419,21 @@ static void verify_entry(pakka_archive_t *archive,
         verify_length = current->pk3_compressed_size;
     } else if (current->dk_is_compressed) {
         verify_length = current->dk_compressed_size;
+    }
+
+    /* Truly empty = both physical extent and declared uncompressed
+     * length zero. Either alone with a non-zero counterpart is a
+     * compressed-format corruption that must reach the physical
+     * read + (under --deep) the codec decode:
+     *   physical>0, declared=0 — stream declares no output but
+     *     ships opcode bytes (crafted DK entry).
+     *   physical=0, declared>0 — no bytes on disk to inflate into
+     *     the claimed output. */
+    if (verify_length == 0 && current->length == 0) {
+        verify_report(report, userdata, PAKKA_REPORT_INFO,
+                      PAKKA_OK, current->filename,
+                      "OK (0 bytes)");
+        return;
     }
     if (pakka_compat_fseek(archive->fp,
                            (int64_t)verify_offset, SEEK_SET) != 0) {
@@ -2515,6 +2684,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
     char *buffer;
     int64_t new_offset;
     uint32_t src_offset = entry->offset;
+    uint32_t extent = pak_entry_on_disk_extent(entry);
     int saved_errno;
 
     if (pakka_compat_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
@@ -2523,7 +2693,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                  (uint32_t)saved_errno, "commit",
                  "Cannot seek to source entry");
         err_set_entry(err, entry->filename, (size_t)-1,
-                      (uint64_t)src_offset, (uint64_t)entry->length);
+                      (uint64_t)src_offset, (uint64_t)extent);
         return PAKKA_ERR_IO;
     }
 
@@ -2543,7 +2713,11 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
         *new_offset_out = (uint32_t)new_offset;
     }
 
-    if (entry->length == 0) {
+    /* Skip-on-zero uses the physical extent, not entry->length: a DK
+     * compressed entry can declare length=0 (uncompressed) while
+     * carrying a non-zero compressed payload of opcodes that decode to
+     * nothing. Copy whatever's on disk. */
+    if (extent == 0) {
         return PAKKA_OK;
     }
 
@@ -2556,12 +2730,12 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                  "commit",
                  "Cannot allocate copy buffer for entry");
         err_set_entry(err, entry->filename, (size_t)-1,
-                      (uint64_t)src_offset, (uint64_t)entry->length);
+                      (uint64_t)src_offset, (uint64_t)extent);
         return PAKKA_ERR_NOMEM;
     }
 
     {
-        size_t remaining = (size_t)entry->length;
+        size_t remaining = (size_t)extent;
         while (remaining > 0) {
             size_t chunk = remaining > PAKFILE_COPY_CHUNK
                          ? PAKFILE_COPY_CHUNK : remaining;
@@ -2573,7 +2747,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                          "Cannot read entry from source pak");
                 err_set_entry(err, entry->filename, (size_t)-1,
                               (uint64_t)src_offset,
-                              (uint64_t)entry->length);
+                              (uint64_t)extent);
                 return PAKKA_ERR_IO;
             }
             if (fwrite(buffer, 1, chunk, tfd) != chunk) {
@@ -2584,7 +2758,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                          "Cannot write entry to dest pak");
                 err_set_entry(err, entry->filename, (size_t)-1,
                               (uint64_t)src_offset,
-                              (uint64_t)entry->length);
+                              (uint64_t)extent);
                 return PAKKA_ERR_IO;
             }
             remaining -= chunk;
@@ -2766,7 +2940,7 @@ uint64_t compute_payload_end(Pak_t *pak) {
     uint64_t end;
 
     for (e = pak->head; e != NULL; e = e->next) {
-        end = (uint64_t)e->offset + (uint64_t)e->length;
+        end = (uint64_t)e->offset + (uint64_t)pak_entry_on_disk_extent(e);
         if (end > max_end) {
             max_end = end;
         }
@@ -2895,21 +3069,26 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
 
     tail = find_tail(pak);
     /* Per-entry add and rebuild-copy paths already cap each entry's
-     * offset+length at UINT32_MAX, so tail->offset+tail->length fits.
-     * The remaining overflow is diroffset + dirlength crossing 4 GiB
-     * once the directory is appended; reject before any write. */
-    total_dirlength = 0;
-    for (count_it = current; count_it != NULL; count_it = count_it->next) {
-        total_dirlength += entry_size;
+     * offset + on-disk extent at UINT32_MAX, so tail->offset + extent
+     * fits. The remaining overflow is diroffset + dirlength crossing
+     * 4 GiB once the directory is appended; reject before any write.
+     * Use the tail's on-disk extent rather than entry->length so DK
+     * compressed entries (where length is the uncompressed size, not
+     * the file extent) place the directory after the actual payload. */
+    {
+        uint32_t tail_extent = pak_entry_on_disk_extent(tail);
+        total_dirlength = 0;
+        for (count_it = current; count_it != NULL; count_it = count_it->next) {
+            total_dirlength += entry_size;
+        }
+        if ((uint64_t)tail->offset + (uint64_t)tail_extent + total_dirlength
+                > UINT32_MAX) {
+            return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "commit",
+                            "Pak directory would push file past 4 GiB");
+        }
+        pak->diroffset = tail->offset + tail_extent;
     }
-    if ((uint64_t)tail->offset + (uint64_t)tail->length + total_dirlength
-            > UINT32_MAX) {
-        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
-                        "commit",
-                        "Pak directory would push file past 4 GiB");
-    }
-
-    pak->diroffset = tail->offset + tail->length;
     pak->dirlength = 0;
     if (pakka_compat_fseek(pak->fp, (int64_t)pak->diroffset, SEEK_SET) != 0) {
         saved_errno = errno;
