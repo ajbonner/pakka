@@ -1,8 +1,8 @@
 # Pakka
 A command line utility for working with Quake 1 / 2 and GoldSrc
 (Half-Life 1, Counter-Strike 1.6, TFC, ...) `.pak` files, SiN `.sin`
-archives, Daikatana `.pak` archives (read-only), Quake 3 `.pk3` files,
-and Doom 3 `.pk4` files.
+archives, Daikatana `.pak` archives, Quake 3 `.pk3` files, and Doom 3
+`.pk4` files.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -40,15 +40,15 @@ Developer Command Prompt (or after running `vcvarsall.bat x64`):
 
 Produces `build\cmake\pakka.exe`. The CMake build is additive — it compiles
 the same `src/*.c` (including `src/pk3file.c` and the vendored
-`src/vendor/puff/puff.c` INFLATE decoder) plus the
-`src/vendor/wingetopt` (getopt) and `src/vendor/dirent`
-(opendir/readdir) polyfills under `_WIN32`.
+`src/vendor/sdefl` / `src/vendor/sinfl` DEFLATE codec, or `<zlib.h>`
+with `-DPAKKA_USE_ZLIB=ON`) plus the `src/vendor/wingetopt` (getopt)
+and `src/vendor/dirent` (opendir/readdir) polyfills under `_WIN32`.
 
 ## Usage
 Pakka has 6 major modes (one per invocation), each working on `.pak`
 (Quake 1 / 2 and GoldSrc — Half-Life 1, CS 1.6, TFC, Sven Co-op, ...),
-`.sin` (SiN), Daikatana `.pak` (read-only), `.pk3` (Quake 3), and
-`.pk4` (Doom 3) archives. GoldSrc PAKs are bit-identical to Quake/Q2
+`.sin` (SiN), Daikatana `.pak`, `.pk3` (Quake 3), and `.pk4` (Doom 3)
+archives. GoldSrc PAKs are bit-identical to Quake/Q2
 PAKs (same `"PACK"` magic, 56-byte names, 64-byte directory entries),
 so `--format pak` (or its `goldsrc` / `hl` aliases) covers them with
 the same code path. PK3 and PK4 are byte-identical ZIP containers; the
@@ -74,9 +74,8 @@ first positional.
 * Create: `./pakka -c <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * Format is picked from the destination extension (case-insensitive):
     `.pk3` → PK3, `.pk4` → PK4, `.sin` → SiN, anything else → PAK.
-    `--format <name>` (`pak` — also `goldsrc` / `hl`, `sin`, `pk3`,
-    `pk4`) overrides the extension. `--format daikatana` is rejected on
-    `-c` (Daikatana archives are read-only).
+    `--format <name>` (`pak` — also `goldsrc` / `hl`, `sin`,
+    `daikatana`, `pk3`, `pk4`) overrides the extension.
 * Add to archive: `./pakka -a <archive> [file/dir...] [--as <entry_name> <source_path> ...]`
   * `--as <entry_name> <source_path>` adds a single file under an explicit
     entry name (the source path on disk and the name stored in the archive
