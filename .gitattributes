@@ -1,0 +1,9 @@
+# DK cross-validation fixtures are byte-exact references compared via
+# `cmp` against pak-extracted payloads. Without `-text` here, git's
+# autocrlf on Windows checkout would munge LF -> CRLF in notes.txt,
+# changing its on-disk byte count from 33 to 34 and breaking the
+# bats real-fixture test. The packed `user.pak` is binary regardless;
+# pinning it explicitly defends against any future autocrlf default
+# change.
+tests/fixtures/dk/user.pak binary
+tests/fixtures/dk/inputs/* -text
