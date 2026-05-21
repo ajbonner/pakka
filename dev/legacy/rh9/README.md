@@ -139,7 +139,7 @@ Both issues are fixed in-tree:
 
 * The Makefile uses inline `mkdir -p $(@D)` instead of order-only
   prerequisites, so GNU make 3.79.1 accepts it.
-* `src/compat.c` swaps the openat-based descent for an `fchdir` +
+* `src/platform.c` swaps the openat-based descent for an `fchdir` +
   `open(O_NOFOLLOW)` emulation when `!__GLIBC_PREREQ(2,4)`. Symlink
   refusal stays atomic per descent step; the mkdir→reopen window on
   missing intermediates is the same one the modern path has between

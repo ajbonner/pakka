@@ -10,7 +10,7 @@ int pakka_file_exists(const char *filename) {
  * sharing a -C dir spuriously fail when one wins the mkdir race. */
 static int mkdir_or_exists_dir(const char *path, int mode) {
     struct stat sb;
-    if (pakka_compat_mkdir(path, mode) == 0) {
+    if (pakka_platform_mkdir(path, mode) == 0) {
         return 0;
     }
     if (errno != EEXIST) {
@@ -68,10 +68,10 @@ int pakka_mkdir_r(char *path) {
 int64_t pakka_filesize(FILE *fd) {
     int64_t size;
 
-    if (pakka_compat_fseek(fd, 0, SEEK_END) != 0) {
+    if (pakka_platform_fseek(fd, 0, SEEK_END) != 0) {
         return -1;
     }
-    size = pakka_compat_ftell(fd);
+    size = pakka_platform_ftell(fd);
     if (size < 0) {
         return -1;
     }

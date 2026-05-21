@@ -16,7 +16,7 @@
 #define _NETBSD_SOURCE
 #endif
 
-#include "compat.h"
+#include "platform.h"
 
 #ifdef _WIN32
 
@@ -27,21 +27,21 @@
 
 /* Typedef-array static assert — _Static_assert is C11 and pakka holds
  * a gcc 3.x legacy floor. */
-typedef char pakka_compat_assert_int64_size[(sizeof(__int64) >= 8) ? 1 : -1];
+typedef char pakka_platform_assert_int64_size[(sizeof(__int64) >= 8) ? 1 : -1];
 
-int pakka_compat_fseek(FILE *fp, int64_t offset, int whence) {
+int pakka_platform_fseek(FILE *fp, int64_t offset, int whence) {
     return _fseeki64(fp, (__int64)offset, whence);
 }
 
-int64_t pakka_compat_ftell(FILE *fp) {
+int64_t pakka_platform_ftell(FILE *fp) {
     return (int64_t)_ftelli64(fp);
 }
 
-char *pakka_compat_realpath(const char *path, char *resolved) {
+char *pakka_platform_realpath(const char *path, char *resolved) {
     return _fullpath(resolved, path, _MAX_PATH);
 }
 
-char *pakka_compat_getcwd(char *buf, size_t size) {
+char *pakka_platform_getcwd(char *buf, size_t size) {
     return _getcwd(buf, (int)size);
 }
 
@@ -113,11 +113,11 @@ static FILE *mkstemp_open_near(const char *target_path,
     if (target_path == NULL) return NULL;
     if (strlen(target_path) >= sizeof(target_copy)) return NULL;
     strcpy(target_copy, target_path);
-    dir = pakka_compat_dirname(target_copy);
+    dir = pakka_platform_dirname(target_copy);
     return mkstemp_open_at(dir, basename_template, out_path, out_path_size);
 }
 
-FILE *pakka_compat_mkstemp_open(const char *target_path,
+FILE *pakka_platform_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
@@ -140,7 +140,7 @@ FILE *pakka_compat_mkstemp_open(const char *target_path,
     return mkstemp_open_at(tempdir, basename_template, out_path, out_path_size);
 }
 
-char *pakka_compat_dirname(char *path) {
+char *pakka_platform_dirname(char *path) {
     char *slash, *backslash, *last;
     size_t len;
 
@@ -178,16 +178,16 @@ char *pakka_compat_dirname(char *path) {
     return path;
 }
 
-int pakka_compat_mkdir(const char *path, int mode) {
+int pakka_platform_mkdir(const char *path, int mode) {
     (void)mode;
     return _mkdir(path);
 }
 
-char *pakka_compat_strdup(const char *s) {
+char *pakka_platform_strdup(const char *s) {
     return _strdup(s);
 }
 
-int pakka_compat_rename_replace(const char *src, const char *dst,
+int pakka_platform_rename_replace(const char *src, const char *dst,
                           uint32_t *win32_code) {
     if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING)) {
         return 0;
@@ -198,7 +198,7 @@ int pakka_compat_rename_replace(const char *src, const char *dst,
     return -1;
 }
 
-int pakka_compat_rename_noreplace(const char *src, const char *dst,
+int pakka_platform_rename_noreplace(const char *src, const char *dst,
                             uint32_t *win32_code) {
     /* MoveFileExA without MOVEFILE_REPLACE_EXISTING fails with
      * ERROR_ALREADY_EXISTS if dst exists — that's exactly the
@@ -212,7 +212,7 @@ int pakka_compat_rename_noreplace(const char *src, const char *dst,
     return -1;
 }
 
-int pakka_compat_ftruncate(FILE *fp, int64_t length) {
+int pakka_platform_ftruncate(FILE *fp, int64_t length) {
     int err;
     if (fflush(fp) != 0) {
         return -1;
@@ -226,20 +226,20 @@ int pakka_compat_ftruncate(FILE *fp, int64_t length) {
     return 0;
 }
 
-int pakka_compat_lstat(const char *path, struct stat *sb) {
+int pakka_platform_lstat(const char *path, struct stat *sb) {
     /* Windows has no POSIX symlinks. The recursive-add path checks
-     * for reparse points via pakka_compat_is_reparse_or_symlink — keep
-     * pakka_compat_lstat as a thin stat() shim for the regular/dir test. */
+     * for reparse points via pakka_platform_is_reparse_or_symlink — keep
+     * pakka_platform_lstat as a thin stat() shim for the regular/dir test. */
     return stat(path, sb);
 }
 
-int pakka_compat_is_reparse_or_symlink(const char *path) {
+int pakka_platform_is_reparse_or_symlink(const char *path) {
     DWORD attr = GetFileAttributesA(path);
     if (attr == INVALID_FILE_ATTRIBUTES) return 0;
     return (attr & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
 }
 
-int pakka_compat_try_exclusive_lock(FILE *fp) {
+int pakka_platform_try_exclusive_lock(FILE *fp) {
     /* _locking with _LK_NBLCK is exclusive + non-blocking. Lock the
      * first byte from position 0; load_pakfile's first read happens
      * right after open with the stream still at 0, so we don't need
@@ -265,7 +265,7 @@ static int append_path_component(char *path, size_t cap, const char *name,
     return 0;
 }
 
-FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_path) {
     char path[PATH_MAX];
     DWORD attr;
     const char *p, *seg;
@@ -335,13 +335,13 @@ FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_pat
  * a gcc 3.x legacy floor. Fires if -D_FILE_OFFSET_BITS=64 stops
  * reaching this TU on 32-bit glibc; off_t silently reverts to 32-bit
  * and the 2 GiB ceiling comes back. */
-typedef char pakka_compat_assert_off_t_size[(sizeof(off_t) >= 8) ? 1 : -1];
+typedef char pakka_platform_assert_off_t_size[(sizeof(off_t) >= 8) ? 1 : -1];
 
-int pakka_compat_fseek(FILE *fp, int64_t offset, int whence) {
+int pakka_platform_fseek(FILE *fp, int64_t offset, int whence) {
     return fseeko(fp, (off_t)offset, whence);
 }
 
-int64_t pakka_compat_ftell(FILE *fp) {
+int64_t pakka_platform_ftell(FILE *fp) {
     return (int64_t)ftello(fp);
 }
 
@@ -403,11 +403,11 @@ int64_t pakka_compat_ftell(FILE *fp) {
 #  endif
 #endif
 
-char *pakka_compat_realpath(const char *path, char *resolved) {
+char *pakka_platform_realpath(const char *path, char *resolved) {
     return realpath(path, resolved);
 }
 
-char *pakka_compat_getcwd(char *buf, size_t size) {
+char *pakka_platform_getcwd(char *buf, size_t size) {
     return getcwd(buf, size);
 }
 
@@ -424,7 +424,7 @@ static FILE *mkstemp_open_in_dir(const char *target_path,
     if (target_path == NULL) return NULL;
     if (strlen(target_path) >= sizeof(target_copy)) return NULL;
     strcpy(target_copy, target_path);
-    dir = pakka_compat_dirname(target_copy);
+    dir = pakka_platform_dirname(target_copy);
 
     n = snprintf(out_path, out_path_size, "%s/%s", dir, basename_template);
     if (n < 0 || (size_t)n >= out_path_size) return NULL;
@@ -442,7 +442,7 @@ static FILE *mkstemp_open_in_dir(const char *target_path,
     return fp;
 }
 
-FILE *pakka_compat_mkstemp_open(const char *target_path,
+FILE *pakka_platform_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
@@ -470,19 +470,19 @@ FILE *pakka_compat_mkstemp_open(const char *target_path,
     return fp;
 }
 
-char *pakka_compat_dirname(char *path) {
+char *pakka_platform_dirname(char *path) {
     return dirname(path);
 }
 
-int pakka_compat_mkdir(const char *path, int mode) {
+int pakka_platform_mkdir(const char *path, int mode) {
     return mkdir(path, (mode_t)mode);
 }
 
-char *pakka_compat_strdup(const char *s) {
+char *pakka_platform_strdup(const char *s) {
     return strdup(s);
 }
 
-int pakka_compat_rename_replace(const char *src, const char *dst,
+int pakka_platform_rename_replace(const char *src, const char *dst,
                           uint32_t *win32_code) {
     /* POSIX: errno carries the failure information; win32_code is
      * always left untouched. */
@@ -490,7 +490,7 @@ int pakka_compat_rename_replace(const char *src, const char *dst,
     return rename(src, dst);
 }
 
-int pakka_compat_rename_noreplace(const char *src, const char *dst,
+int pakka_platform_rename_noreplace(const char *src, const char *dst,
                             uint32_t *win32_code) {
     (void)win32_code;
     /* POSIX rename() always replaces — there is no portable no-replace
@@ -512,24 +512,24 @@ int pakka_compat_rename_noreplace(const char *src, const char *dst,
     return 0;
 }
 
-int pakka_compat_ftruncate(FILE *fp, int64_t length) {
+int pakka_platform_ftruncate(FILE *fp, int64_t length) {
     if (fflush(fp) != 0) {
         return -1;
     }
     return ftruncate(fileno(fp), (off_t)length);
 }
 
-int pakka_compat_lstat(const char *path, struct stat *sb) {
+int pakka_platform_lstat(const char *path, struct stat *sb) {
     return lstat(path, sb);
 }
 
-int pakka_compat_is_reparse_or_symlink(const char *path) {
+int pakka_platform_is_reparse_or_symlink(const char *path) {
     struct stat sb;
     if (lstat(path, &sb) != 0) return 0;
     return S_ISLNK(sb.st_mode) ? 1 : 0;
 }
 
-int pakka_compat_try_exclusive_lock(FILE *fp) {
+int pakka_platform_try_exclusive_lock(FILE *fp) {
     /* fcntl(F_SETLK) is POSIX-mandatory and visible under
      * _XOPEN_SOURCE=700 on every CI target. flock(2) is BSD-derived
      * and the BSDs hide it behind __BSD_VISIBLE, which is 0 in strict
@@ -554,7 +554,7 @@ int pakka_compat_try_exclusive_lock(FILE *fp) {
  * the previous fd, so even if an attacker swaps a component for a
  * symlink between syscalls, the next openat with O_NOFOLLOW fails
  * atomically. */
-FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_path) {
     int dirfd, newfd, leaf_fd;
     const char *p, *seg;
     size_t seg_len;
@@ -620,7 +620,7 @@ FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_pat
     }
 }
 #else
-/* Pre-glibc-2.4 fallback for pakka_compat_open_extract_target. fchdir into
+/* Pre-glibc-2.4 fallback for pakka_platform_open_extract_target. fchdir into
  * each opened intermediate so we never name a path that could be
  * raced under us; O_NOFOLLOW makes each step's symlink refusal atomic
  * with the open. The mkdir→reopen window on missing intermediates is
@@ -630,7 +630,7 @@ FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_pat
  * Cwd mutation is safe because pakka is single-threaded; we still
  * have to restore via fchdir(saved_cwd) on every return path or the
  * caller's next syscall would resolve against the wrong directory. */
-FILE *pakka_compat_open_extract_target(const char *dest_dir, const char *rel_path) {
+FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_path) {
     int dest_fd, saved_cwd, dir_fd, leaf_fd;
     const char *p, *seg;
     size_t seg_len;
@@ -711,7 +711,7 @@ out:
  * then returns 1 on the N-th call to pakka_test_should_fault matching
  * op (and 0 otherwise). Single global counter — only one op is armed
  * per process, which is what the bats tests need. Compiled out in
- * production via the macro in compat.h. */
+ * production via the macro in platform.h. */
 #include <stdlib.h>
 int pakka_test_should_fault(const char *op) {
     static int initialized = 0;

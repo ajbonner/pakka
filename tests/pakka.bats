@@ -337,7 +337,7 @@ EOF
     [ -f "$BATS_TEST_TMPDIR/out/COM10" ]
 }
 
-# H2 — symlink-safe extract. compat_open_extract_target walks pak entry
+# H2 — symlink-safe extract. platform_open_extract_target walks pak entry
 # components with O_NOFOLLOW (POSIX) or reparse-point checks (Windows),
 # so a pre-planted symlink in the -C destination cannot redirect a write.
 

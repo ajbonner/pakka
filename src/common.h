@@ -4,7 +4,7 @@
 #include <inttypes.h>
 #include <string.h>
 
-#include "compat.h"
+#include "platform.h"
 #include "filesystem.h"
 #include "pakka.h"
 

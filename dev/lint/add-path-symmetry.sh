@@ -27,8 +27,8 @@ fi
 # of pakka_add_file / pakka_add_memory. Each was the subject of an
 # original-then-drifted check that H1+M1 hoisted.
 GUARD_SYMBOLS=(
-    "pakka_compat_is_reparse_or_symlink"
-    "pakka_compat_lstat"
+    "pakka_platform_is_reparse_or_symlink"
+    "pakka_platform_lstat"
     "pakka_unsafe_entry_name"
     "find_entry"
 )

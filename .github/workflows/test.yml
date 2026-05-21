@@ -113,10 +113,10 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl zip python3 zlib1g-dev
       - run: make PAKKA_DEFLATE_BACKEND=zlib test
 
-  # Cross-arm lint. Runs clang-tidy against src/cli.c, src/compat.c,
+  # Cross-arm lint. Runs clang-tidy against src/cli.c, src/platform.c,
   # and src/pakfile.c under --target=x86_64-w64-mingw32 with Linux's
   # mingw-w64 headers standing in for the MSVC SDK. Catches
-  # regressions in the _WIN32 arm (compat shims, the wingetopt /
+  # regressions in the _WIN32 arm (platform shims, the wingetopt /
   # dirent vendored paths, the MoveFileExA / GetLastError plumbing
   # in the rebuild commit path) without waiting for the windows-msvc
   # job. Runs on every push so PRs that touch a Win32-aware source

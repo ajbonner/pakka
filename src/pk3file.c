@@ -260,7 +260,7 @@ static int pk3_find_eocd(FILE *fp, uint64_t file_size,
         : (size_t)file_size;
     scan_start = file_size - (uint64_t)scan_len;
 
-    if (pakka_compat_fseek(fp, (int64_t)scan_start, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(fp, (int64_t)scan_start, SEEK_SET) != 0) {
         return -1;
     }
     if (fread(buf, 1, scan_len, fp) != scan_len) {
@@ -303,7 +303,7 @@ static pakka_status_t pk3_validate_eocd(Pak_t *pak,
     uint32_t cdr_size, cdr_offset;
     int saved_errno;
 
-    if (pakka_compat_fseek(pak->fp, (int64_t)eocd_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)eocd_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
@@ -374,7 +374,7 @@ static pakka_status_t pk3_validate_lfh(Pak_t *pak, Pakfileentry_t *entry,
     uint32_t lfh_crc, lfh_csize, lfh_usize;
     int saved_errno;
 
-    if (pakka_compat_fseek(pak->fp, (int64_t)entry->pk3_lfh_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)entry->pk3_lfh_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "open",
@@ -660,7 +660,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
                             "open", "Cannot allocate CDR buffer (%u bytes)",
                             (unsigned)cdr_size);
     }
-    if (pakka_compat_fseek(pak->fp, (int64_t)cdr_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)cdr_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(cdr);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -802,7 +802,7 @@ static pakka_status_t pk3_load_compressed(Pak_t *pak,
                             "Cannot allocate compressed buffer (%u bytes)",
                             (unsigned)entry->pk3_compressed_size);
     }
-    if (pakka_compat_fseek(pak->fp, (int64_t)entry->pk3_payload_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)entry->pk3_payload_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(buf);
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -886,7 +886,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
              * symlink / non-regular file (PAKKA_ERR_UNSAFE_NAME). */
             {
                 struct stat sb;
-                if (pakka_compat_is_reparse_or_symlink(
+                if (pakka_platform_is_reparse_or_symlink(
                         entry->pk3_pending_source)) {
                     free(buf);
                     return pk3_err_fill(err, PAKKA_ERR_UNSAFE_NAME,
@@ -896,7 +896,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
                                         "symlink/reparse point",
                                         entry->pk3_pending_source);
                 }
-                if (pakka_compat_lstat(
+                if (pakka_platform_lstat(
                         entry->pk3_pending_source, &sb) != 0) {
                     int saved_errno = errno;
                     free(buf);
@@ -1140,7 +1140,7 @@ pakka_status_t pakka_pk3_reader_read_impl(struct pakka_reader *reader,
     }
 
     /* STORED path: seek + fread, just like the PAK reader. */
-    if (pakka_compat_fseek(pak->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "reader_read",
@@ -1623,7 +1623,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
         return PAKKA_OK;
     }
 
-    entry->pk3_pending_source = pakka_compat_strdup(source_path);
+    entry->pk3_pending_source = pakka_platform_strdup(source_path);
     if (entry->pk3_pending_source == NULL) {
         pakka_entry_free(entry);
         return pk3_err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -1817,7 +1817,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             }
         }
 
-        if (! (tmpfp = pakka_compat_mkstemp_open(dest_for_rename,
+        if (! (tmpfp = pakka_platform_mkstemp_open(dest_for_rename,
                                               "pakkaXXXXXX",
                                               tmp_path,
                                               sizeof(tmp_path)))) {
@@ -1907,7 +1907,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                     /* Same three-way split as open_entry: symlink ->
                      * UNSAFE_NAME, stat failure -> IO/ERRNO, non-regular
                      * -> UNSAFE_NAME. */
-                    if (pakka_compat_is_reparse_or_symlink(
+                    if (pakka_platform_is_reparse_or_symlink(
                             e->pk3_pending_source)) {
                         pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                                      old_offset_field,
@@ -1926,7 +1926,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                             e->pk3_pending_source,
                                             e->filename);
                     }
-                    if (pakka_compat_lstat(e->pk3_pending_source,
+                    if (pakka_platform_lstat(e->pk3_pending_source,
                                            &sb) != 0) {
                         saved_errno = errno;
                         pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
@@ -2090,7 +2090,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                         e->filename);
                 }
             } else {
-                if (pakka_compat_fseek(pak->fp, (int64_t)e->pk3_payload_offset, SEEK_SET) != 0) {
+                if (pakka_platform_fseek(pak->fp, (int64_t)e->pk3_payload_offset, SEEK_SET) != 0) {
                     saved_errno = errno;
                     pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                                  old_offset_field,
@@ -2313,10 +2313,10 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                 errno = EIO;
             } else {
                 rc = pak->is_new
-                    ? pakka_compat_rename_replace(tmp_path,
+                    ? pakka_platform_rename_replace(tmp_path,
                                                   pak->tmp_pakpath,
                                                   &win32_code)
-                    : pakka_compat_rename_replace(tmp_path,
+                    : pakka_platform_rename_replace(tmp_path,
                                                   pak->cur_pakpath,
                                                   &win32_code);
             }
@@ -2385,7 +2385,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         /* Add-only path: file already has fresh LFHs at the correct
          * offsets. Just seek to pk3_cdr_offset to overwrite any stale
          * CDR+EOCD. */
-        if (pakka_compat_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
+        if (pakka_platform_fseek(pak->fp, (int64_t)pak->pk3_cdr_offset, SEEK_SET) != 0) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",
@@ -2455,7 +2455,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         int64_t new_eof = (int64_t)pak->pk3_cdr_offset
                         + (int64_t)cdr_size
                         + (int64_t)PK3_EOCD_SIZE;
-        if (pakka_compat_ftruncate(pak->fp, new_eof) != 0) {
+        if (pakka_platform_ftruncate(pak->fp, new_eof) != 0) {
             saved_errno = errno;
             return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                                 (uint32_t)saved_errno, "commit",

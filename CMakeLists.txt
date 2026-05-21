@@ -26,7 +26,7 @@ option(PAKKA_USE_ZLIB "Use system zlib instead of bundled sdefl+sinfl" OFF)
 # make symbol-audit).
 set(PAKKA_LIB_SOURCES
     src/common.c
-    src/compat.c
+    src/platform.c
     src/dk_codec.c
     src/filesystem.c
     src/pakfile.c
@@ -82,7 +82,7 @@ target_link_libraries(pakka_exe PRIVATE pakka)
 
 # Public header on the library target propagates -Iinclude to consumers
 # (here that's just pakka_exe; in future, external callers). src/ stays
-# PRIVATE — internal headers (common.h, compat.h, ...) are not public ABI.
+# PRIVATE — internal headers (common.h, platform.h, ...) are not public ABI.
 target_include_directories(pakka PUBLIC include PRIVATE src)
 target_include_directories(pakka_exe PRIVATE src)
 
@@ -121,7 +121,7 @@ foreach(_t pakka pakka_exe)
     else()
         target_compile_options(${_t} PRIVATE -Wall -pedantic)
         # realpath() is gated on _XOPEN_SOURCE under glibc/musl. Matches Makefile.
-        # _FILE_OFFSET_BITS=64 widens off_t on 32-bit glibc so pakka_compat_fseek
+        # _FILE_OFFSET_BITS=64 widens off_t on 32-bit glibc so pakka_platform_fseek
         # can address paks in [2 GiB, 4 GiB). No-op elsewhere.
         target_compile_definitions(${_t} PRIVATE _XOPEN_SOURCE=700 _FILE_OFFSET_BITS=64)
     endif()

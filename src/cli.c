@@ -352,7 +352,7 @@ static void insert_tree_path(treenode_t *root, const char *path,
         return;
     }
 
-    path_copy = pakka_compat_strdup(path);
+    path_copy = pakka_platform_strdup(path);
     if (path_copy == NULL) {
         pakka_die("Cannot allocate tree-path copy");
     }
@@ -495,11 +495,11 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         pakka_die("Cannot allocate destination buffer");
     }
     if (destination != NULL) {
-        if (pakka_compat_realpath(destination, realdest) == NULL) {
+        if (pakka_platform_realpath(destination, realdest) == NULL) {
             pakka_die("Cannot open destination path '%s'", destination);
         }
     } else {
-        if (pakka_compat_getcwd(realdest, OS_PATH_MAX) == NULL) {
+        if (pakka_platform_getcwd(realdest, OS_PATH_MAX) == NULL) {
             pakka_die("Cannot get current working directory");
         }
     }
@@ -632,7 +632,7 @@ static void op_extract(pakka_archive_t *pak, char *destination,
 
         printf("Writing %" PRIu64 " bytes to %s/%s\n", size, realdest, name);
 
-        tfd = pakka_compat_open_extract_target(realdest, name);
+        tfd = pakka_platform_open_extract_target(realdest, name);
         if (tfd == NULL) {
             pakka_die("Cannot open %s/%s for writing "
                        "(symlink in path or filesystem error)",
@@ -709,10 +709,10 @@ static void op_add(pakka_archive_t *pak, char **paths, int path_count,
 static void cli_add_path(pakka_archive_t *pak, char *path) {
     struct stat sb;
 
-    if (pakka_compat_is_reparse_or_symlink(path)) {
+    if (pakka_platform_is_reparse_or_symlink(path)) {
         pakka_die_e(0, "Refusing to add symlink/reparse '%s'", path);
     }
-    if (pakka_compat_lstat(path, &sb) != 0) {
+    if (pakka_platform_lstat(path, &sb) != 0) {
         pakka_die_e(errno, "Cannot stat %s", path);
     }
     if (S_ISDIR(sb.st_mode)) {
@@ -752,11 +752,11 @@ static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth) {
             closedir(d);
             pakka_die_e(0, "Path too long: %s/%s", path, dirp->d_name);
         }
-        if (pakka_compat_is_reparse_or_symlink(tmp)) {
+        if (pakka_platform_is_reparse_or_symlink(tmp)) {
             fprintf(stderr, "Skipping symlink/reparse point %s\n", tmp);
             continue;
         }
-        if (pakka_compat_lstat(tmp, &sb) == 0) {
+        if (pakka_platform_lstat(tmp, &sb) == 0) {
             if (S_ISDIR(sb.st_mode)) {
                 cli_add_folder_r(pak, tmp, depth + 1);
             } else if (S_ISREG(sb.st_mode)) {

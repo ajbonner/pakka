@@ -4,7 +4,7 @@
 #include <stdlib.h>
 #include <errno.h>
 
-#include "compat.h"
+#include "platform.h"
 
 int pakka_file_exists(const char *dirname);
 int pakka_mkdir_r(char *path);

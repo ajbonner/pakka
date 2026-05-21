@@ -40,7 +40,7 @@ fi
 # O_NOFOLLOW descent at runtime. Mirror the symlink fixture from
 # tests/pakka.bats so legacy CI fails loudly if that path stops
 # refusing pre-planted symlinks. Without this, a regression in
-# compat_open_extract_target would slip past CI because the build
+# platform_open_extract_target would slip past CI because the build
 # itself doesn't exercise extract.
 echo "== smoke: symlink-safe extract =="
 mkdir -p "$WORK/scratch/out" "$WORK/scratch/outside"

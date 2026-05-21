@@ -10,11 +10,11 @@ TARGET=pakka
 # glibc gates it on __USE_XOPEN_EXTENDED, musl on _XOPEN_SOURCE, neither
 # on _POSIX_C_SOURCE.
 # _FILE_OFFSET_BITS=64 — widens off_t / fseeko / ftello on 32-bit glibc
-# so pakka_compat_fseek/ftell can address the [2 GiB, 4 GiB) range.
+# so pakka_platform_fseek/ftell can address the [2 GiB, 4 GiB) range.
 CPPFLAGS = -Iinclude -Isrc -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1 -DAPP_NAME=$(APP_NAME) -DVERSION=$(VERSION) -DBUILD_DATE=$(BUILD_DATE)
 
 # Opt-in fault-injection hook (PAKKA_INJECT_FAULT_AT="op:N" env var,
-# read by pakka_test_should_fault in src/compat.c). Compiled into
+# read by pakka_test_should_fault in src/platform.c). Compiled into
 # binaries only when the user invokes a test target, so a plain
 # `make` produces a release-style build without the hook. The bats
 # suite (`make test`) gets it automatically; the c_api_test exerciser
@@ -206,10 +206,10 @@ lint: lint-header lint-advisory
 # Cross-arm lint: run clang-tidy against the _WIN32 branch of every
 # Win32-aware source. Linux's mingw-w64 headers stand in for the
 # MSVC SDK so we can syntax-check the Windows arm without an MSVC
-# toolchain. Catches regressions where someone touches src/compat.{h,c},
+# toolchain. Catches regressions where someone touches src/platform.{h,c},
 # src/cli.c's CLI path, or src/pakfile.c's PAKKA_ERR_DOMAIN_WIN32
 # rebuild branches and ships a subtle break that only the
-# windows-msvc job would catch. Targets src/cli.c + src/compat.c +
+# windows-msvc job would catch. Targets src/cli.c + src/platform.c +
 # src/pakfile.c — the three files with non-trivial _WIN32 code.
 #
 # Skips cleanly when the cross-headers are absent (e.g. on macOS
@@ -236,8 +236,8 @@ lint-win32:
 		exit 0; \
 	fi; \
 	$(CLANG_TIDY) --quiet \
-		--header-filter='(common|compat|filesystem|pakka)\.h$$' \
-		src/cli.c src/compat.c src/pakfile.c $(PUBLIC_HEADERS) -- \
+		--header-filter='(common|platform|filesystem|pakka)\.h$$' \
+		src/cli.c src/platform.c src/pakfile.c $(PUBLIC_HEADERS) -- \
 		$(CPPFLAGS) \
 		--target=x86_64-w64-mingw32 \
 		-isystem $(WIN32_HEADERS) \

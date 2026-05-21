@@ -39,7 +39,7 @@ floor.
   slowest job in the matrix.
 
 The build smoke catches a pre-openat libc regression class: pakka's
-`compat.c` swaps to the `fchdir` + `O_NOFOLLOW` legacy extract path
+`platform.c` swaps to the `fchdir` + `O_NOFOLLOW` legacy extract path
 when the libc lacks `openat`. Before that path was BSD-gated, NetBSD
 3.0 failed compile on `O_CLOEXEC` and `openat`. The fix shipped in the
 same commit that captured this probe (see git log for details).

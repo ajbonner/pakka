@@ -285,7 +285,7 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
      * the same byte-tail, write payloads on top of each other, and
      * race the directory rewrite. The lock is released automatically
      * when pak->fp is closed. */
-    if (writable && pakka_compat_try_exclusive_lock(pak->fp) != 0) {
+    if (writable && pakka_platform_try_exclusive_lock(pak->fp) != 0) {
         saved_errno = errno;
         destroy_pak(pak);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -392,7 +392,7 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
 
     /* L_tmpnam on MSVC is 20 bytes — not enough for "C:\Users\...\Temp\
      * pakkaXXXXXX" — hence the dedicated OS_PATH_MAX buffer on Pak_t. */
-    if (! (pak->fp = pakka_compat_mkstemp_open(path, "pakkaXXXXXX",
+    if (! (pak->fp = pakka_platform_mkstemp_open(path, "pakkaXXXXXX",
                                          pak->tmp_pakpath,
                                          sizeof(pak->tmp_pakpath)))) {
         saved_errno = errno;
@@ -502,14 +502,14 @@ pakka_status_t pakka_close(pakka_archive_t *pak, pakka_error_t *err) {
             status = PAKKA_ERR_IO;
         } else {
             uint32_t win32_code = 0;
-            int rrc = pakka_compat_rename_noreplace(pak->tmp_pakpath,
+            int rrc = pakka_platform_rename_noreplace(pak->tmp_pakpath,
                                               pak->new_pakpath,
                                               &win32_code);
             if (rrc != 0) {
                 /* Differentiate "destination already exists" from
                  * generic I/O failure so callers can react. On POSIX
                  * errno carries the answer (link()+unlink() under
-                 * the hood). On Windows pakka_compat_rename_noreplace
+                 * the hood). On Windows pakka_platform_rename_noreplace
                  * captures GetLastError into win32_code before
                  * returning. */
                 saved_errno = errno;
@@ -590,7 +590,7 @@ static pakka_status_t probe_pak_layout(Pak_t *pak,
         /* Skip the name field; we only care whether the entry's
          * offset+extent fits in the file under this candidate
          * layout. */
-        if (pakka_compat_fseek(pak->fp,
+        if (pakka_platform_fseek(pak->fp,
                                (int64_t)(entry_pos + geom->name_field_len),
                                SEEK_SET) != 0) {
             return PAKKA_ERR_FORMAT;
@@ -627,13 +627,13 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
     /* Capture the actual file size up front so every bounds check below
      * compares against ground truth rather than self-reported header
      * values. */
-    if (pakka_compat_fseek(pak->fp, 0, SEEK_END) != 0) {
+    if (pakka_platform_fseek(pak->fp, 0, SEEK_END) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "open",
                         "Cannot seek pak file");
     }
-    size = pakka_compat_ftell(pak->fp);
+    size = pakka_platform_ftell(pak->fp);
     if (size < 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -817,7 +817,7 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
         entry_pos = (uint64_t)pak->diroffset + (uint64_t)pak->dirlength
                     - (uint64_t)i * geom->dir_entry_size;
 
-        if (pakka_compat_fseek(pak->fp, (int64_t)entry_pos, SEEK_SET) != 0) {
+        if (pakka_platform_fseek(pak->fp, (int64_t)entry_pos, SEEK_SET) != 0) {
             saved_errno = errno;
             err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                      (uint32_t)saved_errno, "open",
@@ -1141,7 +1141,7 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
             return PAKKA_ERR_NOMEM;
         }
         if (clen > 0) {
-            if (pakka_compat_fseek(archive->fp,
+            if (pakka_platform_fseek(archive->fp,
                                    (int64_t)entry->offset, SEEK_SET) != 0) {
                 saved_errno = errno;
                 free(compressed);
@@ -1248,7 +1248,7 @@ pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf,
      * single FILE *, so a different reader's seek between calls would
      * otherwise leave this one mispositioned. fseek is cheap; coherence
      * is the priority. */
-    if (pakka_compat_fseek(reader->archive->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(reader->archive->fp, (int64_t)reader->next_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "reader_read",
@@ -1430,14 +1430,14 @@ static pakka_status_t pak_add_source_preflight(const char *source_path,
                                                pakka_error_t *err) {
     struct stat sb;
     int saved_errno;
-    if (pakka_compat_is_reparse_or_symlink(source_path)) {
+    if (pakka_platform_is_reparse_or_symlink(source_path)) {
         err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE, 0,
                  op_name, "Refusing symlink/reparse source: %s",
                  source_path);
         err_set_entry(err, entry_name, (size_t)-1, 0, 0);
         return PAKKA_ERR_UNSAFE_NAME;
     }
-    if (pakka_compat_lstat(source_path, &sb) != 0) {
+    if (pakka_platform_lstat(source_path, &sb) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, op_name,
@@ -1624,7 +1624,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
         entry->dk_compressed_size = (uint32_t)enc_len;
     }
 
-    if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(src_buf);
         free(enc_buf);
@@ -1816,7 +1816,7 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
         entry->dk_compressed_size = (uint32_t)enc_len;
     }
 
-    if (pakka_compat_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(archive->fp, (int64_t)append_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         free(enc_buf);
         pakka_entry_free(entry);
@@ -2096,7 +2096,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
         }
     }
 
-    tfd = pakka_compat_mkstemp_open(dir_hint, "pakkaXXXXXX",
+    tfd = pakka_platform_mkstemp_open(dir_hint, "pakkaXXXXXX",
                               rebuild_scratch,
                               sizeof(rebuild_scratch));
     if (tfd == NULL) {
@@ -2108,7 +2108,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                         "Cannot create rebuild scratch near %s",
                         dir_hint);
     }
-    if (pakka_compat_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
         saved_errno = errno;
         fclose(tfd);
         (void)remove(rebuild_scratch);
@@ -2208,7 +2208,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
 
         {
             uint32_t win32_code = 0;
-            if (pakka_compat_rename_replace(rebuild_scratch, rename_target,
+            if (pakka_platform_rename_replace(rebuild_scratch, rename_target,
                                       &win32_code) != 0) {
                 saved_errno = errno;
                 /* Best-effort restore: revert offsets, drop the
@@ -2435,7 +2435,7 @@ static void verify_entry(pakka_archive_t *archive,
                       "OK (0 bytes)");
         return;
     }
-    if (pakka_compat_fseek(archive->fp,
+    if (pakka_platform_fseek(archive->fp,
                            (int64_t)verify_offset, SEEK_SET) != 0) {
         int seek_errno = errno;
         verify_record_error(report, userdata, PAKKA_ERR_IO, err,
@@ -2540,7 +2540,7 @@ static void verify_entry(pakka_archive_t *archive,
             return;
         }
         if (clen > 0) {
-            if (pakka_compat_fseek(archive->fp,
+            if (pakka_platform_fseek(archive->fp,
                                    (int64_t)current->offset,
                                    SEEK_SET) != 0
                 || fread(cbuf, 1, clen, archive->fp) != clen) {
@@ -2687,7 +2687,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
     uint32_t extent = pak_entry_on_disk_extent(entry);
     int saved_errno;
 
-    if (pakka_compat_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
         saved_errno = errno;
         err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                  (uint32_t)saved_errno, "commit",
@@ -2697,7 +2697,7 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
         return PAKKA_ERR_IO;
     }
 
-    new_offset = pakka_compat_ftell(tfd);
+    new_offset = pakka_platform_ftell(tfd);
     if (new_offset < 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -3058,7 +3058,7 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
     if (current == NULL) {
         pak->diroffset = PAKFILE_HEADER_SIZE;
         pak->dirlength = 0;
-        if (pakka_compat_fseek(pak->fp, 0, SEEK_SET) != 0) {
+        if (pakka_platform_fseek(pak->fp, 0, SEEK_SET) != 0) {
             saved_errno = errno;
             return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                             (uint32_t)saved_errno, "commit",
@@ -3090,7 +3090,7 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
         pak->diroffset = tail->offset + tail_extent;
     }
     pak->dirlength = 0;
-    if (pakka_compat_fseek(pak->fp, (int64_t)pak->diroffset, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, (int64_t)pak->diroffset, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "commit",
@@ -3105,7 +3105,7 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
         pak->dirlength += entry_size;
     } while ((current = current->next) != NULL);
 
-    if (pakka_compat_fseek(pak->fp, 0, SEEK_SET) != 0) {
+    if (pakka_platform_fseek(pak->fp, 0, SEEK_SET) != 0) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "commit",
