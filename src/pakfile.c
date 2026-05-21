@@ -1118,6 +1118,23 @@ uint64_t pakka_entry_offset(const pakka_entry_t *entry) {
     return (uint64_t)entry->offset;
 }
 
+uint64_t pakka_entry_compressed_size(const pakka_entry_t *entry) {
+    if (entry == NULL) {
+        return 0;
+    }
+    /* DEFLATE PK3/PK4: on-disk size is pk3_compressed_size. */
+    if (entry->pk3_method == PAKKA_COMPRESSION_DEFLATE) {
+        return (uint64_t)entry->pk3_compressed_size;
+    }
+    /* Compressed Daikatana: on-disk size is dk_compressed_size. */
+    if (entry->dk_is_compressed) {
+        return (uint64_t)entry->dk_compressed_size;
+    }
+    /* STORED everything else (PAK, SiN, WAD, STORED PK3/PK4, STORED DK):
+     * on-disk size equals the logical length. */
+    return (uint64_t)entry->length;
+}
+
 pakka_status_t pakka_open_entry(pakka_archive_t *archive,
                                 const char *entry_name,
                                 pakka_reader_t **out,

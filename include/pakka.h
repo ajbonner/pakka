@@ -141,6 +141,15 @@ const char *pakka_entry_name(const pakka_entry_t *entry);
 uint64_t    pakka_entry_size(const pakka_entry_t *entry);
 uint64_t    pakka_entry_offset(const pakka_entry_t *entry);
 
+/* On-disk (compressed) payload size for the entry, in bytes. For
+ * STORED entries (PAK, SiN, IWAD/PWAD, STORED PK3/PK4, STORED
+ * Daikatana) this equals pakka_entry_size. For DEFLATE PK3/PK4
+ * entries it's the compressed-stream length between the local file
+ * header and the next entry / CDR. For compressed Daikatana entries
+ * it's the on-disk codec-stream length. Useful for "Packed" columns
+ * in file-manager-style UIs. */
+uint64_t    pakka_entry_compressed_size(const pakka_entry_t *entry);
+
 /* Streaming reader. A pakka_reader_t is a stateful cursor into one
  * entry of the owning pakka_archive_t. Multiple readers may be open
  * on the same archive simultaneously: pakka_reader_read re-seeks the
