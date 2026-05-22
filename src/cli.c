@@ -604,18 +604,33 @@ static void op_extract(pakka_archive_t *pak, char *destination,
     if (realdest == NULL) {
         pakka_die("Cannot allocate destination buffer");
     }
+    fprintf(stderr, "[trace] op_extract: destination=%s\n",
+            destination ? destination : "(null)");
+    fflush(stderr);
     if (destination != NULL) {
+        fprintf(stderr, "[trace] op_extract: calling pakka_platform_realpath\n");
+        fflush(stderr);
         if (pakka_platform_realpath(destination, realdest) == NULL) {
             pakka_die("Cannot open destination path '%s'", destination);
         }
+        fprintf(stderr, "[trace] op_extract: realpath -> %s\n", realdest);
+        fflush(stderr);
     } else {
+        fprintf(stderr, "[trace] op_extract: calling pakka_platform_getcwd\n");
+        fflush(stderr);
         if (pakka_platform_getcwd(realdest, OS_PATH_MAX) == NULL) {
             pakka_die("Cannot get current working directory");
         }
+        fprintf(stderr, "[trace] op_extract: getcwd -> %s\n", realdest);
+        fflush(stderr);
     }
+    fprintf(stderr, "[trace] op_extract: calling pakka_platform_stat\n");
+    fflush(stderr);
     if (pakka_platform_stat(realdest, &sb) != 0) {
         pakka_die("Cannot stat destination '%s'", realdest);
     }
+    fprintf(stderr, "[trace] op_extract: stat ok\n");
+    fflush(stderr);
     if (!S_ISDIR(sb.st_mode)) {
         pakka_die("Destination '%s' is not a directory", realdest);
     }
@@ -786,9 +801,16 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             name = sanitized;
         }
 
+        fprintf(stderr, "[trace] extract idx=%zu name=%s\n", idx, name);
+        fflush(stderr);
         printf("Writing %" PRIu64 " bytes to %s/%s\n", size, realdest, name);
 
+        fprintf(stderr, "[trace] extract idx=%zu calling open_extract_target\n", idx);
+        fflush(stderr);
         tfd = pakka_platform_open_extract_target(realdest, name);
+        fprintf(stderr, "[trace] extract idx=%zu open_extract_target returned %p\n",
+                idx, (void *)tfd);
+        fflush(stderr);
         if (tfd == NULL) {
             pakka_die("Cannot open %s/%s for writing "
                        "(symlink in path or filesystem error)",
