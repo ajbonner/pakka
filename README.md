@@ -134,7 +134,7 @@ other than STORED (0) and DEFLATE (8). Each refusal returns
 extracting from, and mutating pak archives:
 
 * Version: `pakka_version` returns the linked libpakka version string
-  (e.g. `"1.4.0"`), useful for bindings that want to feature-gate on
+  (e.g. `"1.5.0"`), useful for bindings that want to feature-gate on
   the loaded library.
 * Archive lifecycle: `pakka_open` / `pakka_open_ex` (lets the caller
   pin the format) / `pakka_create` / `pakka_close` (close implicitly
