@@ -305,23 +305,27 @@ relative path resolves wrong and every test fails to find the binary.
 MSYS2 packages needed alongside bats: `pacman -S --needed bash coreutils curl
 diffutils git openssl tar make python3 zip unzip`.
 
-`make slow-test` is an opt-in heavier suite. It downloads id's Q3 demo
-wrapper from archive.org (~93 MiB, SHA256-pinned), uses pakka itself to
-extract the inner 47 MiB `pak0.pk3` (1,274 real id-built entries), and
-runs the full read / list / extract / structural-verify / deep-verify
-sequence against it. Not part of `make test` because of the download
-size and archive.org's intermittent availability.
+`make realpak-test-q3` is an opt-in suite that exercises pakka against
+a real game-engine archive. It downloads id's Q3 demo wrapper from
+archive.org (~93 MiB, SHA256-pinned), uses pakka itself to extract the
+inner 47 MiB `pak0.pk3` (1,274 real id-built entries), and runs the
+full read / list / extract / structural-verify / deep-verify sequence
+against it. `make realpak-test-goldsrc` does the same for Half-Life's
+Uplink and Day One PAKs (138 MiB combined). `make realpak-test` is an
+umbrella that runs both. Not part of `make test` because of the
+download sizes and archive.org's intermittent availability.
 
-The Windows MSVC build can't drive `make slow-test` / `make slow-test-goldsrc`
-directly — those targets depend on the cc-built `pakka` binary and on
-`symbol-audit` against `libpakka.a`, neither of which exist in the
-CMake/Ninja path. Use `dev/win/slow-test.sh` from MSYS2 instead; it
-reuses the Makefile's download + SHA-verify steps and drives the
-extract / bats invocations against `build/cmake/pakka.exe`:
+The Windows MSVC build can't drive `make realpak-test-q3` / `make
+realpak-test-goldsrc` directly — those targets depend on the cc-built
+`pakka` binary and on `symbol-audit` against `libpakka.a`, neither of
+which exist in the CMake/Ninja path. Use `dev/win/realpak-test.sh`
+from MSYS2 instead; it reuses the Makefile's download + SHA-verify
+steps and drives the extract / bats invocations against
+`build/cmake/pakka.exe`:
 
-    $ dev/win/slow-test.sh            # both suites
-    $ dev/win/slow-test.sh q3         # Q3 demo PK3 only (~93 MiB)
-    $ dev/win/slow-test.sh goldsrc    # Half-Life PAK fixtures (~138 MiB)
+    $ dev/win/realpak-test.sh            # both suites
+    $ dev/win/realpak-test.sh q3         # Q3 demo PK3 only (~93 MiB)
+    $ dev/win/realpak-test.sh goldsrc    # Half-Life PAK fixtures (~138 MiB)
 
 `make lint` runs [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) with
 a curated check set (`.clang-tidy` at the repo root). On macOS, install via

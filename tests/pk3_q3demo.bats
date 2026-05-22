@@ -1,12 +1,12 @@
 #!/usr/bin/env bats
 #
-# Q3 demo pak0.pk3 fixture — gated behind `make slow-test`, not
+# Q3 demo pak0.pk3 fixture — gated behind `make realpak-test-q3`, not
 # triggered by default `make test`. Pulls the 93 MiB wrapper from
 # archive.org, SHA-pins it, and uses pakka itself to extract the
 # inner pak0.pk3.
 #
 # The fixture path comes in via env var Q3DEMO_PAK0_PK3 (set by the
-# slow-test Makefile target). If absent, every test skips so this
+# realpak-test-q3 Makefile target). If absent, every test skips so this
 # bats file is safe to include in a directory-wide `bats tests/`.
 
 PROJECT_ROOT="${BATS_TEST_DIRNAME}/.."
@@ -20,7 +20,7 @@ setup_file() {
 
 skip_if_missing() {
     if [ -n "$SKIP_ALL" ]; then
-        skip "Q3DEMO_PAK0_PK3 not set or not present — run via 'make slow-test'"
+        skip "Q3DEMO_PAK0_PK3 not set or not present — run via 'make realpak-test-q3'"
     fi
 }
 

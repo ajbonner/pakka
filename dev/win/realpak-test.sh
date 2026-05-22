@@ -1,25 +1,26 @@
 #!/usr/bin/env bash
 #
-# Windows / MSYS2 equivalent of `make slow-test` and `make slow-test-goldsrc`.
+# Windows / MSYS2 equivalent of `make realpak-test-q3` and
+# `make realpak-test-goldsrc`.
 #
-# The Makefile's slow-test targets depend on $(TARGET) (the cc-built `pakka`
-# binary) and on `symbol-audit` (which reads libpakka.a). Neither exists in
-# the Windows MSVC build path — pakka.exe is produced by CMake/Ninja under
-# build/cmake/, and there's no static archive to audit. This script does
-# what the Makefile targets do but using the pre-built pakka.exe via the
-# PAKKA env var.
+# The Makefile's realpak-test targets depend on $(TARGET) (the cc-built
+# `pakka` binary) and on `symbol-audit` (which reads libpakka.a). Neither
+# exists in the Windows MSVC build path — pakka.exe is produced by
+# CMake/Ninja under build/cmake/, and there's no static archive to audit.
+# This script does what the Makefile targets do but using the pre-built
+# pakka.exe via the PAKKA env var.
 #
 # The fixture download + SHA verification still runs through `make` because
 # `make verify-q3demo` / `make verify-goldsrc-{uplink,dayone}` only use
 # curl + openssl, neither of which needs the cc toolchain.
 #
 # Usage (from MSYS2 MSYS shell, at repo root):
-#   dev/win/slow-test.sh            # both suites
-#   dev/win/slow-test.sh q3         # Q3 demo PK3 only
-#   dev/win/slow-test.sh goldsrc    # Half-Life PAK fixtures only
+#   dev/win/realpak-test.sh            # both suites
+#   dev/win/realpak-test.sh q3         # Q3 demo PK3 only
+#   dev/win/realpak-test.sh goldsrc    # Half-Life PAK fixtures only
 #
 # Override PAKKA if your build lives elsewhere:
-#   PAKKA=/c/path/to/pakka.exe dev/win/slow-test.sh
+#   PAKKA=/c/path/to/pakka.exe dev/win/realpak-test.sh
 
 set -euo pipefail
 
@@ -28,9 +29,9 @@ cd "$REPO_ROOT"
 
 PAKKA="${PAKKA:-$REPO_ROOT/build/cmake/pakka.exe}"
 if [ ! -x "$PAKKA" ]; then
-    echo "slow-test: pakka.exe not found at $PAKKA" >&2
-    echo "slow-test: build it first via 'cmake -B build/cmake -G Ninja . && cmake --build build/cmake'" >&2
-    echo "slow-test: or override with PAKKA=/path/to/pakka.exe" >&2
+    echo "realpak-test: pakka.exe not found at $PAKKA" >&2
+    echo "realpak-test: build it first via 'cmake -B build/cmake -G Ninja . && cmake --build build/cmake'" >&2
+    echo "realpak-test: or override with PAKKA=/path/to/pakka.exe" >&2
     exit 1
 fi
 export PAKKA

@@ -21,7 +21,7 @@ CPPFLAGS = -Iinclude -Isrc -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1
 # and inline cc invocations link against the test-built libpakka.a
 # and pick up the hook through it. CMake / Windows release builds
 # never define PAKKA_TEST_BUILD.
-ifneq ($(filter test test-fault slow-test, $(MAKECMDGOALS)),)
+ifneq ($(filter test test-fault realpak-test realpak-test-q3 realpak-test-goldsrc, $(MAKECMDGOALS)),)
 CPPFLAGS += -DPAKKA_TEST_BUILD
 PAKKA_BUILD_MODE := test
 else
@@ -110,9 +110,10 @@ QUAKE_TARBALL=$(TEST_DIR)/quakesw.tar.gz
 PAK0=$(TEST_DIR)/pak0.pak
 
 # Q3 demo wrapper from archive.org (redistribution of id's freely
-# distributable demo). Used by the optional `slow-test` target only —
-# not pulled by default `make test`. archive.org's CDN is occasionally
-# 503; if the fetch fails, slow-test fails but normal CI is unaffected.
+# distributable demo). Used by the optional `realpak-test-q3` target
+# only — not pulled by default `make test`. archive.org's CDN is
+# occasionally 503; if the fetch fails, realpak-test-q3 fails but
+# normal CI is unaffected.
 Q3DEMO_URL=https://archive.org/download/Q3A-Demo/Quake%203%20Arena%20Demo.zip
 Q3DEMO_SHA256=e9f89ef064317634aab3b3a3add131887967fc04744526bd624e1914b1e25b3e
 Q3DEMO_ZIP=$(TEST_DIR)/q3demo.zip
@@ -122,9 +123,9 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 # Half-Life 1 lineage. GoldSrc PAK is bit-identical to Quake/Q2 PAK
 # (same 12-byte header, 56-byte names, 64-byte entries), so these are
 # parity-confirmation fixtures against real Valve writer output, not a
-# separate code path. Driven by `slow-test-goldsrc` (separate from the
-# Q3 demo's `slow-test`); default `make test` leaves them untouched
-# and tests/pak_goldsrc.bats skips when the env vars are unset.
+# separate code path. Driven by `realpak-test-goldsrc` (separate from
+# the Q3 demo's `realpak-test-q3`); default `make test` leaves them
+# untouched and tests/pak_goldsrc.bats skips when the env vars are unset.
 #
 # Both wrappers are plain ZIPs from archive.org; we unzip then copy
 # the inner pak0 out to a canonical path under build/test/. unzip is
@@ -163,7 +164,7 @@ NM ?= nm
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header lint-advisory lint-win32 coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture slow-test slow-test-goldsrc
+.PHONY: all clean test test-clean distclean lint lint-header lint-advisory lint-win32 coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture realpak-test realpak-test-q3 realpak-test-goldsrc
 
 # Force serial execution. force-relink (below) deletes $(TARGET) and
 # $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
@@ -487,20 +488,31 @@ $(GOLDSRC_DAYONE_PAK0): verify-goldsrc-dayone
 	@cp "$(TEST_DIR)/hl-dayone-raw/Half-Life Day One/valve/pak0.pak" $(GOLDSRC_DAYONE_PAK0)
 	@echo "==> Half-Life: Day One pak0.pak ready: $(GOLDSRC_DAYONE_PAK0)"
 
-# Optional: full PK3 suite against id's real Q3 demo pak0.pk3. Pulls
-# 93 MiB from archive.org, so kept out of `make test`. CI can opt in
-# by running `make slow-test` on a single representative job.
-slow-test: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
+# Real-archive ("realpak") test suites. Exercise pakka against actual
+# game-engine archives downloaded from archive.org rather than the
+# synthetic Quake 1 shareware pak used by `make test`. The "realpak"
+# label distinguishes them from `make test` (smaller, single-format
+# fixture) — they're not slow in wall-clock terms, the bats suites run
+# in under a minute; the only cost is the first-time fixture download,
+# which is SHA-pinned and cached in CI.
+
+# `make realpak-test` is the umbrella — runs both q3 and goldsrc.
+realpak-test: realpak-test-q3 realpak-test-goldsrc
+
+# Full PK3 suite against id's real Q3 demo pak0.pk3. Pulls 93 MiB from
+# archive.org; CI caches the wrapper zip by Makefile hash so reruns
+# skip the download.
+realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats tests/pk3_q3demo.bats
 
-# GoldSrc parity-confirmation suite. Kept separate from slow-test
+# GoldSrc parity-confirmation suite. Kept separate from realpak-test-q3
 # because the GoldSrc fixtures are heavier (~138 MiB combined) and add
 # a second archive.org dependency on top of the Q3 demo path. Pulls
 # the Uplink (48 MiB) and Day One (90 MiB) zip wrappers, extracts
 # valve/pak0.pak from each, and runs tests/pak_goldsrc.bats against
 # both real Valve-built archives.
-slow-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) symbol-audit
+realpak-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) symbol-audit
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
 	GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \

@@ -1,7 +1,7 @@
 #!/usr/bin/env bats
 #
 # GoldSrc PAK parity-confirmation fixtures — gated behind
-# `make slow-test-goldsrc`, not triggered by default `make test`.
+# `make realpak-test-goldsrc`, not triggered by default `make test`.
 # GoldSrc PAK is bit-identical to Quake/Q2 PAK at the format level
 # (same "PACK" magic, 56-byte filename field, 64-byte directory entry),
 # so these tests don't exercise a new code path — they prove the
@@ -11,7 +11,7 @@
 #   GOLDSRC_UPLINK_PAK0   — Half-Life Uplink (1999 free demo) valve/pak0.pak
 #   GOLDSRC_DAYONE_PAK0   — Half-Life: Day One (1998 OEM demo)  valve/pak0.pak
 #
-# Both are set by the slow-test-goldsrc Makefile target; if absent,
+# Both are set by the realpak-test-goldsrc Makefile target; if absent,
 # the corresponding tests skip so `bats tests/` remains safe to run.
 #
 # Pinned entry counts and asset sizes are tied to the SHA-pinned
@@ -34,13 +34,13 @@ setup_file() {
 
 skip_if_uplink_missing() {
     if [ -n "$SKIP_UPLINK" ]; then
-        skip "GOLDSRC_UPLINK_PAK0 not set or not present — run via 'make slow-test-goldsrc'"
+        skip "GOLDSRC_UPLINK_PAK0 not set or not present — run via 'make realpak-test-goldsrc'"
     fi
 }
 
 skip_if_dayone_missing() {
     if [ -n "$SKIP_DAYONE" ]; then
-        skip "GOLDSRC_DAYONE_PAK0 not set or not present — run via 'make slow-test-goldsrc'"
+        skip "GOLDSRC_DAYONE_PAK0 not set or not present — run via 'make realpak-test-goldsrc'"
     fi
 }
 

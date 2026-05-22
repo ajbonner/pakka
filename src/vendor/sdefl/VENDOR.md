@@ -83,7 +83,7 @@ Two passes applied at vendor time:
    is idempotent on a fresh upstream pull.
 3. Bump the SHA pin above.
 4. Verify `make symbol-audit` passes and `make test` is green.
-5. Run `make slow-test` (Q3 demo PK3 round-trip via the zlib backend
+5. Run `make realpak-test-q3` (Q3 demo PK3 round-trip via the zlib backend
    and the vendored backend) to catch any encoder regression that
    would produce streams Q3 / id-Tech-4 tooling can't decode.
 

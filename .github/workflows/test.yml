@@ -619,17 +619,18 @@ jobs:
           export PAKKA_NBSD_WORKDIR PAKKA_NBSD_SSH_PORT PAKKA_NBSD_ROOT_PASSWORD
           dev/legacy/netbsd-sparc/scripts/run-build.sh
 
-  # Slow-test suites. Real game-engine archives from archive.org —
-  # bigger fixtures + more entries than the synthetic Quake shareware
-  # pak that the default `test` target uses. Despite the name, the
-  # bats suites themselves take seconds; the 93 MiB Q3 demo + 48 MiB
-  # Half-Life Uplink + 90 MiB Half-Life Day One downloads are the
+  # Realpak-test suites. Exercise pakka against real game-engine
+  # archives downloaded from archive.org (id's Q3 demo PK3, Valve's
+  # Half-Life Uplink + Day One PAKs) — bigger fixtures + more entries
+  # than the synthetic Quake 1 shareware pak that the default `test`
+  # target uses. The bats suites themselves run in seconds; the 93
+  # MiB Q3 demo + 48 MiB Uplink + 90 MiB Day One downloads are the
   # only meaningful wall-clock cost, and they're cached on a
   # hashFiles('Makefile') key (URLs + SHA256s live there) so the zip
   # is fetched once and reused across reruns and across the
   # Linux/Windows pair for each suite. Q3 and GoldSrc are split into
   # separate jobs so failures attribute cleanly.
-  slow-test-q3-linux:
+  realpak-test-q3-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -642,9 +643,9 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bats curl openssl unzip
-      - run: make slow-test
+      - run: make realpak-test-q3
 
-  slow-test-goldsrc-linux:
+  realpak-test-goldsrc-linux:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
@@ -659,9 +660,9 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential bats curl openssl unzip
-      - run: make slow-test-goldsrc
+      - run: make realpak-test-goldsrc
 
-  slow-test-q3-windows:
+  realpak-test-q3-windows:
     runs-on: windows-2025-vs2026
     defaults:
       run:
@@ -702,10 +703,10 @@ jobs:
       - name: Build
         shell: pwsh
         run: cmake --build build/cmake
-      - name: Run Q3 slow-test against pakka.exe
-        run: dev/win/slow-test.sh q3
+      - name: Run Q3 realpak-test against pakka.exe
+        run: dev/win/realpak-test.sh q3
 
-  slow-test-goldsrc-windows:
+  realpak-test-goldsrc-windows:
     runs-on: windows-2025-vs2026
     defaults:
       run:
@@ -748,5 +749,5 @@ jobs:
       - name: Build
         shell: pwsh
         run: cmake --build build/cmake
-      - name: Run GoldSrc slow-test against pakka.exe
-        run: dev/win/slow-test.sh goldsrc
+      - name: Run GoldSrc realpak-test against pakka.exe
+        run: dev/win/realpak-test.sh goldsrc

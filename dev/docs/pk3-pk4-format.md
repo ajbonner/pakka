@@ -371,7 +371,7 @@ servers). The constrained-subset stance is documented in id's
   + `--format pk4`, asserting that the bytes are identical to the
   PK3 case and the only observable difference is the label
   returned by `pakka_format()`.
-- `tests/pk3_q3demo.bats` — opt-in suite (`make slow-test`) that
+- `tests/pk3_q3demo.bats` — opt-in suite (`make realpak-test-q3`) that
   downloads the Quake III Arena shareware demo from archive.org,
   uses pakka to extract the inner `pak0.pk3` (a 47 MiB real-world
   id-built PK3 with 1,274 entries), and exercises list / extract /
