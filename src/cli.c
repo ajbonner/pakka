@@ -3,6 +3,12 @@
 #include "common.h"
 #include "pakka.h"
 
+#ifdef _WIN32
+/* Windows entry point uses wmain(). windows.h is needed for
+ * WideCharToMultiByte/CP_UTF8/WC_ERR_INVALID_CHARS at the boundary. */
+#include <windows.h>
+#endif
+
 static void emit_and_exit(int saved_errno, const char *format, va_list args) {
     char msg[1000];
     vsnprintf(msg, sizeof(msg), format, args);
@@ -30,8 +36,21 @@ static void pakka_die_e(int saved_errno, const char *format, ...) {
 }
 
 static void pakka_fprint_sanitized(FILE *out, const char *s) {
+    /* Two stages:
+     *   1. Substitute invalid UTF-8 byte runs with '?'. Some legacy
+     *      PAK names carry CP1251 / Shift-JIS bytes that the console
+     *      can't render; printing them raw produces mojibake or
+     *      corrupts the TTY state. Sanitize before printing so the
+     *      list output is always printable on a UTF-8 console.
+     *   2. Substitute control bytes (< 0x20 or 0x7F) with '?'. This is
+     *      the original behavior — kept because UTF-8-valid input can
+     *      still contain low-ASCII control bytes. */
+    char buf[PAKKA_ENTRY_NAME_SIZE * 4 + 1];
+    const char *p;
     unsigned char c;
-    while ((c = (unsigned char)*s++) != '\0') {
+    (void)pakka_utf8_substitute_invalid(s, buf, sizeof(buf), '?');
+    p = buf;
+    while ((c = (unsigned char)*p++) != '\0') {
         fputc((c < 0x20 || c == 0x7F) ? '?' : c, out);
     }
 }
@@ -133,7 +152,11 @@ static void print_tree_children(treenode_t *node, const char *prefix);
 static void print_tree_summary(uint32_t dir_count, uint32_t file_count);
 static void free_tree(treenode_t *node);
 
-int main(int argc, char *argv[]) {
+/* cli_run is the platform-neutral CLI entry. main()/wmain() below
+ * own argv conversion at the OS boundary; everything inside cli_run
+ * sees UTF-8 narrow strings (UTF-8 on Windows by convention; the
+ * native narrow encoding on POSIX, which is UTF-8 in practice). */
+static int cli_run(int argc, char **argv) {
     opts_t opts = {0};
     pakka_archive_t *pak;
     pakka_error_t err;
@@ -269,6 +292,82 @@ int main(int argc, char *argv[]) {
 
     return 0;
 }
+
+#ifdef _WIN32
+
+/* Windows: the C runtime invokes wmain when present, handing us argv
+ * as UTF-16 from CommandLineToArgvW. Convert once at the boundary so
+ * the rest of pakka sees a single canonical narrow encoding (UTF-8),
+ * which is what every pakka_platform_* helper expects on Windows. */
+static void wmain_free_argv(char **argv_utf8, int filled) {
+    int i;
+    if (!argv_utf8) return;
+    for (i = 0; i < filled; i++) free(argv_utf8[i]);
+    free(argv_utf8);
+}
+
+int wmain(int argc, wchar_t **wargv) {
+    char **argv_utf8;
+    int i;
+    int ret;
+
+    /* argc + 1 for the trailing NULL sentinel. argv_utf8 is mutable
+     * because strip_long_options rewrites it in place during option
+     * parsing (see parseopts). */
+    argv_utf8 = (char **)calloc((size_t)argc + 1, sizeof(char *));
+    if (!argv_utf8) {
+        fprintf(stderr, "pakka: out of memory in argv conversion\n");
+        return 2;
+    }
+
+    for (i = 0; i < argc; i++) {
+        int u8_len;
+        /* WC_ERR_INVALID_CHARS so malformed surrogates fail loudly
+         * instead of being silently replaced with U+FFFD. */
+        u8_len = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                     wargv[i], -1,
+                                     NULL, 0, NULL, NULL);
+        if (u8_len <= 0) {
+            fprintf(stderr,
+                    "pakka: argv[%d] is not a valid UTF-16 string "
+                    "(GetLastError=%lu)\n",
+                    i, (unsigned long)GetLastError());
+            wmain_free_argv(argv_utf8, i);
+            return 2;
+        }
+        argv_utf8[i] = (char *)malloc((size_t)u8_len);
+        if (!argv_utf8[i]) {
+            fprintf(stderr, "pakka: out of memory in argv conversion\n");
+            wmain_free_argv(argv_utf8, i);
+            return 2;
+        }
+        if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                                wargv[i], -1,
+                                argv_utf8[i], u8_len, NULL, NULL) <= 0) {
+            fprintf(stderr,
+                    "pakka: argv[%d] UTF-8 conversion failed "
+                    "(GetLastError=%lu)\n",
+                    i, (unsigned long)GetLastError());
+            free(argv_utf8[i]);
+            argv_utf8[i] = NULL;
+            wmain_free_argv(argv_utf8, i);
+            return 2;
+        }
+    }
+    argv_utf8[argc] = NULL;
+
+    ret = cli_run(argc, argv_utf8);
+    wmain_free_argv(argv_utf8, argc);
+    return ret;
+}
+
+#else
+
+int main(int argc, char *argv[]) {
+    return cli_run(argc, argv);
+}
+
+#endif
 
 static void fail_from_err(const pakka_error_t *err) {
     if (err->domain == PAKKA_ERR_DOMAIN_ERRNO) {
@@ -514,7 +613,7 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             pakka_die("Cannot get current working directory");
         }
     }
-    if (stat(realdest, &sb) != 0) {
+    if (pakka_platform_stat(realdest, &sb) != 0) {
         pakka_die("Cannot stat destination '%s'", realdest);
     }
     if (!S_ISDIR(sb.st_mode)) {
@@ -594,7 +693,14 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         }
     }
 
-    /* Pass 1c: normalized-collision reject. */
+    /* Pass 1c: normalized-collision reject.
+     *
+     * Apply invalid-UTF-8 substitution BEFORE normalization so two
+     * different legacy CP1251 names that both sanitize to "____.txt"
+     * are caught here rather than silently clobbering each other at
+     * extract time. Without this, the write pass's '_'-substitution
+     * would produce two different on-disk operations targeting the
+     * same path. */
     if (selected > 1) {
         norms = calloc(selected, sizeof(char *));
         if (norms == NULL) {
@@ -603,18 +709,27 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         k = 0;
         for (idx = 0; idx < count; idx++) {
             if (should_extract[idx]) {
-                size_t name_len;
+                const char *raw_name;
+                char sanitized[PAKKA_ENTRY_NAME_SIZE * 4 + 1];
+                const char *cmp_name;
+                size_t cmp_len;
                 s = pakka_entry_at(pak, idx, &entry);
                 if (s != PAKKA_OK) {
                     pakka_die_e(0, "Cannot read entry %zu", idx);
                 }
-                name_len = strlen(pakka_entry_name(entry));
-                norms[k] = malloc(name_len + 1);
+                raw_name = pakka_entry_name(entry);
+                if (pakka_utf8_substitute_invalid(raw_name, sanitized,
+                                                  sizeof(sanitized), '_')) {
+                    cmp_name = sanitized;
+                } else {
+                    cmp_name = raw_name;
+                }
+                cmp_len = strlen(cmp_name);
+                norms[k] = malloc(cmp_len + 1);
                 if (norms[k] == NULL) {
                     pakka_die("Cannot allocate normalized name buffer");
                 }
-                pakka_normalize_entry_name(pakka_entry_name(entry),
-                                           norms[k], name_len + 1);
+                pakka_normalize_entry_name(cmp_name, norms[k], cmp_len + 1);
                 k++;
             }
         }
@@ -641,6 +756,7 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         unsigned char buf[PAKFILE_COPY_CHUNK];
         size_t nread;
         const char *name;
+        char sanitized[PAKKA_ENTRY_NAME_SIZE * 4 + 1];
         uint64_t size;
 
         if (!should_extract[idx]) continue;
@@ -651,6 +767,24 @@ static void op_extract(pakka_archive_t *pak, char *destination,
         }
         name = pakka_entry_name(entry);
         size = pakka_entry_size(entry);
+
+        /* Legacy PAK/SiN/WAD archives can contain entry names whose
+         * bytes are not valid UTF-8 (e.g. CP1251 names from a Russian
+         * PC, Shift-JIS from a Japanese PC). On Windows those bytes
+         * can't be handed to CreateFileW. Substitute invalid byte
+         * runs with '_' and create the file under the sanitized name
+         * — preserves data over silent extraction failure. The PK3
+         * read path already converts CP437 to UTF-8 (see
+         * pk3_decode_entry_name) so PK3/PK4 entries should never hit
+         * this branch. */
+        if (pakka_utf8_substitute_invalid(name, sanitized,
+                                          sizeof(sanitized), '_')) {
+            fprintf(stderr,
+                    "[warn] entry %zu: name not valid UTF-8, "
+                    "substituting invalid bytes (writing as '%s')\n",
+                    idx, sanitized);
+            name = sanitized;
+        }
 
         printf("Writing %" PRIu64 " bytes to %s/%s\n", size, realdest, name);
 
@@ -758,26 +892,26 @@ static void cli_add_path(pakka_archive_t *pak, char *path) {
 }
 
 static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth) {
-    DIR *d;
-    struct dirent *dirp;
+    pakka_dir_t *d;
+    char name[OS_PATH_MAX];
     struct stat sb;
     char tmp[OS_PATH_MAX];
+    int r;
 
     if (depth >= ADD_FOLDER_MAX_DEPTH) {
         pakka_die("Directory nesting too deep at '%s' (max %d)",
                    path, ADD_FOLDER_MAX_DEPTH);
     }
-    if (!(d = opendir(path))) {
+    if (!(d = pakka_platform_opendir(path))) {
         pakka_die("Cannot open directory %s", path);
     }
-    while ((dirp = readdir(d)) != NULL) {
-        if (strcmp(dirp->d_name, "..") == 0
-            || strcmp(dirp->d_name, ".") == 0) {
+    while ((r = pakka_platform_readdir(d, name, sizeof(name))) > 0) {
+        if (strcmp(name, "..") == 0 || strcmp(name, ".") == 0) {
             continue;
         }
-        if (build_filename(tmp, sizeof(tmp), path, dirp->d_name) != 0) {
-            closedir(d);
-            pakka_die_e(0, "Path too long: %s/%s", path, dirp->d_name);
+        if (build_filename(tmp, sizeof(tmp), path, name) != 0) {
+            pakka_platform_closedir(d);
+            pakka_die_e(0, "Path too long: %s/%s", path, name);
         }
         if (pakka_platform_is_reparse_or_symlink(tmp)) {
             fprintf(stderr, "Skipping symlink/reparse point %s\n", tmp);
@@ -797,11 +931,16 @@ static void cli_add_folder_r(pakka_archive_t *pak, char *path, int depth) {
             }
         } else {
             int stat_errno = errno;
-            closedir(d);
+            pakka_platform_closedir(d);
             pakka_die_e(stat_errno, "Couldn't stat %s", tmp);
         }
     }
-    closedir(d);
+    if (r < 0) {
+        int read_errno = errno;
+        pakka_platform_closedir(d);
+        pakka_die_e(read_errno, "readdir failed in %s", path);
+    }
+    pakka_platform_closedir(d);
 }
 
 static void op_remove(pakka_archive_t *pak, char **paths, int path_count) {

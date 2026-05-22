@@ -2,7 +2,7 @@
 
 int pakka_file_exists(const char *filename) {
 	struct stat sb;
-	return stat(filename, &sb) == 0;
+	return pakka_platform_stat(filename, &sb) == 0;
 }
 
 /* mkdir(2) under a racing-process tolerance: EEXIST is success as long
@@ -16,7 +16,7 @@ static int mkdir_or_exists_dir(const char *path, int mode) {
     if (errno != EEXIST) {
         return -1;
     }
-    if (stat(path, &sb) != 0) {
+    if (pakka_platform_stat(path, &sb) != 0) {
         return -1;
     }
     if (! S_ISDIR(sb.st_mode)) {
@@ -35,7 +35,7 @@ int pakka_mkdir_r(char *path) {
     char *curpos = path;
     int mode = 0777;
 
-    if (stat(path, &sb) == 0) {
+    if (pakka_platform_stat(path, &sb) == 0) {
         if (S_ISDIR(sb.st_mode) == 0) {
             errno = ENOTDIR;
             return -1;

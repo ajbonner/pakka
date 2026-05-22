@@ -24,10 +24,52 @@
 #include <windows.h>
 #include <fcntl.h>
 #include <sys/locking.h>
+#include <errno.h>
+#include <wchar.h>
 
 /* Typedef-array static assert — _Static_assert is C11 and pakka holds
  * a gcc 3.x legacy floor. */
 typedef char pakka_platform_assert_int64_size[(sizeof(__int64) >= 8) ? 1 : -1];
+
+/* UTF-8 ↔ UTF-16 helpers. All pakka_platform_* paths on Windows are
+ * UTF-8 by convention; the conversion to the W-suffixed Win32 API
+ * happens here. MB_ERR_INVALID_CHARS / WC_ERR_INVALID_CHARS make
+ * malformed input fail loudly rather than be silently replaced —
+ * mojibake-from-mojibake is the failure mode this whole layer exists
+ * to prevent. Return the wide-character length written (excluding the
+ * NUL) on success, -1 on failure (errno set to EILSEQ for malformed
+ * input, ENAMETOOLONG for buffer overflow, EINVAL for NULL inputs). */
+static int u8_to_w(const char *utf8, wchar_t *wbuf, size_t wcap) {
+    int n;
+    if (utf8 == NULL || wbuf == NULL || wcap == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    n = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+                            utf8, -1, wbuf, (int)wcap);
+    if (n <= 0) {
+        DWORD e = GetLastError();
+        errno = (e == ERROR_INSUFFICIENT_BUFFER) ? ENAMETOOLONG : EILSEQ;
+        return -1;
+    }
+    return n - 1;  /* exclude trailing NUL */
+}
+
+static int w_to_u8(const wchar_t *wstr, char *u8buf, size_t cap) {
+    int n;
+    if (wstr == NULL || u8buf == NULL || cap == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    n = WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+                            wstr, -1, u8buf, (int)cap, NULL, NULL);
+    if (n <= 0) {
+        DWORD e = GetLastError();
+        errno = (e == ERROR_INSUFFICIENT_BUFFER) ? ENAMETOOLONG : EILSEQ;
+        return -1;
+    }
+    return n - 1;
+}
 
 int pakka_platform_fseek(FILE *fp, int64_t offset, int whence) {
     return _fseeki64(fp, (__int64)offset, whence);
@@ -38,11 +80,104 @@ int64_t pakka_platform_ftell(FILE *fp) {
 }
 
 char *pakka_platform_realpath(const char *path, char *resolved) {
-    return _fullpath(resolved, path, _MAX_PATH);
+    wchar_t wpath[MAX_PATH];
+    wchar_t wresolved[MAX_PATH];
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return NULL;
+    }
+    if (_wfullpath(wresolved, wpath, MAX_PATH) == NULL) {
+        return NULL;
+    }
+    if (w_to_u8(wresolved, resolved, _MAX_PATH) < 0) {
+        return NULL;
+    }
+    return resolved;
 }
 
 char *pakka_platform_getcwd(char *buf, size_t size) {
-    return _getcwd(buf, (int)size);
+    wchar_t wbuf[MAX_PATH];
+    if (_wgetcwd(wbuf, MAX_PATH) == NULL) {
+        return NULL;
+    }
+    if (w_to_u8(wbuf, buf, size) < 0) {
+        return NULL;
+    }
+    return buf;
+}
+
+FILE *pakka_platform_fopen(const char *path, const char *mode) {
+    wchar_t wpath[MAX_PATH];
+    wchar_t wmode[16];
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return NULL;
+    }
+    /* mode is ASCII — convert it cheaply rather than maintaining a
+     * second wide-literal at every fopen call site. */
+    if (u8_to_w(mode, wmode, sizeof(wmode) / sizeof(wmode[0])) < 0) {
+        return NULL;
+    }
+    return _wfopen(wpath, wmode);
+}
+
+int pakka_platform_remove(const char *path) {
+    wchar_t wpath[MAX_PATH];
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return -1;
+    }
+    return _wremove(wpath);
+}
+
+struct pakka_dir {
+    _WDIR *wd;
+};
+
+pakka_dir_t *pakka_platform_opendir(const char *path) {
+    wchar_t wpath[MAX_PATH];
+    pakka_dir_t *d;
+    _WDIR *wd;
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return NULL;
+    }
+    wd = _wopendir(wpath);
+    if (wd == NULL) return NULL;
+    d = (pakka_dir_t *)malloc(sizeof(*d));
+    if (d == NULL) {
+        _wclosedir(wd);
+        return NULL;
+    }
+    d->wd = wd;
+    return d;
+}
+
+int pakka_platform_readdir(pakka_dir_t *d, char *name_out, size_t cap) {
+    struct _wdirent *ent;
+    if (d == NULL || name_out == NULL || cap == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    errno = 0;
+    ent = _wreaddir(d->wd);
+    if (ent == NULL) {
+        /* readdir convention: NULL with errno==0 means end-of-stream. */
+        return (errno == 0) ? 0 : -1;
+    }
+    /* Surface w_to_u8 failure (oversized UTF-8 expansion, malformed
+     * wide name) as an error rather than substituting "?". The caller
+     * (cli_add_folder_r) uses the name to stat() / pakka_add_file();
+     * silently using "?" would mis-associate the name with a different
+     * file or wedge the loop on a bogus entry. errno from w_to_u8 is
+     * ENAMETOOLONG / EILSEQ which lets the caller report a meaningful
+     * diagnostic. */
+    if (w_to_u8(ent->d_name, name_out, cap) < 0) {
+        return -1;
+    }
+    return 1;
+}
+
+void pakka_platform_closedir(pakka_dir_t *d) {
+    if (d == NULL) return;
+    _wclosedir(d->wd);
+    free(d);
 }
 
 /* Convert an exclusive-open Win32 HANDLE to a binary read/write FILE*.
@@ -67,14 +202,16 @@ static FILE *handle_to_wb_file(HANDLE h) {
 }
 
 /* Atomically create a temp file under template_dir using basename_template.
- * _mktemp_s only picks a name (verified non-existent at that instant);
- * the subsequent CreateFileA with CREATE_NEW is what closes the race:
+ * _wmktemp_s only picks a name (verified non-existent at that instant);
+ * the subsequent CreateFileW with CREATE_NEW is what closes the race:
  * if a file appears in the gap (or a reparse point gets planted)
- * CreateFileA fails with ERROR_FILE_EXISTS and we re-roll. */
+ * CreateFileW fails with ERROR_FILE_EXISTS and we re-roll. */
 static FILE *mkstemp_open_at(const char *dir,
                              const char *basename_template,
                              char *out_path, size_t out_path_size) {
     char template_save[MAX_PATH];
+    wchar_t wtemplate[MAX_PATH];
+    wchar_t wpath[MAX_PATH];
     HANDLE h;
     int n, retries;
 
@@ -82,17 +219,30 @@ static FILE *mkstemp_open_at(const char *dir,
     if (n < 0 || (size_t)n >= out_path_size) return NULL;
     if ((size_t)n >= sizeof(template_save)) return NULL;
     strcpy(template_save, out_path);
+    if (u8_to_w(template_save, wtemplate,
+                sizeof(wtemplate) / sizeof(wtemplate[0])) < 0) {
+        return NULL;
+    }
 
     for (retries = 8; retries > 0; retries--) {
-        strcpy(out_path, template_save);
-        if (_mktemp_s(out_path, out_path_size) != 0) return NULL;
+        wcscpy(wpath, wtemplate);
+        if (_wmktemp_s(wpath, sizeof(wpath) / sizeof(wpath[0])) != 0) return NULL;
         /* GENERIC_READ | GENERIC_WRITE so pakka_commit's rebuild can
          * read back payloads it appended to a freshly-created temp. */
-        h = CreateFileA(out_path, GENERIC_READ | GENERIC_WRITE, 0, NULL,
+        h = CreateFileW(wpath, GENERIC_READ | GENERIC_WRITE, 0, NULL,
                         CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
         if (h != INVALID_HANDLE_VALUE) {
             FILE *fp = handle_to_wb_file(h);
-            if (fp == NULL) DeleteFileA(out_path);
+            if (fp == NULL) {
+                DeleteFileW(wpath);
+                return NULL;
+            }
+            /* Write back the chosen name in UTF-8 for the caller. */
+            if (w_to_u8(wpath, out_path, out_path_size) < 0) {
+                fclose(fp);
+                DeleteFileW(wpath);
+                return NULL;
+            }
             return fp;
         }
         if (GetLastError() != ERROR_FILE_EXISTS
@@ -121,22 +271,24 @@ FILE *pakka_platform_mkstemp_open(const char *target_path,
                           const char *basename_template,
                           char *out_path, size_t out_path_size) {
     FILE *fp;
-    char tempdir[MAX_PATH];
+    wchar_t wtempdir[MAX_PATH];
+    char tempdir[MAX_PATH * 4];  /* UTF-8 expansion of MAX_PATH wide chars */
     DWORD len;
 
     fp = mkstemp_open_near(target_path, basename_template, out_path, out_path_size);
     if (fp != NULL) return fp;
 
-    /* Fallback to GetTempPathA when same-dir creation failed (e.g.
+    /* Fallback to GetTempPathW when same-dir creation failed (e.g.
      * read-only target directory). The eventual rename may then hit
      * cross-FS errors — same limitation as before this fix. */
-    len = GetTempPathA((DWORD)sizeof(tempdir), tempdir);
-    if (len == 0 || len >= sizeof(tempdir)) return NULL;
-    /* GetTempPathA appends a trailing backslash; strip it so the
+    len = GetTempPathW(MAX_PATH, wtempdir);
+    if (len == 0 || len >= MAX_PATH) return NULL;
+    /* GetTempPathW appends a trailing backslash; strip it so the
      * dir+template join in mkstemp_open_at produces a single sep. */
-    if (len > 0 && (tempdir[len - 1] == '\\' || tempdir[len - 1] == '/')) {
-        tempdir[len - 1] = '\0';
+    if (len > 0 && (wtempdir[len - 1] == L'\\' || wtempdir[len - 1] == L'/')) {
+        wtempdir[len - 1] = L'\0';
     }
+    if (w_to_u8(wtempdir, tempdir, sizeof(tempdir)) < 0) return NULL;
     return mkstemp_open_at(tempdir, basename_template, out_path, out_path_size);
 }
 
@@ -179,8 +331,12 @@ char *pakka_platform_dirname(char *path) {
 }
 
 int pakka_platform_mkdir(const char *path, int mode) {
+    wchar_t wpath[MAX_PATH];
     (void)mode;
-    return _mkdir(path);
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return -1;
+    }
+    return _wmkdir(wpath);
 }
 
 char *pakka_platform_strdup(const char *s) {
@@ -189,7 +345,13 @@ char *pakka_platform_strdup(const char *s) {
 
 int pakka_platform_rename_replace(const char *src, const char *dst,
                           uint32_t *win32_code) {
-    if (MoveFileExA(src, dst, MOVEFILE_REPLACE_EXISTING)) {
+    wchar_t wsrc[MAX_PATH], wdst[MAX_PATH];
+    if (u8_to_w(src, wsrc, sizeof(wsrc) / sizeof(wsrc[0])) < 0
+        || u8_to_w(dst, wdst, sizeof(wdst) / sizeof(wdst[0])) < 0) {
+        if (win32_code != NULL) *win32_code = ERROR_INVALID_NAME;
+        return -1;
+    }
+    if (MoveFileExW(wsrc, wdst, MOVEFILE_REPLACE_EXISTING)) {
         return 0;
     }
     if (win32_code != NULL) {
@@ -200,10 +362,16 @@ int pakka_platform_rename_replace(const char *src, const char *dst,
 
 int pakka_platform_rename_noreplace(const char *src, const char *dst,
                             uint32_t *win32_code) {
-    /* MoveFileExA without MOVEFILE_REPLACE_EXISTING fails with
+    wchar_t wsrc[MAX_PATH], wdst[MAX_PATH];
+    if (u8_to_w(src, wsrc, sizeof(wsrc) / sizeof(wsrc[0])) < 0
+        || u8_to_w(dst, wdst, sizeof(wdst) / sizeof(wdst[0])) < 0) {
+        if (win32_code != NULL) *win32_code = ERROR_INVALID_NAME;
+        return -1;
+    }
+    /* MoveFileExW without MOVEFILE_REPLACE_EXISTING fails with
      * ERROR_ALREADY_EXISTS if dst exists — that's exactly the
      * no-replace semantic we want. */
-    if (MoveFileExA(src, dst, 0)) {
+    if (MoveFileExW(wsrc, wdst, 0)) {
         return 0;
     }
     if (win32_code != NULL) {
@@ -226,15 +394,46 @@ int pakka_platform_ftruncate(FILE *fp, int64_t length) {
     return 0;
 }
 
+/* Common Win32 stat helper. `struct stat` and `struct _stat` aren't
+ * guaranteed layout-compatible across MSVC CRT versions (the UCRT
+ * juggles _stat/_stat32/_stat64i32 typedefs under the same `struct
+ * stat` name), so we _wstat into a CRT-owned struct and copy the few
+ * fields pakka actually consults rather than punning. */
+static int pakka_win_stat_common(const char *path, struct stat *sb) {
+    wchar_t wpath[MAX_PATH];
+    struct _stat64i32 wsb;
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return -1;
+    }
+    if (_wstat64i32(wpath, &wsb) != 0) {
+        return -1;
+    }
+    memset(sb, 0, sizeof(*sb));
+    sb->st_mode  = wsb.st_mode;
+    sb->st_size  = (off_t)wsb.st_size;
+    sb->st_mtime = wsb.st_mtime;
+    sb->st_nlink = wsb.st_nlink;
+    return 0;
+}
+
 int pakka_platform_lstat(const char *path, struct stat *sb) {
     /* Windows has no POSIX symlinks. The recursive-add path checks
      * for reparse points via pakka_platform_is_reparse_or_symlink — keep
-     * pakka_platform_lstat as a thin stat() shim for the regular/dir test. */
-    return stat(path, sb);
+     * pakka_platform_lstat as a thin _wstat() shim for the regular/dir test. */
+    return pakka_win_stat_common(path, sb);
+}
+
+int pakka_platform_stat(const char *path, struct stat *sb) {
+    return pakka_win_stat_common(path, sb);
 }
 
 int pakka_platform_is_reparse_or_symlink(const char *path) {
-    DWORD attr = GetFileAttributesA(path);
+    wchar_t wpath[MAX_PATH];
+    DWORD attr;
+    if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+        return 0;
+    }
+    attr = GetFileAttributesW(wpath);
     if (attr == INVALID_FILE_ATTRIBUTES) return 0;
     return (attr & FILE_ATTRIBUTE_REPARSE_POINT) ? 1 : 0;
 }
@@ -267,6 +466,7 @@ static int append_path_component(char *path, size_t cap, const char *name,
 
 FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_path) {
     char path[PATH_MAX];
+    wchar_t wpath[MAX_PATH];
     DWORD attr;
     const char *p, *seg;
     size_t seg_len;
@@ -292,7 +492,16 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
                 return NULL;
             }
 
-            attr = GetFileAttributesA(path);
+            /* Convert the assembled UTF-8 path once per segment for
+             * the W-suffixed Win32 calls below. Invalid UTF-8 in an
+             * entry name (legacy PAK with non-UTF-8 bytes) fails here
+             * — the caller can map that to a substitution / warning
+             * policy. */
+            if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
+                return NULL;
+            }
+
+            attr = GetFileAttributesW(wpath);
             if (attr != INVALID_FILE_ATTRIBUTES) {
                 /* Existing component: refuse if it's a reparse point
                  * (junction, mount point, symlink). Brief TOCTOU window
@@ -302,7 +511,7 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
                 if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return NULL;
                 if (!is_leaf && !(attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
             } else if (!is_leaf) {
-                if (_mkdir(path) != 0) {
+                if (_wmkdir(wpath) != 0) {
                     /* Tolerate EEXIST so two extractors sharing a -C
                      * destination can both create the same subdir
                      * without spuriously aborting; re-check the
@@ -310,7 +519,7 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
                      * winner created a real directory rather than a
                      * reparse point. */
                     if (errno != EEXIST) return NULL;
-                    attr = GetFileAttributesA(path);
+                    attr = GetFileAttributesW(wpath);
                     if (attr == INVALID_FILE_ATTRIBUTES) return NULL;
                     if (attr & FILE_ATTRIBUTE_REPARSE_POINT) return NULL;
                     if (!(attr & FILE_ATTRIBUTE_DIRECTORY)) return NULL;
@@ -318,7 +527,7 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
             }
 
             if (is_leaf) {
-                return fopen(path, "wb");
+                return _wfopen(wpath, L"wb");
             }
 
             seg = p + 1;
@@ -343,6 +552,62 @@ int pakka_platform_fseek(FILE *fp, int64_t offset, int whence) {
 
 int64_t pakka_platform_ftell(FILE *fp) {
     return (int64_t)ftello(fp);
+}
+
+/* POSIX backends for the UTF-8-aware Win32 helpers. POSIX libcs treat
+ * paths as opaque byte sequences and modern Unix systems are UTF-8 by
+ * convention, so these are one-line wrappers — UTF-8 in, UTF-8 out,
+ * no conversion. */
+FILE *pakka_platform_fopen(const char *path, const char *mode) {
+    return fopen(path, mode);
+}
+
+int pakka_platform_remove(const char *path) {
+    return remove(path);
+}
+
+struct pakka_dir {
+    DIR *d;
+};
+
+pakka_dir_t *pakka_platform_opendir(const char *path) {
+    pakka_dir_t *h;
+    DIR *d = opendir(path);
+    if (d == NULL) return NULL;
+    h = (pakka_dir_t *)malloc(sizeof(*h));
+    if (h == NULL) {
+        closedir(d);
+        return NULL;
+    }
+    h->d = d;
+    return h;
+}
+
+int pakka_platform_readdir(pakka_dir_t *h, char *name_out, size_t cap) {
+    struct dirent *ent;
+    size_t n;
+    if (h == NULL || name_out == NULL || cap == 0) {
+        errno = EINVAL;
+        return -1;
+    }
+    errno = 0;
+    ent = readdir(h->d);
+    if (ent == NULL) {
+        return (errno == 0) ? 0 : -1;
+    }
+    n = strlen(ent->d_name);
+    if (n + 1 > cap) {
+        errno = ENAMETOOLONG;
+        return -1;
+    }
+    memcpy(name_out, ent->d_name, n + 1);
+    return 1;
+}
+
+void pakka_platform_closedir(pakka_dir_t *h) {
+    if (h == NULL) return;
+    closedir(h->d);
+    free(h);
 }
 
 /* glibc 2.3 doesn't expose these under _XOPEN_SOURCE=700 (POSIX-2008
@@ -521,6 +786,10 @@ int pakka_platform_ftruncate(FILE *fp, int64_t length) {
 
 int pakka_platform_lstat(const char *path, struct stat *sb) {
     return lstat(path, sb);
+}
+
+int pakka_platform_stat(const char *path, struct stat *sb) {
+    return stat(path, sb);
 }
 
 int pakka_platform_is_reparse_or_symlink(const char *path) {

@@ -235,6 +235,24 @@ int pakka_write_u32_le(FILE *fp, uint32_t value);
 int pakka_unsafe_entry_name(const char *path);
 void pakka_normalize_entry_name(const char *src, char *dst, size_t dstsz);
 
+/* UTF-8 validation. Returns 1 if the n bytes at s form a valid UTF-8
+ * sequence (RFC 3629 — overlongs and surrogate halves rejected),
+ * otherwise 0. Does not require NUL termination. Used by the ZIP read
+ * path's CP437 fallback and by the CLI extract/list paths to detect
+ * legacy PAK names that are not valid UTF-8. */
+int pakka_is_valid_utf8(const unsigned char *s, size_t n);
+
+/* Substitute every byte that doesn't belong to a valid UTF-8 sequence
+ * with `fill`. Walks src up to its NUL, writes at most cap-1 bytes
+ * to dst, NUL-terminates. Returns 1 if any substitution happened,
+ * 0 if src was already valid UTF-8 (and dst now holds a verbatim
+ * copy). Used by the CLI extract path so legacy PAK names with
+ * non-UTF-8 bytes can still produce a file on disk under a
+ * sanitized name (the original bytes can't be handed to CreateFileW
+ * on Windows). */
+int pakka_utf8_substitute_invalid(const char *src, char *dst, size_t cap,
+                                  char fill);
+
 /* Internal ZIP dispatch helpers — called from src/pakfile.c when the
  * public pakka_* functions detect a ZIP-class archive (PK3 or PK4).
  * Both formats share the same implementation; the pakka_pk3_ prefix is

@@ -44,6 +44,12 @@ the same `src/*.c` (including `src/pk3file.c` and the vendored
 with `-DPAKKA_USE_ZLIB=ON`) plus the `src/vendor/wingetopt` (getopt)
 and `src/vendor/dirent` (opendir/readdir) polyfills under `_WIN32`.
 
+Supported Windows floor is **Windows XP SP3** (built with the VS 2017
+`v141_xp` toolset for releases targeting XP/Vista/7; CI uses VS 2026
+on Windows Server 2025). The source intentionally avoids API calls
+that require later Windows versions so the same tree builds against
+either toolset.
+
 ## Usage
 Pakka has 6 major modes (one per invocation), each working on `.pak`
 (Quake 1 / 2 and GoldSrc — Half-Life 1, CS 1.6, TFC, Sven Co-op, ...),

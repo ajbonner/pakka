@@ -76,3 +76,119 @@ const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt) {
         default:                     return NULL;
     }
 }
+
+/* Validate n bytes as UTF-8 per RFC 3629: rejects overlong encodings
+ * (e.g. 0xC0 0x80 for NUL), surrogate halves (U+D800..U+DFFF), and
+ * codepoints above U+10FFFF. Does not require a trailing NUL — caller
+ * passes the explicit length. Used by:
+ *   - pk3file.c read path: pick UTF-8 vs CP437 for legacy ZIP names
+ *   - cli.c extract/list paths: detect legacy PAK/SiN/WAD names that
+ *     cannot be handed to CreateFileW on Windows. */
+int pakka_is_valid_utf8(const unsigned char *s, size_t n) {
+    size_t i = 0;
+    while (i < n) {
+        unsigned char c = s[i];
+        if (c < 0x80) { i++; continue; }
+        if ((c & 0xE0) == 0xC0) {
+            if (c < 0xC2) return 0;
+            if (i + 1 >= n) return 0;
+            if ((s[i+1] & 0xC0) != 0x80) return 0;
+            i += 2;
+        } else if ((c & 0xF0) == 0xE0) {
+            uint32_t cp;
+            if (i + 2 >= n) return 0;
+            if ((s[i+1] & 0xC0) != 0x80) return 0;
+            if ((s[i+2] & 0xC0) != 0x80) return 0;
+            cp = ((uint32_t)(c & 0x0F) << 12)
+               | ((uint32_t)(s[i+1] & 0x3F) << 6)
+               |  (uint32_t)(s[i+2] & 0x3F);
+            if (cp < 0x800) return 0;
+            if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+            i += 3;
+        } else if ((c & 0xF8) == 0xF0) {
+            uint32_t cp;
+            if (c > 0xF4) return 0;
+            if (i + 3 >= n) return 0;
+            if ((s[i+1] & 0xC0) != 0x80) return 0;
+            if ((s[i+2] & 0xC0) != 0x80) return 0;
+            if ((s[i+3] & 0xC0) != 0x80) return 0;
+            cp = ((uint32_t)(c & 0x07) << 18)
+               | ((uint32_t)(s[i+1] & 0x3F) << 12)
+               | ((uint32_t)(s[i+2] & 0x3F) << 6)
+               |  (uint32_t)(s[i+3] & 0x3F);
+            if (cp < 0x10000) return 0;
+            if (cp > 0x10FFFF) return 0;
+            i += 4;
+        } else {
+            return 0;
+        }
+    }
+    return 1;
+}
+
+/* Length of a valid UTF-8 sequence starting at s[0], or 0 if s[0]
+ * doesn't begin a valid sequence within the n remaining bytes. */
+static size_t pakka_utf8_seq_len(const unsigned char *s, size_t n) {
+    unsigned char c;
+    if (n == 0) return 0;
+    c = s[0];
+    if (c < 0x80) return 1;
+    if ((c & 0xE0) == 0xC0) {
+        if (c < 0xC2) return 0;
+        if (n < 2 || (s[1] & 0xC0) != 0x80) return 0;
+        return 2;
+    }
+    if ((c & 0xF0) == 0xE0) {
+        uint32_t cp;
+        if (n < 3) return 0;
+        if ((s[1] & 0xC0) != 0x80 || (s[2] & 0xC0) != 0x80) return 0;
+        cp = ((uint32_t)(c & 0x0F) << 12)
+           | ((uint32_t)(s[1] & 0x3F) << 6)
+           |  (uint32_t)(s[2] & 0x3F);
+        if (cp < 0x800) return 0;
+        if (cp >= 0xD800 && cp <= 0xDFFF) return 0;
+        return 3;
+    }
+    if ((c & 0xF8) == 0xF0) {
+        uint32_t cp;
+        if (c > 0xF4) return 0;
+        if (n < 4) return 0;
+        if ((s[1] & 0xC0) != 0x80) return 0;
+        if ((s[2] & 0xC0) != 0x80) return 0;
+        if ((s[3] & 0xC0) != 0x80) return 0;
+        cp = ((uint32_t)(c & 0x07) << 18)
+           | ((uint32_t)(s[1] & 0x3F) << 12)
+           | ((uint32_t)(s[2] & 0x3F) << 6)
+           |  (uint32_t)(s[3] & 0x3F);
+        if (cp < 0x10000) return 0;
+        if (cp > 0x10FFFF) return 0;
+        return 4;
+    }
+    return 0;
+}
+
+int pakka_utf8_substitute_invalid(const char *src, char *dst, size_t cap,
+                                  char fill) {
+    const unsigned char *s = (const unsigned char *)src;
+    size_t i = 0, n = strlen(src);
+    size_t out = 0;
+    int substituted = 0;
+    if (cap == 0) return 0;
+    while (i < n) {
+        size_t seq = pakka_utf8_seq_len(s + i, n - i);
+        if (seq == 0) {
+            /* Invalid byte at i. Substitute and advance by 1. */
+            if (out + 1 >= cap) break;
+            dst[out++] = fill;
+            substituted = 1;
+            i++;
+        } else {
+            if (out + seq >= cap) break;
+            memcpy(dst + out, s + i, seq);
+            out += seq;
+            i += seq;
+        }
+    }
+    dst[out < cap ? out : cap - 1] = '\0';
+    return substituted;
+}

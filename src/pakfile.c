@@ -284,7 +284,7 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
     }
     memcpy(pak->cur_pakpath, path, path_len + 1);
 
-    if (! (pak->fp = fopen(path, writable ? "r+b" : "rb"))) {
+    if (! (pak->fp = pakka_platform_fopen(path, writable ? "r+b" : "rb"))) {
         saved_errno = errno;
         free(pak);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -398,7 +398,7 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
     pak->writable = 1;
     memcpy(pak->new_pakpath, path, path_len + 1);
 
-    if (stat(path, &sb) == 0) {
+    if (pakka_platform_stat(path, &sb) == 0) {
         free(pak);
         return err_fill(err, PAKKA_ERR_EXISTS, PAKKA_ERR_DOMAIN_NONE, 0,
                         "create",
@@ -1636,7 +1636,7 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
      * format's row (Quake 56, SiN 120, DK 56). */
     name_len = strlen(entry_name);
 
-    src_fp = fopen(source_path, "rb");
+    src_fp = pakka_platform_fopen(source_path, "rb");
     if (src_fp == NULL) {
         saved_errno = errno;
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -2242,7 +2242,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
     if (pakka_platform_fseek(tfd, PAKFILE_HEADER_SIZE, SEEK_SET) != 0) {
         saved_errno = errno;
         fclose(tfd);
-        (void)remove(rebuild_scratch);
+        (void)pakka_platform_remove(rebuild_scratch);
         free(new_offsets);
         free(entry_ptrs);
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -2258,7 +2258,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                                    &new_offsets[i], err);
         if (status != PAKKA_OK) {
             fclose(tfd);
-            (void)remove(rebuild_scratch);
+            (void)pakka_platform_remove(rebuild_scratch);
             free(new_offsets);
             free(entry_ptrs);
             return status;
@@ -2285,7 +2285,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
         old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
         if (old_offsets_swap == NULL && n_entries > 0) {
             fclose(tfd);
-            (void)remove(rebuild_scratch);
+            (void)pakka_platform_remove(rebuild_scratch);
             free(new_offsets);
             free(entry_ptrs);
             return err_fill(err, PAKKA_ERR_NOMEM,
@@ -2306,7 +2306,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                 entry_ptrs[i]->offset = old_offsets_swap[i];
             }
             fclose(tfd);
-            (void)remove(rebuild_scratch);
+            (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
             free(new_offsets);
             free(entry_ptrs);
@@ -2317,7 +2317,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             for (i = 0; i < n_entries; i++) {
                 entry_ptrs[i]->offset = old_offsets_swap[i];
             }
-            (void)remove(rebuild_scratch);
+            (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
             free(new_offsets);
             free(entry_ptrs);
@@ -2348,8 +2348,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                 for (i = 0; i < n_entries; i++) {
                     entry_ptrs[i]->offset = old_offsets_swap[i];
                 }
-                (void)remove(rebuild_scratch);
-                archive->fp = fopen(rename_target, "r+b");
+                (void)pakka_platform_remove(rebuild_scratch);
+                archive->fp = pakka_platform_fopen(rename_target, "r+b");
                 free(old_offsets_swap);
                 free(new_offsets);
                 free(entry_ptrs);
@@ -2375,7 +2375,7 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
         free(old_offsets_swap);
     }
 
-    archive->fp = fopen(rename_target, "r+b");
+    archive->fp = pakka_platform_fopen(rename_target, "r+b");
     if (archive->fp == NULL) {
         saved_errno = errno;
         free(new_offsets);

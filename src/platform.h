@@ -56,8 +56,47 @@
 
 #define PATH_SEPARATOR "/"
 
+/* On Windows, every `const char *` path argument in this header is
+ * interpreted as UTF-8. The backend converts to UTF-16 once and
+ * dispatches to the W-suffixed Win32 API. Callers must hold UTF-8 —
+ * the wmain wrapper in src/cli.c does the OS-boundary conversion;
+ * library callers passing CP1252/CP1251/etc. bytes will get the wrong
+ * file. On POSIX the helpers are one-line wrappers and the host's
+ * narrow encoding (UTF-8 in practice on every supported libc) is
+ * passed through. See dev/docs/windows-codepage.md. */
+
 char *pakka_platform_realpath(const char *path, char *resolved);
 char *pakka_platform_getcwd(char *buf, size_t size);
+
+/* fopen wrapper. UTF-8 path on Windows; converts and dispatches to
+ * _wfopen. The mode string is ASCII (per the C standard) and passes
+ * through unchanged. Returns NULL on failure (errno set as for
+ * fopen). */
+FILE *pakka_platform_fopen(const char *path, const char *mode);
+
+/* remove(path) wrapper. UTF-8 path on Windows; dispatches to _wremove.
+ * Returns 0 on success, -1 on failure (errno set). */
+int pakka_platform_remove(const char *path);
+
+/* Directory iteration. On Windows the vendored dirent's readdir()
+ * round-trips names through the active codepage via wcstombs_s, which
+ * undoes any UTF-8 work done at opendir() time. These helpers call
+ * _wopendir + _wreaddir directly and convert the wide name to UTF-8
+ * with WideCharToMultiByte(CP_UTF8, ...). On POSIX they wrap
+ * opendir(3)/readdir(3) unchanged.
+ *
+ * Usage:
+ *   pakka_dir_t *d = pakka_platform_opendir(utf8_dir);
+ *   char name[PATH_MAX];
+ *   while (pakka_platform_readdir(d, name, sizeof(name)) > 0) { ... }
+ *   pakka_platform_closedir(d);
+ *
+ * pakka_platform_readdir returns 1 if name_out was populated, 0 at
+ * end-of-stream, -1 on error (errno set). */
+typedef struct pakka_dir pakka_dir_t;
+pakka_dir_t *pakka_platform_opendir(const char *path);
+int          pakka_platform_readdir(pakka_dir_t *d, char *name_out, size_t cap);
+void         pakka_platform_closedir(pakka_dir_t *d);
 
 /* Wide-offset fseek/ftell. Raw fseek/ftell use `long`, which is 32-bit
  * on LLP64 Windows and 32-bit POSIX — paks in [2 GiB, 4 GiB) silently
@@ -96,6 +135,13 @@ char *pakka_platform_strdup(const char *s);
  * to a separate code path. Used by the recursive-add path so symlinks
  * are detected explicitly rather than silently followed. */
 int pakka_platform_lstat(const char *path, struct stat *sb);
+
+/* stat(2) wrapper. UTF-8 path on Windows; dispatches to _wstat. Used
+ * by the file-existence / is-directory checks in cli.c, pakfile.c and
+ * filesystem.c that need to follow symlinks (those callers want a
+ * stat, not an lstat). Returns 0 on success, -1 on failure (errno
+ * set). */
+int pakka_platform_stat(const char *path, struct stat *sb);
 
 /* Returns 1 if path is a symlink (POSIX) or a reparse point /
  * junction / mount point (Windows), else 0. Errors are reported as 0

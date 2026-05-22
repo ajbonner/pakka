@@ -36,6 +36,123 @@
 #include "deflate/deflate_iface.h"
 
 /* ------------------------------------------------------------------ */
+/* CP437 → UTF-8 fallback for legacy ZIP entry names.                 */
+/*                                                                    */
+/* APPNOTE 6.3 §4.4.4 makes CP437 the on-disk encoding for entry      */
+/* names unless general-purpose bit 11 (the EFS/UTF-8 flag) is set.   */
+/* Pakka now sets bit 11 on write when names contain non-ASCII bytes  */
+/* (see pk3_gp_flags_for_name) but legacy archives from older tools   */
+/* will have the bit clear and CP437 bytes in the name. The high      */
+/* half (0x80–0xFF) maps to Unicode codepoints in the BMP; the low    */
+/* half is identical to ASCII and passes through.                     */
+/*                                                                    */
+/* Policy (see dev/docs/windows-codepage.md §4): on read, try UTF-8   */
+/* first regardless of bit 11. Only fall back to CP437 if the byte    */
+/* sequence isn't valid UTF-8. This loses CP1251/etc. names that      */
+/* happen to be valid UTF-8 by accident — documented as inherent to   */
+/* any byte-only heuristic. */
+
+/* CP437 high-half codepoints (index = byte - 0x80). All BMP, all     */
+/* ≤ U+FFFF, so a uint16_t per slot suffices. */
+static const uint16_t pk3_cp437_high[128] = {
+    0x00C7, 0x00FC, 0x00E9, 0x00E2, 0x00E4, 0x00E0, 0x00E5, 0x00E7,
+    0x00EA, 0x00EB, 0x00E8, 0x00EF, 0x00EE, 0x00EC, 0x00C4, 0x00C5,
+    0x00C9, 0x00E6, 0x00C6, 0x00F4, 0x00F6, 0x00F2, 0x00FB, 0x00F9,
+    0x00FF, 0x00D6, 0x00DC, 0x00A2, 0x00A3, 0x00A5, 0x20A7, 0x0192,
+    0x00E1, 0x00ED, 0x00F3, 0x00FA, 0x00F1, 0x00D1, 0x00AA, 0x00BA,
+    0x00BF, 0x2310, 0x00AC, 0x00BD, 0x00BC, 0x00A1, 0x00AB, 0x00BB,
+    0x2591, 0x2592, 0x2593, 0x2502, 0x2524, 0x2561, 0x2562, 0x2556,
+    0x2555, 0x2563, 0x2551, 0x2557, 0x255D, 0x255C, 0x255B, 0x2510,
+    0x2514, 0x2534, 0x252C, 0x251C, 0x2500, 0x253C, 0x255E, 0x255F,
+    0x255A, 0x2554, 0x2569, 0x2566, 0x2560, 0x2550, 0x256C, 0x2567,
+    0x2568, 0x2564, 0x2565, 0x2559, 0x2558, 0x2552, 0x2553, 0x256B,
+    0x256A, 0x2518, 0x250C, 0x2588, 0x2584, 0x258C, 0x2590, 0x2580,
+    0x03B1, 0x00DF, 0x0393, 0x03C0, 0x03A3, 0x03C3, 0x00B5, 0x03C4,
+    0x03A6, 0x0398, 0x03A9, 0x03B4, 0x221E, 0x03C6, 0x03B5, 0x2229,
+    0x2261, 0x00B1, 0x2265, 0x2264, 0x2320, 0x2321, 0x00F7, 0x2248,
+    0x00B0, 0x2219, 0x00B7, 0x221A, 0x207F, 0x00B2, 0x25A0, 0x00A0
+};
+
+/* Encode a BMP codepoint as UTF-8 into dst (cap bytes). Returns the
+ * number of bytes written, or -1 if it doesn't fit. */
+static int pk3_utf8_encode_bmp(uint16_t cp, char *dst, size_t cap) {
+    if (cp < 0x80) {
+        if (cap < 1) return -1;
+        dst[0] = (char)cp;
+        return 1;
+    }
+    if (cp < 0x800) {
+        if (cap < 2) return -1;
+        dst[0] = (char)(0xC0 | (cp >> 6));
+        dst[1] = (char)(0x80 | (cp & 0x3F));
+        return 2;
+    }
+    /* Surrogate range is invalid as a scalar, but the CP437 table
+     * doesn't map to it; skip the check. */
+    if (cap < 3) return -1;
+    dst[0] = (char)(0xE0 | (cp >> 12));
+    dst[1] = (char)(0x80 | ((cp >> 6) & 0x3F));
+    dst[2] = (char)(0x80 | (cp & 0x3F));
+    return 3;
+}
+
+/* pk3_decode_entry_name return codes. */
+#define PK3_DECODE_OK       (0)   /* dst is the decoded UTF-8 name */
+#define PK3_DECODE_TOOLONG  (-1)  /* CP437 expansion didn't fit dst_cap */
+#define PK3_DECODE_BIT11_INVALID (-2)  /* bit 11 set but bytes aren't UTF-8 */
+
+/* Decode raw CDR entry name bytes into UTF-8 in dst (cap includes
+ * room for the trailing NUL). gp_flags is the GP flag field from the
+ * CDR; bit 11 (0x0800) signals UTF-8 per APPNOTE 6.3.x §4.4.4.
+ *
+ * Policy (see dev/docs/windows-codepage.md §4):
+ *   - bit 11 set: bytes are claimed UTF-8 — validate; reject the
+ *     archive if they aren't, because silently falling back to CP437
+ *     would mask a crafted-or-corrupt archive that lies about its
+ *     encoding.
+ *   - bit 11 clear: try UTF-8 first (handles modern tools that write
+ *     UTF-8 names without setting the flag); if invalid, decode as
+ *     CP437.
+ *
+ * On success returns the byte length written excluding NUL. On
+ * failure returns PK3_DECODE_TOOLONG or PK3_DECODE_BIT11_INVALID. */
+static int pk3_decode_entry_name(const unsigned char *src, size_t src_len,
+                                 uint16_t gp_flags,
+                                 char *dst, size_t dst_cap) {
+    size_t i, out = 0;
+    int bit11 = (gp_flags & 0x0800u) != 0;
+    if (dst_cap == 0) return PK3_DECODE_TOOLONG;
+    if (pakka_is_valid_utf8(src, src_len)) {
+        if (src_len + 1 > dst_cap) return PK3_DECODE_TOOLONG;
+        memcpy(dst, src, src_len);
+        dst[src_len] = '\0';
+        return (int)src_len;
+    }
+    if (bit11) {
+        /* Archive asserts UTF-8 but the bytes aren't. Don't silently
+         * downgrade to CP437 — surface as a format error so the user
+         * sees the archive is malformed rather than getting a name
+         * that pakka invented. */
+        return PK3_DECODE_BIT11_INVALID;
+    }
+    for (i = 0; i < src_len; i++) {
+        unsigned char b = src[i];
+        int n;
+        if (b < 0x80) {
+            if (out + 1 >= dst_cap) return -1;
+            dst[out++] = (char)b;
+        } else {
+            n = pk3_utf8_encode_bmp(pk3_cp437_high[b - 0x80],
+                                    dst + out, dst_cap - out - 1);
+            if (n < 0) return -1;
+            out += (size_t)n;
+        }
+    }
+    dst[out] = '\0';
+    return (int)out;
+}
+
+/* ------------------------------------------------------------------ */
 /* Error-fill helpers (file-local copies of pakfile.c equivalents).   */
 /* ------------------------------------------------------------------ */
 
@@ -700,8 +817,39 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
                                 0, "open",
                                 "Cannot allocate ZIP entry");
         }
-        memcpy(entry->filename, &cdr[pos + PK3_CDR_SIZE], rec.name_len);
-        entry->filename[rec.name_len] = '\0';
+        /* Decode the name to UTF-8 in memory. ZIP names on disk may be
+         * UTF-8 (GP bit 11 set) or CP437 (bit clear, the legacy
+         * default). pk3_decode_entry_name passes valid UTF-8 through
+         * and falls back to the CP437 → UTF-8 table when bit 11 is
+         * clear. If bit 11 is set, invalid UTF-8 is a format error —
+         * the archive lied about its encoding. A CP437 high-byte name
+         * can expand past PAKKA_ENTRY_NAME_SIZE (each high byte → up
+         * to 3 UTF-8 bytes); reject those rather than truncate. */
+        {
+            int n = pk3_decode_entry_name(&cdr[pos + PK3_CDR_SIZE],
+                                          rec.name_len,
+                                          rec.flags,
+                                          entry->filename,
+                                          PAKKA_ENTRY_NAME_SIZE);
+            if (n == PK3_DECODE_TOOLONG) {
+                free(entry);
+                free(cdr);
+                return pk3_err_fill(err, PAKKA_ERR_LIMIT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                                    "ZIP entry name expands past "
+                                    "%u UTF-8 bytes (CP437 fallback)",
+                                    (unsigned)(PAKKA_ENTRY_NAME_SIZE - 1));
+            }
+            if (n == PK3_DECODE_BIT11_INVALID) {
+                free(entry);
+                free(cdr);
+                return pk3_err_fill(err, PAKKA_ERR_FORMAT,
+                                    PAKKA_ERR_DOMAIN_NONE, 0, "open",
+                                    "ZIP entry %zu sets UTF-8 flag (GP "
+                                    "bit 11) but name is not valid UTF-8",
+                                    i);
+            }
+        }
         entry->pk3_method = rec.method;
         entry->pk3_crc32 = rec.crc;
         entry->pk3_compressed_size = rec.csize;
@@ -918,7 +1066,7 @@ pakka_status_t pakka_pk3_open_entry_impl(Pak_t *pak,
                 }
             }
             {
-                FILE *src = fopen(entry->pk3_pending_source, "rb");
+                FILE *src = pakka_platform_fopen(entry->pk3_pending_source, "rb");
                 if (src == NULL) {
                     int saved_errno = errno;
                     free(buf);
@@ -1338,18 +1486,54 @@ static void pk3_build_eocd(unsigned char eocd[PK3_EOCD_SIZE],
     pk3_put_u16(&eocd[20], 0);               /* comment length */
 }
 
+/* General-purpose bit-flag word: set bit 11 (0x0800, the ZIP-spec
+ * "language encoding" / EFS flag) when the entry name contains
+ * non-ASCII bytes AND those bytes form a valid UTF-8 sequence. Per
+ * APPNOTE 6.3.x §4.4.4, bit 11 set means the name is UTF-8; clear
+ * means CP437 (the spec default for legacy archives).
+ *
+ * The UTF-8 validation prevents producing a malformed archive when a
+ * library caller passes invalid bytes (e.g. CP1251 fed directly via
+ * pakka_add_file from a non-wmain entry path): with bit 11 set we'd
+ * be lying about the encoding, which downstream readers — including
+ * pakka's own read path — would now treat as a format error. Pure-
+ * ASCII names also leave the bit clear, which keeps byte-identical
+ * output for archives that don't actually need the flag. The flag is
+ * written into BOTH the LFH and the CDR; both records carry their
+ * own GP flags field and downstream readers consult both. */
+static uint16_t pk3_gp_flags_for_name(const char *name, uint16_t name_len) {
+    uint16_t i;
+    int has_high = 0;
+    for (i = 0; i < name_len; i++) {
+        if ((unsigned char)name[i] > 0x7F) {
+            has_high = 1;
+            break;
+        }
+    }
+    if (!has_high) return 0;
+    if (!pakka_is_valid_utf8((const unsigned char *)name, name_len)) {
+        /* Caller passed non-ASCII bytes that aren't UTF-8. Don't
+         * advertise UTF-8; leave bit 11 clear and let the reader's
+         * CP437 fallback take over. */
+        return 0;
+    }
+    return 0x0800u;
+}
+
 /* Build a 30-byte LFH for an entry. extra and comment fields are not
  * written (zero-length). `method` is the ZIP compression method
  * (PK3_METHOD_STORED or PK3_METHOD_DEFLATE); csize and usize must be
  * sized to match (csize == usize for STORED, csize <= usize for
- * DEFLATE). */
+ * DEFLATE). `name` is the entry name (used only to compute the
+ * UTF-8 / GP bit 11 flag). */
 static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
                           uint16_t method,
                           uint32_t crc, uint32_t csize, uint32_t usize,
-                          uint16_t name_len) {
+                          const char *name, uint16_t name_len) {
+    uint16_t gp_flags = pk3_gp_flags_for_name(name, name_len);
     lfh[0] = 'P'; lfh[1] = 'K'; lfh[2] = 3; lfh[3] = 4;
     pk3_put_u16(&lfh[4], 20);                /* version needed: 2.0 */
-    pk3_put_u16(&lfh[6], 0);                 /* general purpose flags */
+    pk3_put_u16(&lfh[6], gp_flags);          /* general purpose flags */
     pk3_put_u16(&lfh[8], method);            /* compression method */
     pk3_put_u16(&lfh[10], 0);                /* DOS mod time */
     pk3_put_u16(&lfh[12], 0x0021);           /* DOS mod date: 1980-01-01 */
@@ -1361,15 +1545,19 @@ static void pk3_build_lfh(unsigned char lfh[PK3_LFH_SIZE],
 }
 
 /* Build a 46-byte CDR entry header (variable-length name follows).
- * `method` mirrors the LFH method field — see pk3_build_lfh. */
+ * `method` mirrors the LFH method field — see pk3_build_lfh. `name`
+ * is used to derive the UTF-8 GP bit 11 flag (must match the value
+ * written into the corresponding LFH). */
 static void pk3_build_cdr(unsigned char cdr[PK3_CDR_SIZE],
                           uint16_t method,
                           uint32_t crc, uint32_t csize, uint32_t usize,
-                          uint16_t name_len, uint32_t lfh_offset) {
+                          const char *name, uint16_t name_len,
+                          uint32_t lfh_offset) {
+    uint16_t gp_flags = pk3_gp_flags_for_name(name, name_len);
     cdr[0] = 'P'; cdr[1] = 'K'; cdr[2] = 1; cdr[3] = 2;
     pk3_put_u16(&cdr[4], 20);                /* version made by: 2.0 */
     pk3_put_u16(&cdr[6], 20);                /* version needed: 2.0 */
-    pk3_put_u16(&cdr[8], 0);                 /* general purpose flags */
+    pk3_put_u16(&cdr[8], gp_flags);          /* general purpose flags */
     pk3_put_u16(&cdr[10], method);
     pk3_put_u16(&cdr[12], 0);                /* DOS mod time */
     pk3_put_u16(&cdr[14], 0x0021);           /* DOS mod date */
@@ -1503,7 +1691,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
      * so 32-bit hosts can't silently wrap before the cap check. The
      * payload bytes themselves are read again at commit time — atomic
      * add cost is one extra full read per source file. */
-    src = fopen(source_path, "rb");
+    src = pakka_platform_fopen(source_path, "rb");
     if (src == NULL) {
         saved_errno = errno;
         return pk3_err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
@@ -1559,7 +1747,7 @@ pakka_status_t pakka_pk3_add_file_impl(Pak_t *pak,
                                 " bytes) for DEFLATE compression",
                                 source_path, total);
         }
-        src = fopen(source_path, "rb");
+        src = pakka_platform_fopen(source_path, "rb");
         if (src == NULL) {
             saved_errno = errno;
             free(src_buf);
@@ -1853,7 +2041,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                              old_offset_field,
                                              old_cdr_offset);
                 fclose(tmpfp);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 free(old_lfh);
                 free(old_payload);
                 free(old_offset_field);
@@ -1865,7 +2053,8 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             }
 
             pk3_build_lfh(lfh, e->pk3_method, e->pk3_crc32,
-                          e->pk3_compressed_size, e->length, name_len);
+                          e->pk3_compressed_size, e->length,
+                          e->filename, name_len);
             if (fwrite(lfh, 1, PK3_LFH_SIZE, tmpfp) != PK3_LFH_SIZE
                 || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
                 saved_errno = errno;
@@ -1873,7 +2062,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                              old_offset_field,
                                              old_cdr_offset);
                 fclose(tmpfp);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 free(old_lfh);
                 free(old_payload);
                 free(old_offset_field);
@@ -1913,7 +2102,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -1933,7 +2122,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -1951,7 +2140,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -1976,7 +2165,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -1993,7 +2182,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                     }
                 }
                 {
-                    FILE *src = fopen(e->pk3_pending_source, "rb");
+                    FILE *src = pakka_platform_fopen(e->pk3_pending_source, "rb");
                     uint32_t recomputed_crc = 0;
                     if (src == NULL) {
                         saved_errno = errno;
@@ -2001,7 +2190,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -2026,7 +2215,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                          old_offset_field,
                                                          old_cdr_offset);
                             fclose(tmpfp);
-                            remove(tmp_path);
+                            pakka_platform_remove(tmp_path);
                             free(old_lfh);
                             free(old_payload);
                             free(old_offset_field);
@@ -2054,7 +2243,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -2079,7 +2268,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                  old_offset_field,
                                                  old_cdr_offset);
                     fclose(tmpfp);
-                    remove(tmp_path);
+                    pakka_platform_remove(tmp_path);
                     free(old_lfh);
                     free(old_payload);
                     free(old_offset_field);
@@ -2096,7 +2285,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                  old_offset_field,
                                                  old_cdr_offset);
                     fclose(tmpfp);
-                    remove(tmp_path);
+                    pakka_platform_remove(tmp_path);
                     free(old_lfh);
                     free(old_payload);
                     free(old_offset_field);
@@ -2116,7 +2305,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -2132,7 +2321,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                      old_offset_field,
                                                      old_cdr_offset);
                         fclose(tmpfp);
-                        remove(tmp_path);
+                        pakka_platform_remove(tmp_path);
                         free(old_lfh);
                         free(old_payload);
                         free(old_offset_field);
@@ -2178,7 +2367,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                                  old_offset_field,
                                                  old_cdr_offset);
                     fclose(tmpfp);
-                    remove(tmp_path);
+                    pakka_platform_remove(tmp_path);
                     free(old_lfh);
                     free(old_payload);
                     free(old_offset_field);
@@ -2192,7 +2381,8 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         for (e = pak->head; e != NULL; e = e->next) {
             uint16_t name_len = (uint16_t)strlen(e->filename);
             pk3_build_cdr(cdr, e->pk3_method, e->pk3_crc32,
-                          e->pk3_compressed_size, e->length, name_len,
+                          e->pk3_compressed_size, e->length,
+                          e->filename, name_len,
                           e->pk3_lfh_offset);
             if (fwrite(cdr, 1, PK3_CDR_SIZE, tmpfp) != PK3_CDR_SIZE
                 || fwrite(e->filename, 1, name_len, tmpfp) != name_len) {
@@ -2201,7 +2391,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                                              old_offset_field,
                                              old_cdr_offset);
                 fclose(tmpfp);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 free(old_lfh);
                 free(old_payload);
                 free(old_offset_field);
@@ -2221,7 +2411,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                          old_offset_field, old_cdr_offset);
             fclose(tmpfp);
-            remove(tmp_path);
+            pakka_platform_remove(tmp_path);
             free(old_lfh);
             free(old_payload);
             free(old_offset_field);
@@ -2234,7 +2424,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
             pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                          old_offset_field, old_cdr_offset);
             fclose(tmpfp);
-            remove(tmp_path);
+            pakka_platform_remove(tmp_path);
             free(old_lfh);
             free(old_payload);
             free(old_offset_field);
@@ -2262,7 +2452,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                 pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                              old_offset_field,
                                              old_cdr_offset);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 free(old_lfh);
                 free(old_payload);
                 free(old_offset_field);
@@ -2285,11 +2475,11 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                 pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                              old_offset_field,
                                              old_cdr_offset);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 /* Restore the original archive's handle so the caller
                  * keeps a readable archive after a failed commit —
                  * matches the rename-failure recovery path below. */
-                pak->fp = fopen(pak->is_new ? pak->tmp_pakpath
+                pak->fp = pakka_platform_fopen(pak->is_new ? pak->tmp_pakpath
                                             : pak->cur_pakpath, "r+b");
                 free(old_lfh);
                 free(old_payload);
@@ -2325,10 +2515,10 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
                 pk3_rebuild_rollback_offsets(pak, old_lfh, old_payload,
                                              old_offset_field,
                                              old_cdr_offset);
-                remove(tmp_path);
+                pakka_platform_remove(tmp_path);
                 /* Try to reopen the original so the handle is at
                  * least readable for a caller that wants to retry. */
-                pak->fp = fopen(pak->is_new ? pak->tmp_pakpath
+                pak->fp = pakka_platform_fopen(pak->is_new ? pak->tmp_pakpath
                                             : pak->cur_pakpath, "r+b");
                 free(old_lfh);
                 free(old_payload);
@@ -2362,7 +2552,7 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
         /* CDR + EOCD are already in the renamed file. Reopen for future
          * reads only; no more writes needed. file_size matches what we
          * wrote: payload_section + cdr_size + EOCD. */
-        pak->fp = fopen(pak->is_new ? pak->tmp_pakpath : pak->cur_pakpath,
+        pak->fp = pakka_platform_fopen(pak->is_new ? pak->tmp_pakpath : pak->cur_pakpath,
                         "r+b");
         if (pak->fp == NULL) {
             saved_errno = errno;
@@ -2417,7 +2607,8 @@ pakka_status_t pakka_pk3_commit_impl(Pak_t *pak, pakka_error_t *err) {
     for (e = pak->head; e != NULL; e = e->next) {
         uint16_t name_len = (uint16_t)strlen(e->filename);
         pk3_build_cdr(cdr, e->pk3_method, e->pk3_crc32,
-                      e->pk3_compressed_size, e->length, name_len,
+                      e->pk3_compressed_size, e->length,
+                      e->filename, name_len,
                       e->pk3_lfh_offset);
         if (fwrite(cdr, 1, PK3_CDR_SIZE, pak->fp) != PK3_CDR_SIZE
             || fwrite(e->filename, 1, name_len, pak->fp) != name_len) {
