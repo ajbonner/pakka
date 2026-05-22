@@ -823,28 +823,44 @@ static void op_extract(pakka_archive_t *pak, char *destination,
              * would re-read the first match for every iteration of this
              * loop. The handle path is also a small perf win on every
              * format — no O(n) name scan per entry. */
+            fprintf(stderr, "[trace] extract idx=%zu calling pakka_open_entry_handle size=%" PRIu64 "\n", idx, size);
+            fflush(stderr);
             s = pakka_open_entry_handle(pak, entry, &reader, &err);
+            fprintf(stderr, "[trace] extract idx=%zu pakka_open_entry_handle -> %d\n", idx, (int)s);
+            fflush(stderr);
             if (s != PAKKA_OK) {
                 fclose(tfd);
                 fail_from_err(&err);
             }
             for (;;) {
+                fprintf(stderr, "[trace] extract idx=%zu calling pakka_reader_read\n", idx);
+                fflush(stderr);
                 s = pakka_reader_read(reader, buf, sizeof(buf), &nread, &err);
+                fprintf(stderr, "[trace] extract idx=%zu pakka_reader_read -> s=%d nread=%zu\n", idx, (int)s, nread);
+                fflush(stderr);
                 if (s != PAKKA_OK) {
                     pakka_reader_close(reader);
                     fclose(tfd);
                     fail_from_err(&err);
                 }
                 if (nread == 0) break;
+                fprintf(stderr, "[trace] extract idx=%zu calling fwrite n=%zu\n", idx, nread);
+                fflush(stderr);
                 if (fwrite(buf, 1, nread, tfd) != nread) {
                     int werr = errno;
                     pakka_reader_close(reader);
                     fclose(tfd);
                     pakka_die_e(werr, "Cannot write entry '%s'", name);
                 }
+                fprintf(stderr, "[trace] extract idx=%zu fwrite ok\n", idx);
+                fflush(stderr);
             }
+            fprintf(stderr, "[trace] extract idx=%zu calling pakka_reader_close\n", idx);
+            fflush(stderr);
             pakka_reader_close(reader);
         }
+        fprintf(stderr, "[trace] extract idx=%zu calling fclose(tfd)\n", idx);
+        fflush(stderr);
 
         if (fclose(tfd) != 0) {
             /* Buffered disk-full / NFS / quota failures first surface
