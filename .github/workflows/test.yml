@@ -429,6 +429,31 @@ jobs:
         run: cmake --build build/cmake
       - name: Fetch + verify Quake fixture
         run: make fixture
+      - name: Debug — direct extract smoke test (temporary)
+        timeout-minutes: 2
+        run: |
+          set -x
+          export PAKKA="$PWD/build/cmake/pakka.exe"
+          mkdir -p /tmp/dbg-out
+          # Build the same dk fixture tests/dk.bats uses for test #3:
+          # one STORED entry "weapons/blast.mdl" with 16-byte payload.
+          python3 -c "
+          import struct, sys
+          name = b'weapons/blast.mdl'
+          payload = b'model-bytes-here'
+          # PACK + diroffset + dirlength
+          buf  = b'PACK' + struct.pack('<II', 12 + len(payload), 72)
+          buf += payload
+          buf += name + b'\\0' * (56 - len(name))
+          buf += struct.pack('<IIII', 12, len(payload), 0, 0)
+          sys.stdout.buffer.write(buf)
+          " > /tmp/dbg.pak
+          ls -la /tmp/dbg.pak
+          # Direct invocation so stderr/stdout stream to the job log.
+          # The bats `run` wrapper buffers them in memory which makes
+          # in-flight debugging impossible — this isolates the hang.
+          "$PAKKA" -x --format daikatana -C /tmp/dbg-out /tmp/dbg.pak
+          ls -la /tmp/dbg-out/weapons/
       - name: Run bats tests against pakka.exe
         # Resolve PAKKA to an MSYS2-style absolute path: relative paths
         # can break inside bats's setup_file (bats may chdir into a temp
