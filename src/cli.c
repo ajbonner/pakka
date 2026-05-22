@@ -298,7 +298,10 @@ static int cli_run(int argc, char **argv) {
     free(opts.aliased_entries);
     free(opts.aliased_sources);
     if (opts.mode == PAK_EXTRACT) {
-        fprintf(stderr, "[trace] cli_run: returning 0\n");
+        fprintf(stderr, "[trace] cli_run: flushing stdout\n");
+        fflush(stderr);
+        fflush(stdout);
+        fprintf(stderr, "[trace] cli_run: stdout flushed; returning 0\n");
         fflush(stderr);
     }
 
@@ -369,7 +372,11 @@ int wmain(int argc, wchar_t **wargv) {
     argv_utf8[argc] = NULL;
 
     ret = cli_run(argc, argv_utf8);
+    fprintf(stderr, "[trace] wmain: cli_run returned %d, freeing argv\n", ret);
+    fflush(stderr);
     wmain_free_argv(argv_utf8, argc);
+    fprintf(stderr, "[trace] wmain: about to return %d\n", ret);
+    fflush(stderr);
     return ret;
 }
 
