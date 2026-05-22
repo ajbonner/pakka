@@ -621,17 +621,16 @@ jobs:
 
   # Slow-test suites. Real game-engine archives from archive.org —
   # bigger fixtures + more entries than the synthetic Quake shareware
-  # pak that the default `test` target uses. Kept out of every PR
-  # because the downloads (93 MiB Q3 demo, 48 MiB Half-Life Uplink, 90
-  # MiB Half-Life Day One) would dominate PR wall clock, but run on
-  # every push to master + the Sunday cron + manual dispatch — same
-  # gate as fuzz / coverage. The fixture zips are SHA-pinned in the
-  # Makefile and cached on a hashFiles('Makefile') key, so subsequent
-  # runs reuse the download even across reruns and across the four
-  # slow-test jobs.
+  # pak that the default `test` target uses. Despite the name, the
+  # bats suites themselves take seconds; the 93 MiB Q3 demo + 48 MiB
+  # Half-Life Uplink + 90 MiB Half-Life Day One downloads are the
+  # only meaningful wall-clock cost, and they're cached on a
+  # hashFiles('Makefile') key (URLs + SHA256s live there) so the zip
+  # is fetched once and reused across reruns and across the
+  # Linux/Windows pair for each suite. Q3 and GoldSrc are split into
+  # separate jobs so failures attribute cleanly.
   slow-test-q3-linux:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -647,7 +646,6 @@ jobs:
 
   slow-test-goldsrc-linux:
     runs-on: ubuntu-latest
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     steps:
       - uses: actions/checkout@v6
         with:
@@ -665,7 +663,6 @@ jobs:
 
   slow-test-q3-windows:
     runs-on: windows-2025-vs2026
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     defaults:
       run:
         shell: msys2 {0}
@@ -710,7 +707,6 @@ jobs:
 
   slow-test-goldsrc-windows:
     runs-on: windows-2025-vs2026
-    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
     defaults:
       run:
         shell: msys2 {0}
