@@ -86,10 +86,13 @@ write_pak_one_entry() {
     [ "$lfh_gp_lo" = "00" ]
     [ "$lfh_gp_hi" = "08" ]
     # Locate the CDR signature ("504b0102") and check GP flags at CDR+8
-    # (hex chars at CDR_pos+16 / CDR_pos+18).
-    local cdr_pos cdr_gp_lo cdr_gp_hi
-    cdr_pos=$(printf '%s' "$hex" | grep -bo '504b0102' | head -1 | cut -d: -f1)
-    [ -n "$cdr_pos" ]
+    # (hex chars at CDR_pos+16 / CDR_pos+18). Use bash parameter
+    # expansion to find the prefix length — BusyBox grep (Alpine /
+    # musl CI) does not support `grep -b`.
+    local cdr_pos cdr_gp_lo cdr_gp_hi prefix
+    prefix="${hex%%504b0102*}"
+    [ "$prefix" != "$hex" ]
+    cdr_pos=${#prefix}
     cdr_gp_lo="${hex:$((cdr_pos + 16)):2}"
     cdr_gp_hi="${hex:$((cdr_pos + 18)):2}"
     [ "$cdr_gp_lo" = "00" ]
