@@ -453,6 +453,7 @@ jobs:
           "$PAKKA" -x --format daikatana -C ./dbg-out ./dbg.pak
           ls -la ./dbg-out/weapons/
       - name: Debug — minimal _wfopen+fclose loop (no pakka)
+        if: always()
         timeout-minutes: 1
         # Hypothesis: maybe the fclose hang is environmental rather
         # than pakka-specific. This step writes a tiny C program that
