@@ -434,26 +434,62 @@ jobs:
         run: |
           set -x
           export PAKKA="$PWD/build/cmake/pakka.exe"
-          mkdir -p /tmp/dbg-out
-          # Build the same dk fixture tests/dk.bats uses for test #3:
-          # one STORED entry "weapons/blast.mdl" with 16-byte payload.
+          # Try the workspace itself (D:\a\pakka\pakka) instead of
+          # /tmp (D:\a\_temp\msys64\tmp\...) to rule out the MSYS2
+          # tmpfs as a confounder for the fclose hang.
+          mkdir -p ./dbg-out
           python3 -c "
           import struct, sys
           name = b'weapons/blast.mdl'
           payload = b'model-bytes-here'
-          # PACK + diroffset + dirlength
           buf  = b'PACK' + struct.pack('<II', 12 + len(payload), 72)
           buf += payload
           buf += name + b'\\0' * (56 - len(name))
           buf += struct.pack('<IIII', 12, len(payload), 0, 0)
           sys.stdout.buffer.write(buf)
-          " > /tmp/dbg.pak
-          ls -la /tmp/dbg.pak
+          " > ./dbg.pak
+          ls -la ./dbg.pak
           # Direct invocation so stderr/stdout stream to the job log.
-          # The bats `run` wrapper buffers them in memory which makes
-          # in-flight debugging impossible — this isolates the hang.
-          "$PAKKA" -x --format daikatana -C /tmp/dbg-out /tmp/dbg.pak
-          ls -la /tmp/dbg-out/weapons/
+          "$PAKKA" -x --format daikatana -C ./dbg-out ./dbg.pak
+          ls -la ./dbg-out/weapons/
+      - name: Debug — minimal _wfopen+fclose loop (no pakka)
+        timeout-minutes: 1
+        # Hypothesis: maybe the fclose hang is environmental rather
+        # than pakka-specific. This step writes a tiny C program that
+        # only does _wfopen + fwrite + fclose, builds it, runs it
+        # twice (once to /tmp, once to workspace), and times each.
+        # If even this hangs, the issue is the runner / AV / MSYS2.
+        run: |
+          set -x
+          cat > /tmp/fclose_probe.c <<'PROBE'
+          #include <stdio.h>
+          #include <wchar.h>
+          #include <windows.h>
+          int wmain(int argc, wchar_t **wargv) {
+              FILE *fp;
+              ULONGLONG t0, t1;
+              if (argc < 2) return 2;
+              fwprintf(stderr, L"probe: opening %s\n", wargv[1]);
+              fflush(stderr);
+              fp = _wfopen(wargv[1], L"wb");
+              if (fp == NULL) {
+                  fwprintf(stderr, L"probe: open failed\n");
+                  return 1;
+              }
+              fwrite("model-bytes-here", 1, 16, fp);
+              fwprintf(stderr, L"probe: about to fclose\n");
+              fflush(stderr);
+              t0 = GetTickCount64();
+              fclose(fp);
+              t1 = GetTickCount64();
+              fwprintf(stderr, L"probe: fclose returned in %llu ms\n",
+                       (unsigned long long)(t1 - t0));
+              return 0;
+          }
+          PROBE
+          cl.exe /nologo /W4 /Fe:/tmp/fclose_probe.exe /tmp/fclose_probe.c
+          /tmp/fclose_probe.exe /tmp/probe-tmp.bin
+          /tmp/fclose_probe.exe ./probe-ws.bin
       - name: Run bats tests against pakka.exe
         # Resolve PAKKA to an MSYS2-style absolute path: relative paths
         # can break inside bats's setup_file (bats may chdir into a temp
