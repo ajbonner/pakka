@@ -452,45 +452,52 @@ jobs:
           # Direct invocation so stderr/stdout stream to the job log.
           "$PAKKA" -x --format daikatana -C ./dbg-out ./dbg.pak
           ls -la ./dbg-out/weapons/
-      - name: Debug — minimal _wfopen+fclose loop (no pakka)
+      - name: Debug — minimal Win32 write+close probe (no pakka, no CRT)
         if: always()
         timeout-minutes: 1
         # Hypothesis: maybe the fclose hang is environmental rather
-        # than pakka-specific. This step writes a tiny C program that
-        # only does _wfopen + fwrite + fclose, builds it, runs it
-        # twice (once to /tmp, once to workspace), and times each.
-        # If even this hangs, the issue is the runner / AV / MSYS2.
+        # than pakka-specific. Use Python ctypes to call Win32 directly
+        # (CreateFileW + WriteFile + CloseHandle) and time the close.
+        # Bypasses both MSVC CRT and the MSYS2 shell.
+        # If this also hangs, the issue is the runner / AV / Defender,
+        # not pakka.
         run: |
-          set -x
-          cat > /tmp/fclose_probe.c <<'PROBE'
-          #include <stdio.h>
-          #include <wchar.h>
-          #include <windows.h>
-          int wmain(int argc, wchar_t **wargv) {
-              FILE *fp;
-              ULONGLONG t0, t1;
-              if (argc < 2) return 2;
-              fwprintf(stderr, L"probe: opening %s\n", wargv[1]);
-              fflush(stderr);
-              fp = _wfopen(wargv[1], L"wb");
-              if (fp == NULL) {
-                  fwprintf(stderr, L"probe: open failed\n");
-                  return 1;
-              }
-              fwrite("model-bytes-here", 1, 16, fp);
-              fwprintf(stderr, L"probe: about to fclose\n");
-              fflush(stderr);
-              t0 = GetTickCount64();
-              fclose(fp);
-              t1 = GetTickCount64();
-              fwprintf(stderr, L"probe: fclose returned in %llu ms\n",
-                       (unsigned long long)(t1 - t0));
-              return 0;
-          }
+          python3 << 'PROBE'
+          import ctypes, ctypes.wintypes as w, time, sys
+
+          k32 = ctypes.WinDLL('kernel32', use_last_error=True)
+          GENERIC_WRITE = 0x40000000
+          CREATE_ALWAYS = 2
+          FILE_ATTRIBUTE_NORMAL = 0x80
+          INVALID_HANDLE_VALUE = w.HANDLE(-1).value
+
+          k32.CreateFileW.argtypes = [w.LPCWSTR, w.DWORD, w.DWORD,
+              ctypes.c_void_p, w.DWORD, w.DWORD, w.HANDLE]
+          k32.CreateFileW.restype = w.HANDLE
+          k32.WriteFile.argtypes = [w.HANDLE, ctypes.c_void_p, w.DWORD,
+              ctypes.POINTER(w.DWORD), ctypes.c_void_p]
+          k32.WriteFile.restype = w.BOOL
+          k32.CloseHandle.argtypes = [w.HANDLE]
+          k32.CloseHandle.restype = w.BOOL
+
+          for path in (sys.argv[1:] or [r'C:\Users\runneradmin\AppData\Local\Temp\probe-tmp.bin',
+                                         r'D:\a\pakka\pakka\probe-ws.bin']):
+              print(f'probe: opening {path}', flush=True)
+              h = k32.CreateFileW(path, GENERIC_WRITE, 0, None,
+                                  CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, None)
+              if h == INVALID_HANDLE_VALUE or h == 0:
+                  err = ctypes.get_last_error()
+                  print(f'probe: CreateFileW failed err={err}', flush=True)
+                  continue
+              data = b'model-bytes-here'
+              n = w.DWORD(0)
+              k32.WriteFile(h, data, len(data), ctypes.byref(n), None)
+              print(f'probe: WriteFile wrote {n.value} bytes, about to CloseHandle', flush=True)
+              t0 = time.monotonic()
+              k32.CloseHandle(h)
+              t1 = time.monotonic()
+              print(f'probe: CloseHandle returned in {(t1-t0)*1000:.1f} ms', flush=True)
           PROBE
-          cl.exe /nologo /W4 /Fe:/tmp/fclose_probe.exe /tmp/fclose_probe.c
-          /tmp/fclose_probe.exe /tmp/probe-tmp.bin
-          /tmp/fclose_probe.exe ./probe-ws.bin
       - name: Run bats tests against pakka.exe
         # Resolve PAKKA to an MSYS2-style absolute path: relative paths
         # can break inside bats's setup_file (bats may chdir into a temp
