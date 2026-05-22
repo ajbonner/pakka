@@ -618,3 +618,139 @@ jobs:
 
           export PAKKA_NBSD_WORKDIR PAKKA_NBSD_SSH_PORT PAKKA_NBSD_ROOT_PASSWORD
           dev/legacy/netbsd-sparc/scripts/run-build.sh
+
+  # Slow-test suites. Real game-engine archives from archive.org —
+  # bigger fixtures + more entries than the synthetic Quake shareware
+  # pak that the default `test` target uses. Kept out of every PR
+  # because the downloads (93 MiB Q3 demo, 48 MiB Half-Life Uplink, 90
+  # MiB Half-Life Day One) would dominate PR wall clock, but run on
+  # every push to master + the Sunday cron + manual dispatch — same
+  # gate as fuzz / coverage. The fixture zips are SHA-pinned in the
+  # Makefile and cached on a hashFiles('Makefile') key, so subsequent
+  # runs reuse the download even across reruns and across the four
+  # slow-test jobs.
+  slow-test-q3-linux:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/q3demo.zip
+          key: q3demo-${{ hashFiles('Makefile') }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl unzip
+      - run: make slow-test
+
+  slow-test-goldsrc-linux:
+    runs-on: ubuntu-latest
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: |
+            build/test/hl-uplink.zip
+            build/test/hl-dayone.zip
+          key: goldsrc-${{ hashFiles('Makefile') }}
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y build-essential bats curl openssl unzip
+      - run: make slow-test-goldsrc
+
+  slow-test-q3-windows:
+    runs-on: windows-2025-vs2026
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/q3demo.zip
+          key: q3demo-${{ hashFiles('Makefile') }}
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        with:
+          update: false
+          install: >-
+            bash
+            coreutils
+            curl
+            diffutils
+            git
+            openssl
+            tar
+            make
+            zip
+            unzip
+            python3
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          /tmp/bats-core/install.sh /usr/local
+      - name: Configure (CMake / Ninja / MSVC)
+        shell: pwsh
+        run: cmake -B build/cmake -G Ninja .
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/cmake
+      - name: Run Q3 slow-test against pakka.exe
+        run: dev/win/slow-test.sh q3
+
+  slow-test-goldsrc-windows:
+    runs-on: windows-2025-vs2026
+    if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: |
+            build/test/hl-uplink.zip
+            build/test/hl-dayone.zip
+          key: goldsrc-${{ hashFiles('Makefile') }}
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
+      - uses: msys2/setup-msys2@v2
+        with:
+          update: false
+          install: >-
+            bash
+            coreutils
+            curl
+            diffutils
+            git
+            openssl
+            tar
+            make
+            zip
+            unzip
+            python3
+      - name: Install bats-core
+        run: |
+          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
+          /tmp/bats-core/install.sh /usr/local
+      - name: Configure (CMake / Ninja / MSVC)
+        shell: pwsh
+        run: cmake -B build/cmake -G Ninja .
+      - name: Build
+        shell: pwsh
+        run: cmake --build build/cmake
+      - name: Run GoldSrc slow-test against pakka.exe
+        run: dev/win/slow-test.sh goldsrc
