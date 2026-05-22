@@ -282,13 +282,25 @@ static int cli_run(int argc, char **argv) {
             exit(1);
     }
 
+    if (opts.mode == PAK_EXTRACT) {
+        fprintf(stderr, "[trace] cli_run: calling pakka_close (after extract)\n");
+        fflush(stderr);
+    }
     s = pakka_close(pak, &err);
+    if (opts.mode == PAK_EXTRACT) {
+        fprintf(stderr, "[trace] cli_run: pakka_close -> %d\n", (int)s);
+        fflush(stderr);
+    }
     if (s != PAKKA_OK) {
         fail_from_err(&err);
     }
     free(opts.paths);
     free(opts.aliased_entries);
     free(opts.aliased_sources);
+    if (opts.mode == PAK_EXTRACT) {
+        fprintf(stderr, "[trace] cli_run: returning 0\n");
+        fflush(stderr);
+    }
 
     return 0;
 }
@@ -869,7 +881,11 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             int close_errno = errno;
             pakka_die_e(close_errno, "Cannot finalize %s/%s", realdest, name);
         }
+        fprintf(stderr, "[trace] extract idx=%zu fclose ok\n", idx);
+        fflush(stderr);
     }
+    fprintf(stderr, "[trace] op_extract: returning normally\n");
+    fflush(stderr);
 
     free(should_extract);
     free(path_matched);
