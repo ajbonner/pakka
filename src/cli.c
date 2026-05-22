@@ -282,28 +282,13 @@ static int cli_run(int argc, char **argv) {
             exit(1);
     }
 
-    if (opts.mode == PAK_EXTRACT) {
-        fprintf(stderr, "[trace] cli_run: calling pakka_close (after extract)\n");
-        fflush(stderr);
-    }
     s = pakka_close(pak, &err);
-    if (opts.mode == PAK_EXTRACT) {
-        fprintf(stderr, "[trace] cli_run: pakka_close -> %d\n", (int)s);
-        fflush(stderr);
-    }
     if (s != PAKKA_OK) {
         fail_from_err(&err);
     }
     free(opts.paths);
     free(opts.aliased_entries);
     free(opts.aliased_sources);
-    if (opts.mode == PAK_EXTRACT) {
-        fprintf(stderr, "[trace] cli_run: flushing stdout\n");
-        fflush(stderr);
-        fflush(stdout);
-        fprintf(stderr, "[trace] cli_run: stdout flushed; returning 0\n");
-        fflush(stderr);
-    }
 
     return 0;
 }
@@ -313,25 +298,44 @@ static int cli_run(int argc, char **argv) {
 /* Windows: the C runtime invokes wmain when present, handing us argv
  * as UTF-16 from CommandLineToArgvW. Convert once at the boundary so
  * the rest of pakka sees a single canonical narrow encoding (UTF-8),
- * which is what every pakka_platform_* helper expects on Windows. */
-static void wmain_free_argv(char **argv_utf8, int filled) {
+ * which is what every pakka_platform_* helper expects on Windows.
+ *
+ * Two arrays: argv_utf8 is what we hand to cli_run (parseopts /
+ * strip_long_options mutate it in place by shifting pointers down to
+ * the start when stripping long options — see strip_long_options at
+ * src/cli.c:1073). owned_argv is a parallel array of the original
+ * malloc'd pointers in their pre-shift positions; it's never mutated
+ * and is what wmain_free_argv walks at exit. Freeing through argv_utf8
+ * would double-free any pointer that strip_long_options copied to a
+ * lower index (the original is left intact past `dst`), and would
+ * leak pointers that strip overwrote (they're no longer in argv_utf8
+ * but still in the heap). */
+static void wmain_free_argv(char **owned, int filled) {
     int i;
-    if (!argv_utf8) return;
-    for (i = 0; i < filled; i++) free(argv_utf8[i]);
-    free(argv_utf8);
+    if (!owned) return;
+    for (i = 0; i < filled; i++) free(owned[i]);
+    free(owned);
 }
 
 int wmain(int argc, wchar_t **wargv) {
     char **argv_utf8;
+    char **owned_argv;
     int i;
     int ret;
 
     /* argc + 1 for the trailing NULL sentinel. argv_utf8 is mutable
      * because strip_long_options rewrites it in place during option
-     * parsing (see parseopts). */
+     * parsing. owned_argv keeps the original pointer per index so the
+     * free loop can release each exactly once. */
     argv_utf8 = (char **)calloc((size_t)argc + 1, sizeof(char *));
     if (!argv_utf8) {
         fprintf(stderr, "pakka: out of memory in argv conversion\n");
+        return 2;
+    }
+    owned_argv = (char **)calloc((size_t)argc, sizeof(char *));
+    if (!owned_argv) {
+        fprintf(stderr, "pakka: out of memory in argv conversion\n");
+        free(argv_utf8);
         return 2;
     }
 
@@ -347,15 +351,18 @@ int wmain(int argc, wchar_t **wargv) {
                     "pakka: argv[%d] is not a valid UTF-16 string "
                     "(GetLastError=%lu)\n",
                     i, (unsigned long)GetLastError());
-            wmain_free_argv(argv_utf8, i);
+            wmain_free_argv(owned_argv, i);
+            free(argv_utf8);
             return 2;
         }
         argv_utf8[i] = (char *)malloc((size_t)u8_len);
         if (!argv_utf8[i]) {
             fprintf(stderr, "pakka: out of memory in argv conversion\n");
-            wmain_free_argv(argv_utf8, i);
+            wmain_free_argv(owned_argv, i);
+            free(argv_utf8);
             return 2;
         }
+        owned_argv[i] = argv_utf8[i];
         if (WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
                                 wargv[i], -1,
                                 argv_utf8[i], u8_len, NULL, NULL) <= 0) {
@@ -363,20 +370,18 @@ int wmain(int argc, wchar_t **wargv) {
                     "pakka: argv[%d] UTF-8 conversion failed "
                     "(GetLastError=%lu)\n",
                     i, (unsigned long)GetLastError());
-            free(argv_utf8[i]);
-            argv_utf8[i] = NULL;
-            wmain_free_argv(argv_utf8, i);
+            /* i is the most-recently-assigned slot; include it in the
+             * free range. */
+            wmain_free_argv(owned_argv, i + 1);
+            free(argv_utf8);
             return 2;
         }
     }
     argv_utf8[argc] = NULL;
 
     ret = cli_run(argc, argv_utf8);
-    fprintf(stderr, "[trace] wmain: cli_run returned %d, freeing argv\n", ret);
-    fflush(stderr);
-    wmain_free_argv(argv_utf8, argc);
-    fprintf(stderr, "[trace] wmain: about to return %d\n", ret);
-    fflush(stderr);
+    wmain_free_argv(owned_argv, argc);
+    free(argv_utf8);
     return ret;
 }
 
@@ -623,33 +628,18 @@ static void op_extract(pakka_archive_t *pak, char *destination,
     if (realdest == NULL) {
         pakka_die("Cannot allocate destination buffer");
     }
-    fprintf(stderr, "[trace] op_extract: destination=%s\n",
-            destination ? destination : "(null)");
-    fflush(stderr);
     if (destination != NULL) {
-        fprintf(stderr, "[trace] op_extract: calling pakka_platform_realpath\n");
-        fflush(stderr);
         if (pakka_platform_realpath(destination, realdest) == NULL) {
             pakka_die("Cannot open destination path '%s'", destination);
         }
-        fprintf(stderr, "[trace] op_extract: realpath -> %s\n", realdest);
-        fflush(stderr);
     } else {
-        fprintf(stderr, "[trace] op_extract: calling pakka_platform_getcwd\n");
-        fflush(stderr);
         if (pakka_platform_getcwd(realdest, OS_PATH_MAX) == NULL) {
             pakka_die("Cannot get current working directory");
         }
-        fprintf(stderr, "[trace] op_extract: getcwd -> %s\n", realdest);
-        fflush(stderr);
     }
-    fprintf(stderr, "[trace] op_extract: calling pakka_platform_stat\n");
-    fflush(stderr);
     if (pakka_platform_stat(realdest, &sb) != 0) {
         pakka_die("Cannot stat destination '%s'", realdest);
     }
-    fprintf(stderr, "[trace] op_extract: stat ok\n");
-    fflush(stderr);
     if (!S_ISDIR(sb.st_mode)) {
         pakka_die("Destination '%s' is not a directory", realdest);
     }
@@ -820,16 +810,9 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             name = sanitized;
         }
 
-        fprintf(stderr, "[trace] extract idx=%zu name=%s\n", idx, name);
-        fflush(stderr);
         printf("Writing %" PRIu64 " bytes to %s/%s\n", size, realdest, name);
 
-        fprintf(stderr, "[trace] extract idx=%zu calling open_extract_target\n", idx);
-        fflush(stderr);
         tfd = pakka_platform_open_extract_target(realdest, name);
-        fprintf(stderr, "[trace] extract idx=%zu open_extract_target returned %p\n",
-                idx, (void *)tfd);
-        fflush(stderr);
         if (tfd == NULL) {
             pakka_die("Cannot open %s/%s for writing "
                        "(symlink in path or filesystem error)",
@@ -842,44 +825,28 @@ static void op_extract(pakka_archive_t *pak, char *destination,
              * would re-read the first match for every iteration of this
              * loop. The handle path is also a small perf win on every
              * format — no O(n) name scan per entry. */
-            fprintf(stderr, "[trace] extract idx=%zu calling pakka_open_entry_handle size=%" PRIu64 "\n", idx, size);
-            fflush(stderr);
             s = pakka_open_entry_handle(pak, entry, &reader, &err);
-            fprintf(stderr, "[trace] extract idx=%zu pakka_open_entry_handle -> %d\n", idx, (int)s);
-            fflush(stderr);
             if (s != PAKKA_OK) {
                 fclose(tfd);
                 fail_from_err(&err);
             }
             for (;;) {
-                fprintf(stderr, "[trace] extract idx=%zu calling pakka_reader_read\n", idx);
-                fflush(stderr);
                 s = pakka_reader_read(reader, buf, sizeof(buf), &nread, &err);
-                fprintf(stderr, "[trace] extract idx=%zu pakka_reader_read -> s=%d nread=%zu\n", idx, (int)s, nread);
-                fflush(stderr);
                 if (s != PAKKA_OK) {
                     pakka_reader_close(reader);
                     fclose(tfd);
                     fail_from_err(&err);
                 }
                 if (nread == 0) break;
-                fprintf(stderr, "[trace] extract idx=%zu calling fwrite n=%zu\n", idx, nread);
-                fflush(stderr);
                 if (fwrite(buf, 1, nread, tfd) != nread) {
                     int werr = errno;
                     pakka_reader_close(reader);
                     fclose(tfd);
                     pakka_die_e(werr, "Cannot write entry '%s'", name);
                 }
-                fprintf(stderr, "[trace] extract idx=%zu fwrite ok\n", idx);
-                fflush(stderr);
             }
-            fprintf(stderr, "[trace] extract idx=%zu calling pakka_reader_close\n", idx);
-            fflush(stderr);
             pakka_reader_close(reader);
         }
-        fprintf(stderr, "[trace] extract idx=%zu calling fclose(tfd)\n", idx);
-        fflush(stderr);
 
         if (fclose(tfd) != 0) {
             /* Buffered disk-full / NFS / quota failures first surface
@@ -888,11 +855,7 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             int close_errno = errno;
             pakka_die_e(close_errno, "Cannot finalize %s/%s", realdest, name);
         }
-        fprintf(stderr, "[trace] extract idx=%zu fclose ok\n", idx);
-        fflush(stderr);
     }
-    fprintf(stderr, "[trace] op_extract: returning normally\n");
-    fflush(stderr);
 
     free(should_extract);
     free(path_matched);

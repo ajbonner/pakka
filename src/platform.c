@@ -472,9 +472,6 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
     size_t seg_len;
     int is_leaf;
 
-    fprintf(stderr, "[trace] oet: dest=%s rel=%s\n", dest_dir, rel_path);
-    fflush(stderr);
-
     if (dest_dir == NULL || rel_path == NULL) return NULL;
     if (strlen(dest_dir) >= sizeof(path)) return NULL;
     strcpy(path, dest_dir);
@@ -495,25 +492,16 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
                 return NULL;
             }
 
-            fprintf(stderr, "[trace] oet: seg path=%s leaf=%d\n", path, is_leaf);
-            fflush(stderr);
-
             /* Convert the assembled UTF-8 path once per segment for
              * the W-suffixed Win32 calls below. Invalid UTF-8 in an
              * entry name (legacy PAK with non-UTF-8 bytes) fails here
              * — the caller can map that to a substitution / warning
              * policy. */
             if (u8_to_w(path, wpath, sizeof(wpath) / sizeof(wpath[0])) < 0) {
-                fprintf(stderr, "[trace] oet: u8_to_w failed errno=%d\n", errno);
-                fflush(stderr);
                 return NULL;
             }
 
-            fprintf(stderr, "[trace] oet: calling GetFileAttributesW\n");
-            fflush(stderr);
             attr = GetFileAttributesW(wpath);
-            fprintf(stderr, "[trace] oet: GetFileAttributesW -> %lu\n", (unsigned long)attr);
-            fflush(stderr);
             if (attr != INVALID_FILE_ATTRIBUTES) {
                 /* Existing component: refuse if it's a reparse point
                  * (junction, mount point, symlink). Brief TOCTOU window
@@ -539,14 +527,7 @@ FILE *pakka_platform_open_extract_target(const char *dest_dir, const char *rel_p
             }
 
             if (is_leaf) {
-                FILE *fp;
-                fprintf(stderr, "[trace] oet: calling _wfopen wb\n");
-                fflush(stderr);
-                fp = _wfopen(wpath, L"wb");
-                fprintf(stderr, "[trace] oet: _wfopen -> %p errno=%d\n",
-                        (void *)fp, errno);
-                fflush(stderr);
-                return fp;
+                return _wfopen(wpath, L"wb");
             }
 
             seg = p + 1;
