@@ -72,44 +72,48 @@ add_test(NAME dk_codec_test COMMAND dk_codec_test)
 pakka_add_test_exe(proc_self_test proc_self_test.c)
 add_test(NAME proc_self_test COMMAND proc_self_test)
 
-# large_file_test: 32-bit fseek/ftell ceiling regression. C peer of
-# test/large_file.bats. Needs PAKKA env pointing at the pakka binary;
-# the scratch dir is absolute so the 2.6 GB sparse fixture lives in a
-# known location regardless of CWD at test invocation time.
+# large_file_test: 32-bit fseek/ftell ceiling regression. Synthesizes a
+# 2.6 GB sparse pak whose directory sits above LONG_MAX. Needs PAKKA env
+# pointing at the pakka binary; the scratch dir is absolute so the
+# sparse fixture lives in a known location regardless of CWD at test
+# invocation time.
 pakka_add_test_exe(large_file_test large_file_test.c)
 add_test(NAME large_file_test COMMAND large_file_test)
 set_tests_properties(large_file_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;LARGE_FILE_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/large_file")
 
-# pk4_test: PK4 (Doom 3) container — partial C peer of test/pk4.bats.
-# Covers the 4 cases that build fixtures via pakka itself.
+# pk4_test: PK4 (Doom 3) container — covers list / extract / verify /
+# create / delete-rebuild against fixtures built with pakka -c --compress
+# (the resulting DEFLATE entries exercise the same reader path a real
+# Doom 3 PK4 hits).
 pakka_add_test_exe(pk4_test pk4_test.c)
 add_test(NAME pk4_test COMMAND pk4_test)
 set_tests_properties(pk4_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;PK4_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pk4")
 
-# sin_test: SiN (Ritual, 1998) pak format. C peer of test/sin.bats —
-# all 10 cases ported, with an inline binary writer for the SPAK
-# synthesis cases.
+# sin_test: SiN (Ritual, 1998) pak format. Inline binary writer for the
+# SPAK synthesis cases; the other cases drive pakka itself to build
+# fixtures.
 pakka_add_test_exe(sin_test sin_test.c)
 add_test(NAME sin_test COMMAND sin_test)
 set_tests_properties(sin_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;SIN_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/sin")
 
-# wad_test: Doom WAD format. C peer of test/wad.bats — all 20 cases
-# ported, with an inline WAD writer + header inspection helpers.
+# wad_test: Doom WAD format. Inline WAD writer + header inspection
+# helpers; IWAD / PWAD / lump-directory coverage.
 pakka_add_test_exe(wad_test wad_test.c)
 add_test(NAME wad_test COMMAND wad_test)
 set_tests_properties(wad_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;WAD_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/wad")
 
-# dk_test: Daikatana pak format. C peer of test/dk.bats — all 18 cases
-# ported, including the real-fixture cross-validation against
-# test/fixtures/dk/user.pak (REPO_ROOT env points at the source tree).
+# dk_test: Daikatana pak format. Inline DK binary writer (72-byte
+# entries, literal-run opcode encoder) + directory probe + real-fixture
+# cross-validation against test/fixtures/dk/user.pak (REPO_ROOT env
+# points at the source tree).
 pakka_add_test_exe(dk_test dk_test.c)
 add_test(NAME dk_test COMMAND dk_test)
 set_tests_properties(dk_test PROPERTIES
@@ -154,9 +158,10 @@ set_tests_properties(pak_goldsrc_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;GOLDSRC_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/goldsrc")
 
-# unicode_paths_test: UTF-8 path handling. C peer of test/unicode_paths.bats.
-# Exercises proc.c's CreateProcessW + UTF-8 → UTF-16 conversion on
-# Windows so the Cyrillic argv bytes reach pakka's wmain correctly.
+# unicode_paths_test: UTF-8 path handling. Exercises proc.c's
+# CreateProcessW + UTF-8 → UTF-16 conversion on Windows so the Cyrillic
+# argv bytes reach pakka's wmain correctly; on POSIX exercises the
+# CP1251 substitution / sanitization paths.
 pakka_add_test_exe(unicode_paths_test unicode_paths_test.c)
 add_test(NAME unicode_paths_test COMMAND unicode_paths_test)
 set_tests_properties(unicode_paths_test PROPERTIES

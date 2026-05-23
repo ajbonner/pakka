@@ -409,45 +409,42 @@ $(PROC_SELF_TEST): test/proc_self_test.c $(TEST_SUPPORT_LIB)
 proc_self_test: $(PROC_SELF_TEST)
 
 # Large-file regression — 32-bit fseek/ftell ceiling. Synthesizes a
-# 2.6 GB sparse pak whose directory sits above LONG_MAX. C peer of
-# test/large_file.bats.
+# 2.6 GB sparse pak whose directory sits above LONG_MAX.
 LARGE_FILE_TEST = $(TEST_DIR)/large_file_test
 $(LARGE_FILE_TEST): test/large_file_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/large_file_test.d -o $@ test/large_file_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 large_file_test: $(LARGE_FILE_TEST)
 
-# PK4 (Doom 3) container format tests. Partial C peer of test/pk4.bats —
-# covers the 4 cases that build fixtures via pakka itself; the 3 bats
-# cases that depend on external /usr/bin/zip stay in pk4.bats during
-# the migration window.
+# PK4 (Doom 3) container format tests. Builds DEFLATE fixtures via
+# pakka -c --compress; covers list / extract / verify / create /
+# delete-rebuild against the resulting archives.
 PK4_TEST = $(TEST_DIR)/pk4_test
 $(PK4_TEST): test/pk4_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk4_test.d -o $@ test/pk4_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pk4_test: $(PK4_TEST)
 
-# SiN pak format tests. C peer of test/sin.bats. Inline binary writer
-# for the 3 cases that synthesize SPAK paks directly; the other 7 use
-# pakka itself for fixtures.
+# SiN pak format tests. Inline binary writer for the cases that
+# synthesize SPAK paks directly; the rest drive pakka itself to build
+# fixtures.
 SIN_TEST = $(TEST_DIR)/sin_test
 $(SIN_TEST): test/sin_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/sin_test.d -o $@ test/sin_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 sin_test: $(SIN_TEST)
 
-# WAD (Doom IWAD/PWAD) tests. C peer of test/wad.bats. Inline WAD
-# binary writer + header inspection; covers all 20 bats cases.
+# WAD (Doom IWAD/PWAD) tests. Inline WAD binary writer + header
+# inspection; covers IWAD / PWAD / lump-directory paths.
 WAD_TEST = $(TEST_DIR)/wad_test
 $(WAD_TEST): test/wad_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/wad_test.d -o $@ test/wad_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 wad_test: $(WAD_TEST)
 
-# Daikatana pak format tests. C peer of test/dk.bats. Inline DK binary
-# writer (72-byte entries, literal-run opcode encoder) + directory
-# probe; covers all 19 bats cases including the real-fixture cross-
-# validation against test/fixtures/dk/user.pak.
+# Daikatana pak format tests. Inline DK binary writer (72-byte
+# entries, literal-run opcode encoder) + directory probe; includes the
+# real-fixture cross-validation against test/fixtures/dk/user.pak.
 DK_TEST = $(TEST_DIR)/dk_test
 $(DK_TEST): test/dk_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
@@ -490,10 +487,10 @@ $(PAK_GOLDSRC_TEST): test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pak_goldsrc_test.d -o $@ test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pak_goldsrc_test: $(PAK_GOLDSRC_TEST)
 
-# Unicode path handling. C peer of test/unicode_paths.bats. Exercises
-# UTF-8 argv flow on Windows (which proc.c handles via CreateProcessW
-# + MultiByteToWideChar at the boundary) plus the legacy CP1251
-# substitution / sanitization paths on POSIX too.
+# Unicode path handling. Exercises the UTF-8 argv flow on Windows
+# (proc.c handles it via CreateProcessW + MultiByteToWideChar at the
+# boundary) plus the legacy CP1251 substitution / sanitization paths
+# on POSIX too.
 UNICODE_PATHS_TEST = $(TEST_DIR)/unicode_paths_test
 $(UNICODE_PATHS_TEST): test/unicode_paths_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
