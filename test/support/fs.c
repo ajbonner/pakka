@@ -11,10 +11,50 @@
 #include <direct.h>
 #include <io.h>
 #include <windows.h>
-#define MKDIR(p) _mkdir(p)
 #else
 #include <dirent.h>
 #include <unistd.h>
+#endif
+
+#ifdef _WIN32
+/* Convert a UTF-8 path to UTF-16 for the wide-API syscalls. fopen /
+ * mkdir / stat on Windows interpret their char* argument as CP_ACP
+ * (CP1252 on most installs), which mangles UTF-8 byte sequences and
+ * breaks pakka's tests where the test-side file creation must match
+ * the UTF-16 path pakka.exe (via wmain) actually opens. Caller frees. */
+static wchar_t *path_to_wide(const char *utf8)
+{
+    if (!utf8) {
+        return NULL;
+    }
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (n <= 0) {
+        return NULL;
+    }
+    wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+    if (!w) {
+        return NULL;
+    }
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+static int wide_mkdir(const char *path)
+{
+    wchar_t *w = path_to_wide(path);
+    if (!w) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc = _wmkdir(w);
+    free(w);
+    return rc;
+}
+#define MKDIR(p) wide_mkdir(p)
+#else
 #define MKDIR(p) mkdir((p), 0755)
 #endif
 
@@ -80,7 +120,14 @@ int fs_mkdir_p(const char *path)
 
 unsigned char *fs_read_file(const char *path, size_t *out_len)
 {
+#ifdef _WIN32
+    wchar_t *wpath = path_to_wide(path);
+    if (!wpath) return NULL;
+    FILE *f = _wfopen(wpath, L"rb");
+    free(wpath);
+#else
     FILE *f = fopen(path, "rb");
+#endif
     if (!f) {
         return NULL;
     }
@@ -115,7 +162,14 @@ unsigned char *fs_read_file(const char *path, size_t *out_len)
 
 int fs_write_file(const char *path, const void *data, size_t len)
 {
+#ifdef _WIN32
+    wchar_t *wpath = path_to_wide(path);
+    if (!wpath) return -1;
+    FILE *f = _wfopen(wpath, L"wb");
+    free(wpath);
+#else
     FILE *f = fopen(path, "wb");
+#endif
     if (!f) {
         return -1;
     }
@@ -129,26 +183,38 @@ int fs_write_file(const char *path, const void *data, size_t len)
 
 int fs_is_file(const char *path)
 {
+#ifdef _WIN32
+    wchar_t *wpath = path_to_wide(path);
+    if (!wpath) return 0;
+    struct _stat64 st;
+    int            rc = _wstat64(wpath, &st);
+    free(wpath);
+    if (rc != 0) return 0;
+    return (st.st_mode & _S_IFREG) != 0;
+#else
     struct stat st;
     if (stat(path, &st) != 0) {
         return 0;
     }
-#ifdef _WIN32
-    return (st.st_mode & _S_IFREG) != 0;
-#else
     return S_ISREG(st.st_mode);
 #endif
 }
 
 int fs_is_dir(const char *path)
 {
+#ifdef _WIN32
+    wchar_t *wpath = path_to_wide(path);
+    if (!wpath) return 0;
+    struct _stat64 st;
+    int            rc = _wstat64(wpath, &st);
+    free(wpath);
+    if (rc != 0) return 0;
+    return (st.st_mode & _S_IFDIR) != 0;
+#else
     struct stat st;
     if (stat(path, &st) != 0) {
         return 0;
     }
-#ifdef _WIN32
-    return (st.st_mode & _S_IFDIR) != 0;
-#else
     return S_ISDIR(st.st_mode);
 #endif
 }
