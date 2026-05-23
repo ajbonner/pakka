@@ -436,6 +436,14 @@ $(SIN_TEST): test/sin_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/sin_test.d -o $@ test/sin_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 sin_test: $(SIN_TEST)
 
+# WAD (Doom IWAD/PWAD) tests. C peer of test/wad.bats. Inline WAD
+# binary writer + header inspection; covers all 20 bats cases.
+WAD_TEST = $(TEST_DIR)/wad_test
+$(WAD_TEST): test/wad_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/wad_test.d -o $@ test/wad_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+wad_test: $(WAD_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
@@ -444,6 +452,7 @@ sin_test: $(SIN_TEST)
 -include $(TEST_DIR)/large_file_test.d
 -include $(TEST_DIR)/pk4_test.d
 -include $(TEST_DIR)/sin_test.d
+-include $(TEST_DIR)/wad_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -475,7 +484,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
@@ -484,6 +493,8 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) PK4_TEST_SCRATCH=$(abspath $(TEST_DIR))/pk4 $(PK4_TEST)
 	@echo "==> sin_test"
 	@PAKKA=$(abspath $(TARGET)) SIN_TEST_SCRATCH=$(abspath $(TEST_DIR))/sin $(SIN_TEST)
+	@echo "==> wad_test"
+	@PAKKA=$(abspath $(TARGET)) WAD_TEST_SCRATCH=$(abspath $(TEST_DIR))/wad $(WAD_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

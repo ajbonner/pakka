@@ -75,3 +75,11 @@ add_test(NAME sin_test COMMAND sin_test)
 set_tests_properties(sin_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;SIN_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/sin")
+
+# wad_test: Doom WAD format. C peer of test/wad.bats — all 20 cases
+# ported, with an inline WAD writer + header inspection helpers.
+pakka_add_test_exe(wad_test wad_test.c)
+add_test(NAME wad_test COMMAND wad_test)
+set_tests_properties(wad_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;WAD_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/wad")
