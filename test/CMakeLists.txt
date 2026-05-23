@@ -58,3 +58,11 @@ add_test(NAME large_file_test COMMAND large_file_test)
 set_tests_properties(large_file_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;LARGE_FILE_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/large_file")
+
+# pk4_test: PK4 (Doom 3) container — partial C peer of test/pk4.bats.
+# Covers the 4 cases that build fixtures via pakka itself.
+pakka_add_test_exe(pk4_test pk4_test.c)
+add_test(NAME pk4_test COMMAND pk4_test)
+set_tests_properties(pk4_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;PK4_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pk4")

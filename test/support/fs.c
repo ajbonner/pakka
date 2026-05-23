@@ -10,8 +10,10 @@
 #ifdef _WIN32
 #include <direct.h>
 #include <io.h>
+#include <windows.h>
 #define MKDIR(p) _mkdir(p)
 #else
+#include <dirent.h>
 #include <unistd.h>
 #define MKDIR(p) mkdir((p), 0755)
 #endif
@@ -148,5 +150,218 @@ int fs_is_dir(const char *path)
     return (st.st_mode & _S_IFDIR) != 0;
 #else
     return S_ISDIR(st.st_mode);
+#endif
+}
+
+/* ---------- fs_diff_tree ---------- */
+
+typedef struct {
+    char **names;
+    size_t count;
+    size_t cap;
+} entry_list_t;
+
+static int entry_list_add(entry_list_t *el, const char *name)
+{
+    if (el->count + 1 > el->cap) {
+        size_t new_cap = el->cap ? el->cap * 2 : 16;
+        char **p       = (char **)realloc(el->names, new_cap * sizeof(char *));
+        if (!p) {
+            return -1;
+        }
+        el->names = p;
+        el->cap   = new_cap;
+    }
+    el->names[el->count] = strdup(name);
+    if (!el->names[el->count]) {
+        return -1;
+    }
+    el->count++;
+    return 0;
+}
+
+static void entry_list_free(entry_list_t *el)
+{
+    if (!el->names) {
+        return;
+    }
+    for (size_t i = 0; i < el->count; i++) {
+        free(el->names[i]);
+    }
+    free(el->names);
+    el->names = NULL;
+    el->count = 0;
+    el->cap   = 0;
+}
+
+static int compare_str_ptr(const void *a, const void *b)
+{
+    return strcmp(*(const char *const *)a, *(const char *const *)b);
+}
+
+static int list_dir(const char *path, entry_list_t *out)
+{
+#ifdef _WIN32
+    char pattern[1024];
+    snprintf(pattern, sizeof(pattern), "%s\\*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE           h = FindFirstFileA(pattern, &fd);
+    if (h == INVALID_HANDLE_VALUE) {
+        return -1;
+    }
+    do {
+        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+            continue;
+        }
+        if (entry_list_add(out, fd.cFileName) < 0) {
+            FindClose(h);
+            return -1;
+        }
+    } while (FindNextFileA(h, &fd));
+    FindClose(h);
+#else
+    DIR *d = opendir(path);
+    if (!d) {
+        return -1;
+    }
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) {
+            continue;
+        }
+        if (entry_list_add(out, e->d_name) < 0) {
+            closedir(d);
+            return -1;
+        }
+    }
+    closedir(d);
+#endif
+    qsort(out->names, out->count, sizeof(char *), compare_str_ptr);
+    return 0;
+}
+
+static int compare_file_contents(const char *a, const char *b)
+{
+    size_t         alen = 0, blen = 0;
+    unsigned char *ad   = fs_read_file(a, &alen);
+    unsigned char *bd   = fs_read_file(b, &blen);
+    int            rc   = 0;
+    if (!ad || !bd) {
+        rc = -1;
+    } else if (alen != blen || memcmp(ad, bd, alen) != 0) {
+        rc = 1;
+    }
+    free(ad);
+    free(bd);
+    return rc;
+}
+
+int fs_diff_tree(const char *a, const char *b)
+{
+    entry_list_t la = {0};
+    entry_list_t lb = {0};
+
+    if (list_dir(a, &la) != 0) {
+        fprintf(stderr, "fs_diff_tree: can't list %s\n", a);
+        entry_list_free(&la);
+        return -1;
+    }
+    if (list_dir(b, &lb) != 0) {
+        fprintf(stderr, "fs_diff_tree: can't list %s\n", b);
+        entry_list_free(&la);
+        entry_list_free(&lb);
+        return -1;
+    }
+
+    int rc = 0;
+
+    if (la.count != lb.count) {
+        fprintf(stderr,
+                "fs_diff_tree: entry-count mismatch: %s has %zu, %s has %zu\n",
+                a, la.count, b, lb.count);
+        rc = 1;
+        goto out;
+    }
+
+    for (size_t i = 0; i < la.count; i++) {
+        if (strcmp(la.names[i], lb.names[i]) != 0) {
+            fprintf(stderr,
+                    "fs_diff_tree: name mismatch at index %zu: %s vs %s\n",
+                    i, la.names[i], lb.names[i]);
+            rc = 1;
+            goto out;
+        }
+        char *pa = fs_join(a, la.names[i]);
+        char *pb = fs_join(b, lb.names[i]);
+        if (!pa || !pb) {
+            free(pa);
+            free(pb);
+            rc = -1;
+            goto out;
+        }
+
+        int pa_is_dir = fs_is_dir(pa);
+        int pb_is_dir = fs_is_dir(pb);
+        if (pa_is_dir && pb_is_dir) {
+            rc = fs_diff_tree(pa, pb);
+        } else if (fs_is_file(pa) && fs_is_file(pb)) {
+            rc = compare_file_contents(pa, pb);
+            if (rc != 0) {
+                fprintf(stderr, "fs_diff_tree: content differs: %s vs %s\n", pa, pb);
+            }
+        } else {
+            fprintf(stderr,
+                    "fs_diff_tree: file/dir type mismatch: %s vs %s\n", pa, pb);
+            rc = 1;
+        }
+        free(pa);
+        free(pb);
+        if (rc != 0) {
+            goto out;
+        }
+    }
+
+out:
+    entry_list_free(&la);
+    entry_list_free(&lb);
+    return rc;
+}
+
+int fs_rmtree(const char *path)
+{
+    if (fs_is_file(path)) {
+        return remove(path);
+    }
+    if (!fs_is_dir(path)) {
+        return 0; /* nothing there — treat as success */
+    }
+
+    entry_list_t entries = {0};
+    if (list_dir(path, &entries) != 0) {
+        return -1;
+    }
+
+    int rc = 0;
+    for (size_t i = 0; i < entries.count; i++) {
+        char *child = fs_join(path, entries.names[i]);
+        if (!child) {
+            rc = -1;
+            break;
+        }
+        rc = fs_rmtree(child);
+        free(child);
+        if (rc != 0) {
+            break;
+        }
+    }
+    entry_list_free(&entries);
+    if (rc != 0) {
+        return rc;
+    }
+
+#ifdef _WIN32
+    return _rmdir(path);
+#else
+    return rmdir(path);
 #endif
 }

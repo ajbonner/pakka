@@ -417,12 +417,23 @@ $(LARGE_FILE_TEST): test/large_file_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/large_file_test.d -o $@ test/large_file_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 large_file_test: $(LARGE_FILE_TEST)
 
+# PK4 (Doom 3) container format tests. Partial C peer of test/pk4.bats —
+# covers the 4 cases that build fixtures via pakka itself; the 3 bats
+# cases that depend on external /usr/bin/zip stay in pk4.bats during
+# the migration window.
+PK4_TEST = $(TEST_DIR)/pk4_test
+$(PK4_TEST): test/pk4_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk4_test.d -o $@ test/pk4_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+pk4_test: $(PK4_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
 -include $(TEST_SUPPORT_OBJ:.o=.d)
 -include $(TEST_DIR)/proc_self_test.d
 -include $(TEST_DIR)/large_file_test.d
+-include $(TEST_DIR)/pk4_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -454,11 +465,13 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
 	@PAKKA=$(abspath $(TARGET)) LARGE_FILE_SCRATCH=$(abspath $(TEST_DIR))/large_file $(LARGE_FILE_TEST)
+	@echo "==> pk4_test"
+	@PAKKA=$(abspath $(TARGET)) PK4_TEST_SCRATCH=$(abspath $(TEST_DIR))/pk4 $(PK4_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
