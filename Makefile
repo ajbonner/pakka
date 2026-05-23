@@ -490,6 +490,16 @@ $(PAK_GOLDSRC_TEST): test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pak_goldsrc_test.d -o $@ test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pak_goldsrc_test: $(PAK_GOLDSRC_TEST)
 
+# Unicode path handling. C peer of test/unicode_paths.bats. Exercises
+# UTF-8 argv flow on Windows (which proc.c handles via CreateProcessW
+# + MultiByteToWideChar at the boundary) plus the legacy CP1251
+# substitution / sanitization paths on POSIX too.
+UNICODE_PATHS_TEST = $(TEST_DIR)/unicode_paths_test
+$(UNICODE_PATHS_TEST): test/unicode_paths_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/unicode_paths_test.d -o $@ test/unicode_paths_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+unicode_paths_test: $(UNICODE_PATHS_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
@@ -504,6 +514,7 @@ pak_goldsrc_test: $(PAK_GOLDSRC_TEST)
 -include $(TEST_DIR)/pk3_test.d
 -include $(TEST_DIR)/pk3_q3demo_test.d
 -include $(TEST_DIR)/pak_goldsrc_test.d
+-include $(TEST_DIR)/unicode_paths_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -535,7 +546,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) $(PK3_Q3DEMO_TEST) $(PAK_GOLDSRC_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) $(PK3_Q3DEMO_TEST) $(PAK_GOLDSRC_TEST) $(UNICODE_PATHS_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
@@ -556,6 +567,8 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) Q3DEMO_TEST_SCRATCH=$(abspath $(TEST_DIR))/q3demo_scratch $(PK3_Q3DEMO_TEST)
 	@echo "==> pak_goldsrc_test"
 	@PAKKA=$(abspath $(TARGET)) GOLDSRC_TEST_SCRATCH=$(abspath $(TEST_DIR))/goldsrc_scratch $(PAK_GOLDSRC_TEST)
+	@echo "==> unicode_paths_test"
+	@PAKKA=$(abspath $(TARGET)) UNICODE_TEST_SCRATCH=$(abspath $(TEST_DIR))/unicode $(UNICODE_PATHS_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

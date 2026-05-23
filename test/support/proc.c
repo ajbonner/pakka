@@ -267,98 +267,135 @@ static unsigned __stdcall reader_thread(void *arg)
     return 0;
 }
 
-/* Build a CreateProcess cmdline from argv following the MSVCRT parsing
- * rules: backslashes are literal except when preceding a double-quote,
- * in which case 2N backslashes + " emits N literal backslashes and a
- * literal quote. */
-static char *build_cmdline(const char *const argv[])
+/* Convert UTF-8 → UTF-16 via MultiByteToWideChar. Caller frees. NULL
+ * input returns NULL. */
+static wchar_t *utf8_to_wide(const char *utf8)
 {
-    size_t cap = 256;
-    size_t len = 0;
-    char  *out = (char *)malloc(cap);
+    if (!utf8) return NULL;
+    int n = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, NULL, 0);
+    if (n <= 0) return NULL;
+    wchar_t *w = (wchar_t *)malloc((size_t)n * sizeof(wchar_t));
+    if (!w) return NULL;
+    if (MultiByteToWideChar(CP_UTF8, 0, utf8, -1, w, n) <= 0) {
+        free(w);
+        return NULL;
+    }
+    return w;
+}
+
+/* Build a CreateProcessW cmdline from argv (UTF-8) following MSVCRT
+ * parsing rules: backslashes are literal except when preceding a
+ * double-quote, in which case 2N backslashes + " emits N literal
+ * backslashes and a literal quote. Each argv entry is UTF-8 → UTF-16
+ * converted first; the quoting walk then operates on wide chars (all
+ * structural characters — space, tab, ", \\ — are ASCII so the rules
+ * carry across unchanged). */
+static wchar_t *build_cmdline_w(const char *const argv[])
+{
+    size_t   cap = 256;
+    size_t   len = 0;
+    wchar_t *out = (wchar_t *)malloc(cap * sizeof(wchar_t));
     if (!out) {
         return NULL;
     }
 
-#define ENSURE(n)                                                          \
+#define ENSURE_W(n)                                                        \
     do {                                                                   \
         if (len + (n) + 1 > cap) {                                         \
             size_t newcap = cap;                                           \
             while (newcap < len + (n) + 1) newcap *= 2;                    \
-            char *_p = (char *)realloc(out, newcap);                       \
+            wchar_t *_p = (wchar_t *)realloc(out, newcap * sizeof(wchar_t)); \
             if (!_p) { free(out); return NULL; }                           \
             out = _p; cap = newcap;                                        \
         }                                                                  \
     } while (0)
 
     for (size_t i = 0; argv[i]; i++) {
-        const char *a = argv[i];
-        if (i > 0) {
-            ENSURE(1);
-            out[len++] = ' ';
+        wchar_t *aw = utf8_to_wide(argv[i]);
+        if (!aw) {
+            free(out);
+            return NULL;
         }
-        int needs_quote = (*a == '\0' || strpbrk(a, " \t\"") != NULL);
+        if (i > 0) {
+            ENSURE_W(1);
+            out[len++] = L' ';
+        }
+        int needs_quote = (*aw == L'\0' || wcspbrk(aw, L" \t\"") != NULL);
         if (needs_quote) {
-            ENSURE(1);
-            out[len++] = '"';
+            ENSURE_W(1);
+            out[len++] = L'"';
         }
         size_t backslashes = 0;
-        for (size_t j = 0; a[j]; j++) {
-            if (a[j] == '\\') {
+        for (size_t j = 0; aw[j]; j++) {
+            if (aw[j] == L'\\') {
                 backslashes++;
-            } else if (a[j] == '"') {
-                ENSURE(backslashes * 2 + 2);
-                for (size_t k = 0; k < backslashes * 2; k++) out[len++] = '\\';
-                out[len++] = '\\';
-                out[len++] = '"';
+            } else if (aw[j] == L'"') {
+                ENSURE_W(backslashes * 2 + 2);
+                for (size_t k = 0; k < backslashes * 2; k++) out[len++] = L'\\';
+                out[len++] = L'\\';
+                out[len++] = L'"';
                 backslashes = 0;
             } else {
-                ENSURE(backslashes + 1);
-                for (size_t k = 0; k < backslashes; k++) out[len++] = '\\';
+                ENSURE_W(backslashes + 1);
+                for (size_t k = 0; k < backslashes; k++) out[len++] = L'\\';
                 backslashes  = 0;
-                out[len++]   = a[j];
+                out[len++]   = aw[j];
             }
         }
         if (needs_quote) {
-            ENSURE(backslashes * 2 + 1);
-            for (size_t k = 0; k < backslashes * 2; k++) out[len++] = '\\';
-            out[len++] = '"';
+            ENSURE_W(backslashes * 2 + 1);
+            for (size_t k = 0; k < backslashes * 2; k++) out[len++] = L'\\';
+            out[len++] = L'"';
         } else {
-            ENSURE(backslashes);
-            for (size_t k = 0; k < backslashes; k++) out[len++] = '\\';
+            ENSURE_W(backslashes);
+            for (size_t k = 0; k < backslashes; k++) out[len++] = L'\\';
         }
+        free(aw);
     }
-    ENSURE(1);
-    out[len] = '\0';
+    ENSURE_W(1);
+    out[len] = L'\0';
     return out;
-#undef ENSURE
+#undef ENSURE_W
 }
 
-static char *build_env_block(const char *const *envp)
+/* Build a CreateProcessW lpEnvironment block: wchar_t array with each
+ * "K=V" NUL-terminated, double-NUL at end. Each entry is UTF-8 → UTF-16
+ * converted from the input array. */
+static wchar_t *build_env_block_w(const char *const *envp)
 {
-    /* Layout: "K1=V1\0K2=V2\0...\0Kn=Vn\0\0" — entries separated by a
-     * NUL, block ended by a second NUL. For an empty envp the block
-     * is just "\0\0" (two NULs). CreateProcessA docs are explicit
-     * about the double-NUL terminator. Allocating +2 covers both
-     * cases — non-empty entries already end with a NUL from memcpy,
-     * but the explicit double-write is safer than reasoning about
-     * exactly which trailing NUL is the terminator. */
-    size_t total = 2;
-    for (size_t i = 0; envp[i]; i++) {
-        total += strlen(envp[i]) + 1;
+    /* First pass: convert each entry, accumulate lengths. */
+    size_t   n_entries = 0;
+    while (envp[n_entries]) n_entries++;
+
+    wchar_t **wide = (wchar_t **)calloc(n_entries + 1, sizeof(wchar_t *));
+    if (!wide) return NULL;
+    size_t total = 2; /* trailing double-NUL */
+    for (size_t i = 0; i < n_entries; i++) {
+        wide[i] = utf8_to_wide(envp[i]);
+        if (!wide[i]) {
+            for (size_t j = 0; j < i; j++) free(wide[j]);
+            free(wide);
+            return NULL;
+        }
+        total += wcslen(wide[i]) + 1;
     }
-    char *block = (char *)malloc(total);
+
+    wchar_t *block = (wchar_t *)malloc(total * sizeof(wchar_t));
     if (!block) {
+        for (size_t i = 0; i < n_entries; i++) free(wide[i]);
+        free(wide);
         return NULL;
     }
     size_t pos = 0;
-    for (size_t i = 0; envp[i]; i++) {
-        size_t len = strlen(envp[i]) + 1;
-        memcpy(block + pos, envp[i], len);
-        pos += len;
+    for (size_t i = 0; i < n_entries; i++) {
+        size_t l = wcslen(wide[i]) + 1; /* include NUL */
+        memcpy(block + pos, wide[i], l * sizeof(wchar_t));
+        pos += l;
+        free(wide[i]);
     }
-    block[pos]     = '\0';
-    block[pos + 1] = '\0';
+    free(wide);
+    block[pos]     = L'\0';
+    block[pos + 1] = L'\0';
     return block;
 }
 
@@ -399,11 +436,21 @@ int proc_run(const char *const argv[], const proc_opts_t *opts, proc_result_t *o
         SetHandleInformation(stderr_r, HANDLE_FLAG_INHERIT, 0);
     }
 
-    char *cmdline = build_cmdline(argv);
-    char *envblk  = o.envp ? build_env_block(o.envp) : NULL;
-    if (!cmdline || (o.envp && !envblk)) {
+    /* CreateProcessW + UTF-8 → UTF-16 conversion at the boundary lets
+     * the test runner pass UTF-8 byte sequences in argv / env / cwd
+     * without going through Windows ACP. Necessary for the
+     * unicode_paths suite — pakka itself uses wmain on Windows and
+     * receives wchar_t* argv from the OS's command-line parser, which
+     * handles wide bytes correctly. CreateProcessA would funnel through
+     * CP_ACP and mangle non-ASCII bytes on most installs (where ACP
+     * is CP1252, not UTF-8). */
+    wchar_t *cmdline = build_cmdline_w(argv);
+    wchar_t *envblk  = o.envp ? build_env_block_w(o.envp) : NULL;
+    wchar_t *cwd_w   = o.cwd ? utf8_to_wide(o.cwd) : NULL;
+    if (!cmdline || (o.envp && !envblk) || (o.cwd && !cwd_w)) {
         free(cmdline);
         free(envblk);
+        free(cwd_w);
         if (stdout_r) CloseHandle(stdout_r);
         if (stdout_w) CloseHandle(stdout_w);
         if (stderr_r) CloseHandle(stderr_r);
@@ -411,7 +458,7 @@ int proc_run(const char *const argv[], const proc_opts_t *opts, proc_result_t *o
         return -1;
     }
 
-    STARTUPINFOA si = {0};
+    STARTUPINFOW si = {0};
     si.cb           = sizeof(si);
     si.dwFlags      = STARTF_USESTDHANDLES;
     si.hStdInput    = GetStdHandle(STD_INPUT_HANDLE);
@@ -419,10 +466,12 @@ int proc_run(const char *const argv[], const proc_opts_t *opts, proc_result_t *o
     si.hStdError    = stderr_w;
 
     PROCESS_INFORMATION pi = {0};
-    BOOL                ok = CreateProcessA(NULL, cmdline, NULL, NULL, TRUE,
-                                            0, envblk, o.cwd, &si, &pi);
+    BOOL                ok = CreateProcessW(NULL, cmdline, NULL, NULL, TRUE,
+                                            CREATE_UNICODE_ENVIRONMENT,
+                                            envblk, cwd_w, &si, &pi);
     free(cmdline);
     free(envblk);
+    free(cwd_w);
 
     /* Parent must close the write ends so the read ends see EOF when
      * the child exits. */

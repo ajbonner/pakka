@@ -44,17 +44,24 @@ endfunction()
 # c_api_test takes two positional args: <pak0.pak> <scratch_dir>. The
 # fixture lives at ${CMAKE_SOURCE_DIR}/build/test/pak0.pak (downloaded
 # via `make fixture` on Unix; fixtures.ps1 on Windows will land it at
-# the same path). The scratch dir is per-test under the binary tree
-# so concurrent CI runs don't collide.
+# the same path). The scratch dir needs to be fresh every run — the
+# bats wrapper used `mktemp -d` for this; under CTest we use a fixture
+# test that rm -rf's + mkdir's the scratch dir before c_api_test runs.
 pakka_add_test_exe(c_api_test c_api_test.c)
+
+add_test(NAME _c_api_scratch_clean
+    COMMAND ${CMAKE_COMMAND} -E rm -rf ${CMAKE_BINARY_DIR}/test_scratch/c_api)
+add_test(NAME _c_api_scratch_mkdir
+    COMMAND ${CMAKE_COMMAND} -E make_directory ${CMAKE_BINARY_DIR}/test_scratch/c_api)
+set_tests_properties(_c_api_scratch_clean PROPERTIES FIXTURES_SETUP c_api_scratch)
+set_tests_properties(_c_api_scratch_mkdir PROPERTIES FIXTURES_SETUP c_api_scratch
+    DEPENDS _c_api_scratch_clean)
+
 add_test(NAME c_api_test
     COMMAND c_api_test
             ${CMAKE_SOURCE_DIR}/build/test/pak0.pak
             ${CMAKE_BINARY_DIR}/test_scratch/c_api)
-
-# Pre-create the c_api_test scratch dir at configure time; the binary
-# expects it to exist (it doesn't mkdir -p its argv[2]).
-file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test_scratch/c_api)
+set_tests_properties(c_api_test PROPERTIES FIXTURES_REQUIRED c_api_scratch)
 
 pakka_add_test_exe(dk_codec_test dk_codec_test.c)
 target_include_directories(dk_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
@@ -146,3 +153,12 @@ add_test(NAME pak_goldsrc_test COMMAND pak_goldsrc_test)
 set_tests_properties(pak_goldsrc_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;GOLDSRC_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/goldsrc")
+
+# unicode_paths_test: UTF-8 path handling. C peer of test/unicode_paths.bats.
+# Exercises proc.c's CreateProcessW + UTF-8 → UTF-16 conversion on
+# Windows so the Cyrillic argv bytes reach pakka's wmain correctly.
+pakka_add_test_exe(unicode_paths_test unicode_paths_test.c)
+add_test(NAME unicode_paths_test COMMAND unicode_paths_test)
+set_tests_properties(unicode_paths_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;UNICODE_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/unicode")
