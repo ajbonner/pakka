@@ -12,6 +12,7 @@
 #include "fs.h"
 #include "proc.h"
 #include "test_macros.h"
+#include "zip_build.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -380,6 +381,74 @@ static void test_list_invalid_utf8_renders_sanitized(void)
     free(dir);
 }
 
+static void test_pk3_bit11_set_with_invalid_utf8_rejected(void)
+{
+    /* CP1251 bytes "Тест.txt" — definitely not valid UTF-8 — packaged
+     * in a PK3 with GP bit 11 (0x0800) set, advertising UTF-8.
+     * pakka must reject the open and emit a "UTF-8 flag" /
+     * "not valid UTF-8" diagnostic. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("pk3_bit11_bad")), 0);
+    char *pak = fs_join(under_scratch("pk3_bit11_bad"), "bogus.pk3");
+
+    zip_single_t p = {0};
+    p.name         = CYR_CP1251_BYTES;
+    p.name_len     = sizeof(CYR_CP1251_BYTES);
+    p.payload      = NULL;
+    p.payload_len  = 0;
+    p.gp_flags     = 0x0800;
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
+
+    const char   *argv[] = {g_pakka_path, "-l", pak, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && (strstr(streams[s], "UTF-8 flag") ||
+                           strstr(streams[s], "not valid UTF-8"))) {
+            found = 1;
+        }
+    }
+    if (!found) {
+        fprintf(stderr, "    stdout: %s\n    stderr: %s\n",
+                r.stdout_buf ? r.stdout_buf : "",
+                r.stderr_buf ? r.stderr_buf : "");
+        proc_result_free(&r);
+        free(pak);
+        FAIL("expected 'UTF-8 flag' / 'not valid UTF-8' diagnostic");
+    }
+    proc_result_free(&r);
+    free(pak);
+}
+
+static void test_pk3_bit11_clear_cp437_decodes_via_fallback(void)
+{
+    /* 0xE1 in CP437 is U+00DF (ß), which UTF-8-encodes as 0xC3 0x9F.
+     * With GP bit 11 CLEAR, pakka decodes the name via the CP437
+     * fallback table and renders it as UTF-8 in the listing output. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("pk3_cp437")), 0);
+    char *pak = fs_join(under_scratch("pk3_cp437"), "cp437.pk3");
+
+    unsigned char name_byte = 0xE1;
+    zip_single_t  p         = {0};
+    p.name                  = &name_byte;
+    p.name_len              = 1;
+    p.payload               = NULL;
+    p.payload_len           = 0;
+    p.gp_flags              = 0x0000;
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", pak);
+    /* UTF-8 encoding of ß: 0xC3 0x9F. Must appear in the listing. */
+    unsigned char eszett_utf8[] = {0xC3, 0x9F};
+    EXPECT_TRUE(find_bytes((const unsigned char *)r.stdout_buf, r.stdout_len,
+                           eszett_utf8, sizeof(eszett_utf8)) >= 0);
+    proc_result_free(&r);
+    free(pak);
+}
+
 static void test_legacy_pak_collision_after_sanitization_detected(void)
 {
     /* Two CP1251 names that both sanitize to "____.txt" — different
@@ -447,6 +516,8 @@ int main(void)
     RUN_TEST(test_legacy_pak_extract_substitutes_invalid_utf8);
     RUN_TEST(test_list_invalid_utf8_renders_sanitized);
     RUN_TEST(test_legacy_pak_collision_after_sanitization_detected);
+    RUN_TEST(test_pk3_bit11_set_with_invalid_utf8_rejected);
+    RUN_TEST(test_pk3_bit11_clear_cp437_decodes_via_fallback);
 
     free(g_scratch);
     return t_summary();

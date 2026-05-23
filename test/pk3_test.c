@@ -10,6 +10,7 @@
 #include "fs.h"
 #include "proc.h"
 #include "test_macros.h"
+#include "zip_build.h"
 
 #include <stdint.h>
 #include <stdio.h>
@@ -33,127 +34,6 @@ static void put_u32_le(unsigned char *buf, size_t off, uint32_t v)
     buf[off + 1] = (unsigned char)((v >> 8) & 0xFF);
     buf[off + 2] = (unsigned char)((v >> 16) & 0xFF);
     buf[off + 3] = (unsigned char)((v >> 24) & 0xFF);
-}
-
-static uint16_t get_u16_le(const unsigned char *buf, size_t off)
-{
-    return (uint16_t)((uint16_t)buf[off] | ((uint16_t)buf[off + 1] << 8));
-}
-
-/* IEEE 802.3 CRC32 (reflected) — the variant ZIP uses. Lazy-init table
- * on first call. Standard polynomial 0xEDB88320. */
-static uint32_t crc32_table[256];
-static int      crc32_table_built;
-
-static void build_crc32_table(void)
-{
-    for (uint32_t i = 0; i < 256; i++) {
-        uint32_t c = i;
-        for (int k = 0; k < 8; k++) {
-            c = (c & 1u) ? (0xEDB88320u ^ (c >> 1)) : (c >> 1);
-        }
-        crc32_table[i] = c;
-    }
-    crc32_table_built = 1;
-}
-
-static uint32_t crc32_of(const void *data, size_t len)
-{
-    if (!crc32_table_built) build_crc32_table();
-    const unsigned char *p = (const unsigned char *)data;
-    uint32_t             c = 0xFFFFFFFFu;
-    for (size_t i = 0; i < len; i++) {
-        c = crc32_table[(c ^ p[i]) & 0xFFu] ^ (c >> 8);
-    }
-    return c ^ 0xFFFFFFFFu;
-}
-
-/* Parametric STORED single-entry ZIP. The bats python builders use
- * version 20, gp flags as configured by the caller, method as
- * configured, last-mod fields zeroed except a fixed 0x0021 internal
- * attrs sentinel preserved from the bats. csize/usize default to the
- * payload length but can be overridden for the "mismatch" cases. */
-typedef struct {
-    const void *name;
-    size_t      name_len;
-    const void *payload;
-    size_t      payload_len;
-    uint16_t    gp_flags;          /* 0 default; bit 0 = encrypted */
-    uint16_t    method;            /* 0 = STORED, 8 = DEFLATE, etc. */
-    uint32_t    csize_override;    /* 0 = use payload_len */
-    uint32_t    usize_override;    /* 0 = use payload_len */
-    int         use_csize_override;
-    int         use_usize_override;
-    int         use_crc_override;
-    uint32_t    crc_override;
-} zip_single_t;
-
-static int write_zip_single(const char *path, const zip_single_t *p)
-{
-    uint32_t csize = p->use_csize_override ? p->csize_override : (uint32_t)p->payload_len;
-    uint32_t usize = p->use_usize_override ? p->usize_override : (uint32_t)p->payload_len;
-    uint32_t crc   = p->use_crc_override   ? p->crc_override
-                                           : crc32_of(p->payload, p->payload_len);
-
-    /* LFH: 30-byte fixed + name + payload. */
-    unsigned char lfh[30];
-    memcpy(lfh, "PK\x03\x04", 4);
-    put_u16_le(lfh, 4, 20);              /* version needed */
-    put_u16_le(lfh, 6, p->gp_flags);
-    put_u16_le(lfh, 8, p->method);
-    put_u16_le(lfh, 10, 0);              /* mod time */
-    put_u16_le(lfh, 12, 0x0021);         /* mod date (bats matches this) */
-    put_u32_le(lfh, 14, crc);
-    put_u32_le(lfh, 18, csize);
-    put_u32_le(lfh, 22, usize);
-    put_u16_le(lfh, 26, (uint16_t)p->name_len);
-    put_u16_le(lfh, 28, 0);              /* extra length */
-
-    /* CDR: 46-byte fixed + name. */
-    unsigned char cdr[46];
-    memcpy(cdr, "PK\x01\x02", 4);
-    put_u16_le(cdr, 4, 20);              /* version made by */
-    put_u16_le(cdr, 6, 20);              /* version needed */
-    put_u16_le(cdr, 8, p->gp_flags);
-    put_u16_le(cdr, 10, p->method);
-    put_u16_le(cdr, 12, 0);              /* mod time */
-    put_u16_le(cdr, 14, 0x0021);         /* mod date */
-    put_u32_le(cdr, 16, crc);
-    put_u32_le(cdr, 20, csize);
-    put_u32_le(cdr, 24, usize);
-    put_u16_le(cdr, 28, (uint16_t)p->name_len);
-    put_u16_le(cdr, 30, 0);              /* extra len */
-    put_u16_le(cdr, 32, 0);              /* comment len */
-    put_u16_le(cdr, 34, 0);              /* disk start */
-    put_u16_le(cdr, 36, 0);              /* internal attrs */
-    put_u32_le(cdr, 38, 0);              /* external attrs */
-    put_u32_le(cdr, 42, 0);              /* LFH offset */
-
-    /* EOCD: 22-byte fixed. */
-    uint32_t      lfh_total = (uint32_t)(sizeof(lfh) + p->name_len + p->payload_len);
-    uint32_t      cdr_size  = (uint32_t)(sizeof(cdr) + p->name_len);
-    unsigned char eocd[22];
-    memcpy(eocd, "PK\x05\x06", 4);
-    put_u16_le(eocd, 4, 0);              /* disk number */
-    put_u16_le(eocd, 6, 0);              /* CDR start disk */
-    put_u16_le(eocd, 8, 1);              /* entries this disk */
-    put_u16_le(eocd, 10, 1);             /* total entries */
-    put_u32_le(eocd, 12, cdr_size);
-    put_u32_le(eocd, 16, lfh_total);
-    put_u16_le(eocd, 20, 0);             /* comment length */
-
-    FILE *f = fopen(path, "wb");
-    if (!f) return -1;
-    if (fwrite(lfh, 1, sizeof(lfh), f) != sizeof(lfh)) goto fail;
-    if (p->name_len > 0 && fwrite(p->name, 1, p->name_len, f) != p->name_len) goto fail;
-    if (p->payload_len > 0 && fwrite(p->payload, 1, p->payload_len, f) != p->payload_len) goto fail;
-    if (fwrite(cdr, 1, sizeof(cdr), f) != sizeof(cdr)) goto fail;
-    if (p->name_len > 0 && fwrite(p->name, 1, p->name_len, f) != p->name_len) goto fail;
-    if (fwrite(eocd, 1, sizeof(eocd), f) != sizeof(eocd)) goto fail;
-    return fclose(f) == 0 ? 0 : -1;
-fail:
-    fclose(f);
-    return -1;
 }
 
 #define RUN_PAKKA_OK(out_result, ...) do {                                  \
@@ -188,41 +68,7 @@ static int run_pakka_capture(proc_result_t *r, const char *const *argv)
     return 0;
 }
 
-/* Search bytes for the ZIP CDR signature ("PK\x01\x02") and read the
- * compression method (u16 LE at CDR offset +10). Returns -1 if no CDR
- * found, otherwise the method (0 = STORED, 8 = DEFLATE, etc.). Only
- * inspects the first CDR — fine for the per-entry compress-method
- * assertions since we craft single-entry archives or check only the
- * first entry. */
-static int zip_first_cdr_method(const unsigned char *buf, size_t len)
-{
-    for (size_t i = 0; i + 4 < len; i++) {
-        if (buf[i] == 0x50 && buf[i + 1] == 0x4B &&
-            buf[i + 2] == 0x01 && buf[i + 3] == 0x02) {
-            if (i + 12 > len) return -1;
-            return (int)get_u16_le(buf, i + 10);
-        }
-    }
-    return -1;
-}
-
-/* Search for the second CDR signature and read its compression method.
- * Used for two-entry --compress mixed archive verification. */
-static int zip_nth_cdr_method(const unsigned char *buf, size_t len, int n)
-{
-    int     seen = 0;
-    for (size_t i = 0; i + 4 < len; i++) {
-        if (buf[i] == 0x50 && buf[i + 1] == 0x4B &&
-            buf[i + 2] == 0x01 && buf[i + 3] == 0x02) {
-            if (seen == n) {
-                if (i + 12 > len) return -1;
-                return (int)get_u16_le(buf, i + 10);
-            }
-            seen++;
-        }
-    }
-    return -1;
-}
+/* Bytes-search + first/nth CDR method probes live in test_support/zip_build.{h,c}. */
 
 /* ---------- tests: pakka-driven ---------- */
 
@@ -631,7 +477,7 @@ static void test_open_rejects_dotdot_traversal_in_zip(void)
     p.name_len           = strlen(name);
     p.payload            = payload;
     p.payload_len        = strlen(payload);
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     char *out = under_scratch("zip_dotdot/out");
     EXPECT_EQ(fs_mkdir_p(out), 0);
@@ -661,7 +507,7 @@ static void test_open_rejects_embedded_nul_in_name(void)
     p.name_len            = sizeof(name);
     p.payload             = payload;
     p.payload_len         = 1;
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "control byte", NULL), 0);
     free(pak);
@@ -679,7 +525,7 @@ static void test_open_rejects_zip_entry_with_reserved_name(void)
     p.name_len           = strlen(name);
     p.payload            = payload;
     p.payload_len        = 1;
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     char *out = under_scratch("zip_reserved/out");
     EXPECT_EQ(fs_mkdir_p(out), 0);
@@ -705,7 +551,7 @@ static void test_open_rejects_encrypted_entry(void)
     p.payload            = payload;
     p.payload_len        = 1;
     p.gp_flags           = 0x0001; /* encrypted */
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "Encrypted", NULL), 0);
     free(pak);
@@ -724,7 +570,7 @@ static void test_open_rejects_unsupported_method(void)
     p.payload            = payload;
     p.payload_len        = 1;
     p.method             = 12; /* bzip2 — not supported */
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "method", NULL), 0);
     free(pak);
@@ -747,7 +593,7 @@ static void test_open_rejects_stored_csize_neq_usize(void)
     p.usize_override     = 5;
     p.use_csize_override = 1;
     p.use_usize_override = 1;
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "csize != usize", NULL), 0);
     free(pak);
@@ -770,7 +616,7 @@ static void test_open_rejects_lfh_payload_overlap_cdr(void)
     p.usize_override     = 100;
     p.use_csize_override = 1;
     p.use_usize_override = 1;
-    EXPECT_EQ(write_zip_single(pak, &p), 0);
+    EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     /* Pakka should reject with any of csize/CDR-overlap diagnostics. */
     const char   *argv[] = {g_pakka_path, "-l", pak, NULL};
