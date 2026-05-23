@@ -1,346 +1,418 @@
-# Windows codepage / non-ASCII path handling
+# Windows path encoding (UTF-8)
 
-**Status:** known bug, fix deferred. This doc captures the audit, the
-intended remediation, and the locked-in policy decisions so the work
-is ready to pick up later. If you mirror this as a GitHub issue, point
-the issue body at this file rather than duplicating content.
+A reference for how pakka handles non-ASCII paths and entry names on
+Windows.
 
-Pakka's Win32 code path uses ANSI narrow-char file APIs end-to-end and
-takes argv straight from `main()`. On a non-Western Windows installation
-(Russian CP1251, Japanese CP932, Chinese CP936, etc.), non-ASCII paths
-either silently misbehave or fail outright. The bug is invisible on
-US-English Windows (CP1252) because the ASCII subset of CP1252 round-
-trips through every other codepage; everything below 0x80 is identical
-across the OEM/ANSI codepage map.
+Pakka treats UTF-8 as the canonical internal narrow encoding on every
+platform. POSIX filesystem APIs treat path strings as opaque bytes —
+they do not interpret them through any codepage — so the helpers in
+`src/platform.{h,c}` are one-line passthroughs that hand UTF-8 bytes
+straight to the kernel, where modern tools and locales render them
+correctly as UTF-8. On Windows the
+C runtime's narrow-char file APIs (`fopen`, `_mkdir`, `opendir`, the
+`A`-suffixed Win32 entry points) interpret bytes through the active
+codepage — which silently misbehaves on any non-Western install — so
+pakka converts UTF-8 to UTF-16 once at the syscall boundary and
+dispatches to the `W`-suffixed CRT and Win32 APIs. The same UTF-8
+convention applies on the wire for PAK / SiN / Daikatana / WAD /
+PK3 / PK4: archives produced through the `pakka` CLI store UTF-8
+because `wmain` converts argv at the boundary; archives produced
+through the C API store whatever bytes the caller passed (see §4 and
+§7).
 
-## 1. Concrete failure modes
+## 1. Sources
 
-**Open an archive with a Cyrillic name on a Russian PC:**
+- Microsoft Win32 / MSVC CRT documentation for the `W`-suffixed APIs
+  pakka calls on Windows: `_wfopen`, `_wremove`, `_wstat64i32`,
+  `_wfullpath`, `_wgetcwd`, `_wmkdir`, `_wopendir` / `_wreaddir`,
+  `MoveFileExW`, `CreateFileW`, `GetFileAttributesW`,
+  `GetTempPathW`, plus `MultiByteToWideChar` /
+  `WideCharToMultiByte` for the conversion at the boundary.
+- PKWARE APPNOTE.TXT §4.4.4 — defines general-purpose flag bit 11
+  (the "language encoding" / EFS flag) as the signal that ZIP entry
+  names are UTF-8. The legacy default before bit 11 is CP437.
+- IBM CP437 codepage table (the "OEM US" / DOS code page) — used as
+  the ZIP-spec fallback decoding for entry names whose GP bit 11 is
+  clear.
+- RFC 3629 — UTF-8 syntax. pakka's validator rejects overlong
+  encodings, surrogate halves (U+D800..U+DFFF), and codepoints
+  above U+10FFFF.
+- pakka's own implementation: `src/cli.c` (`wmain` / `cli_run` +
+  the sanitize / substitute call sites), `src/platform.{h,c}`
+  (UTF-8 ↔ UTF-16 conversion and W-suffixed dispatch),
+  `src/pk3file.c` (GP bit 11 writer, CP437 fallback decoder,
+  name-decode policy), `src/common.{h,c}` (`pakka_is_valid_utf8`,
+  `pakka_utf8_substitute_invalid`).
 
-    pakka -l "Архив.pak"
+## 2. Background
 
-argv arrives in CP1251 bytes (`\xC0\xF0\xF5\xE8\xE2`). `fopen()` calls
-the CRT, which looks up the file under the active codepage. It succeeds
-only if the on-disk UTF-16 filename happens to round-trip through
-CP1251. A filename that doesn't (CJK chars on a Russian PC, accented
-Latin on a Japanese PC) produces ERROR_FILE_NOT_FOUND with no useful
+ANSI-codepage narrow Win32 APIs — `fopen`, `CreateFileA`,
+`GetFileAttributesA`, `_mkdir`, `MoveFileExA`, `opendir` (via the
+vendored dirent's narrow path) — interpret narrow byte strings
+through the process's active ANSI codepage. On a Russian install
+that codepage is CP1251; on Japanese it's CP932; on Simplified
+Chinese it's CP936. A filename whose on-disk UTF-16 representation
+doesn't round-trip cleanly through the active codepage produces
+`ERROR_FILE_NOT_FOUND` (or some other quiet failure) with no useful
 diagnostic.
 
-**Add a file with a non-ASCII name to a pak:**
+The bug is invisible on US-English Windows (CP1252) for one reason:
+every codepage in the OEM/ANSI family shares the ASCII subset, so
+anything below 0x80 round-trips identically. A test suite that only
+exercises ASCII names — including pakka's pre-fix CI — would never
+notice. Non-ASCII paths from argv, from `opendir` results, or from
+archive entry names hit the failure modes the moment the active
+codepage diverges from the on-disk UTF-16.
 
-    pakka -a foo.pak тест.txt
+The fix is structural: the application takes argv as UTF-16, treats
+UTF-8 as the canonical internal narrow encoding, and converts to
+UTF-16 once at every Win32 syscall. Same convention used by modern
+Rust, Go, and Python on Windows.
 
-Pakka stores the raw CP1251 bytes (`\xF2\xE5\xF1\xF2.txt`) into the PAK
-header's 56-byte name field. The archive is now non-portable: on a
-Japanese PC the same bytes display as different characters (`蛻ｹ繧ｹ繝.txt`
-or similar), and the bytes don't survive a copy to UTF-8-aware tools
-without manual codepage tagging.
+## 3. Architecture
 
-**Recurse into a directory with non-ASCII entries:**
+Three layers, each with a single responsibility.
 
-`cli_add_folder_r` calls `opendir(path)` at `src/cli.c:770`. The vendor
-shim at `src/vendor/dirent/dirent.h:682` converts the narrow path to
-wide via `mbstowcs_s` and dispatches to `_wopendir` — but the input
-bytes are already ANSI-codepage-encoded, so any name unmappable in the
-active codepage round-trips to `?` placeholders or fails.
+### 3.1 Entry point — `wmain`
 
-## 2. Audit findings
+The C runtime hands `wmain` an argv array of `wchar_t *` pointers
+already decoded by the OS from the original command line.
+`src/cli.c`'s `wmain` walks each `wargv[i]` through
+`WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, ...)` — once with
+a NULL output buffer to size the UTF-8 result, once into a fresh
+malloc — and hands the resulting UTF-8 vector to `cli_run`, which is
+the platform-neutral CLI body. `WC_ERR_INVALID_CHARS` makes malformed
+surrogates fail loudly instead of silently substituting U+FFFD; the
+program exits with a non-zero status and a stderr message naming the
+bad argv index. POSIX builds use a thin `main` that forwards `argv`
+to `cli_run` directly.
 
-### 2.1 Entry point
+### 3.2 `owned_argv` vs `argv_utf8`
 
-- `src/cli.c:136` — `int main(int argc, char *argv[])`. ANSI argv.
-  No `wmain` variant.
+`wmain` keeps two parallel arrays:
 
-### 2.2 Narrow Win32 file APIs
+- **`argv_utf8`** is what `cli_run` (and therefore `parseopts` /
+  `strip_long_options`) sees. It is mutable: `strip_long_options` in
+  `src/cli.c` rewrites argv in place by copying kept argument
+  pointers down to lower indices when stripping long options. The
+  higher slots are left untouched, so after the shift the same
+  malloc'd pointer can appear at two indices.
+- **`owned_argv`** is a parallel array of the original malloc'd
+  pointers in their pre-shift positions. It is never mutated.
+  `wmain_free_argv` walks it at exit and releases each block once.
 
-All Win32 syscalls in pakka use the `A` (ANSI-codepage) variants:
+Freeing through `argv_utf8` instead would double-free any pointer
+that `strip_long_options` shifted down (the original copy is left
+intact past the new `dst`) and leak the pointers that were
+overwritten (no longer in `argv_utf8` but still on the heap). POSIX
+builds never encountered the problem because they never malloc'd
+their argv.
 
-| Call site | File:line | Note |
-| --------- | --------- | ---- |
-| `fopen(path, "rb"/"r+b")` | `src/pakfile.c:287, 1639, 2352, 2378` | open + rebuild paths |
-| `fopen(...)` | `src/pk3file.c:921, 1506, 1562, 1996, 2292, 2331, 2365` | open + per-entry source reads + rebuild paths |
-| `fopen(path, "wb")` | `src/platform.c:321` | extract write path (`open_extract_target`) |
-| `opendir(path)` | `src/cli.c:770` | wraps vendored dirent's narrow form |
-| `_mkdir(path)` | `src/platform.c:183, 305` | inside extraction tree builder |
-| `GetFileAttributesA(path)` | `src/platform.c:237, 295, 313` | explicit `A` suffix |
-| `GetTempPathA(...)` | `src/platform.c:133` | temp file location |
-| `CreateFileA(path, ...)` | `src/platform.c:91` | atomic temp-file create |
-| `MoveFileExA(src, dst, ...)` | `src/platform.c:192, 206` | atomic rename |
-| `DeleteFileA(path)` | `src/platform.c:95` | rollback path |
+### 3.3 Platform layer
 
-Total 11 `fopen` call sites across `pakfile.c` + `pk3file.c`, plus the
-extract-write `fopen` inside `platform.c`. The re-audit also flagged
-`_fullpath`, `_getcwd`, `stat`, and `remove(tmp_path)` call sites
-elsewhere in `src/`; those need wrappers in the implementation pass
-even though they aren't strictly `*A`-suffixed Win32 APIs (the CRT
-narrow forms have the same active-codepage problem).
+`src/platform.h` declares a `pakka_platform_*` family — `fopen`,
+`remove`, `stat`, `lstat`, `realpath`, `getcwd`, `opendir`,
+`readdir`, `closedir`, `mkdir`, `rename_replace`,
+`rename_noreplace`, `mkstemp_open`, `open_extract_target`,
+`is_reparse_or_symlink` — that the rest of the codebase calls in
+place of the raw POSIX or CRT names. Every `const char *` path
+argument is UTF-8 on Windows by contract; the comment block above
+the declarations states this.
 
-No `_wfopen`, no `CreateFileW`, no `MoveFileExW`, no `_wmkdir`, no
-`GetFileAttributesW`. The codebase never imports `<wchar.h>` for path
-purposes.
+The Windows backends in `src/platform.c` use two file-scope statics,
+`u8_to_w` and `w_to_u8`, that wrap `MultiByteToWideChar(CP_UTF8,
+MB_ERR_INVALID_CHARS, ...)` and `WideCharToMultiByte(CP_UTF8,
+WC_ERR_INVALID_CHARS, ...)`. The `*_ERR_INVALID_CHARS` flags surface
+malformed input as `EILSEQ`; oversized expansion surfaces as
+`ENAMETOOLONG`. After conversion the helpers dispatch to `_wfopen`,
+`_wremove`, `_wstat64i32`, `_wfullpath`, `_wgetcwd`, `_wopendir` +
+`_wreaddir`, `_wmkdir`, `MoveFileExW`, `CreateFileW`,
+`GetFileAttributesW`, `GetTempPathW`. POSIX backends are one-line
+wrappers around the matching POSIX call.
 
-### 2.3 Conversion logic
+The `_wreaddir` direct call matters. The vendored dirent shim
+(`src/vendor/dirent/dirent.h`) implements narrow `opendir` /
+`readdir` by going wide internally with `mbstowcs_s` /
+`_wopendir`, but it then converts each result back to narrow via
+`wcstombs_s` on the readdir return path — which routes through the
+active codepage and undoes the Unicode win. `pakka_platform_readdir`
+bypasses the narrow shim entirely: it calls `_wreaddir` and converts
+the wide name to UTF-8 with `WideCharToMultiByte(CP_UTF8, ...)`.
 
-Zero `MultiByteToWideChar` / `WideCharToMultiByte` calls anywhere in
-`src/`. No `setlocale(LC_ALL, ".UTF8")`, no `SetConsoleOutputCP(CP_UTF8)`,
-no manifest `<activeCodePage>UTF-8</activeCodePage>`. No `UNICODE` /
-`_UNICODE` defines in `CMakeLists.txt`.
+## 4. On-disk entry-name encoding (write)
 
-The vendored dirent (`src/vendor/dirent/dirent.h:682-714`) internally
-calls `mbstowcs_s` → `_wopendir`, but that only round-trips through the
-active codepage — it doesn't add Unicode coverage.
+UTF-8 is the convention pakka follows, not an invariant the writer
+enforces. The C API does not validate caller-supplied `entry_name`
+bytes; PAK-class writers `memcpy` the caller's bytes directly into
+the fixed-size name field. The `pakka` CLI satisfies the convention
+because `wmain` converts argv at the boundary, so every byte that
+reaches the writer from a CLI invocation is already UTF-8.
 
-### 2.4 On-disk entry name encoding
+### 4.1 PAK / SiN / Daikatana / WAD
 
-**PAK / SiN / Daikatana / WAD** (`src/pakfile.c:3163` `write_pak_entry`,
-memcpy at `:3181`): the 8-, 56-, or 120-byte name field (8 for WAD,
-56 for PAK/Daikatana, 120 for SiN) is `memcpy`'d directly from
-`entry->filename`. Those bytes came from argv (ANSI codepage),
-public-API callers passing `entry_name` directly, or — on copy/rebuild
-— the source archive. The formats themselves have no encoding metadata
-of any kind.
+`write_pak_entry` in `src/pakfile.c` handles all four formats off
+the same geometry table; it copies the entry-name bytes verbatim
+into the fixed-size name field — 8 bytes for WAD, 56 bytes for
+PAK / Daikatana, 120 bytes for SiN. See the per-format docs under
+`dev/docs/` for the full directory-entry layouts. None of these
+formats carry encoding metadata. The convention pakka writes — and
+reads on a round-trip — is UTF-8.
 
-**ZIP / PK3 / PK4** (`src/pk3file.c:600-601`): a comment acknowledges
-the question — `"< 0x20 or == 0x7F is control; >= 0x80 is allowed for
-UTF-8 / CP437"` — but the writer does **not** set GPBF bit 11 (the
-ZIP-spec UTF-8 flag), and the reader does not check it. Whatever bytes
-the user typed go into the local-file-header and central-directory
-name fields as-is.
+### 4.2 ZIP / PK3 / PK4
 
-### 2.5 Why the manifest opt-in doesn't apply
+Same UTF-8 convention, plus pakka sets general-purpose flag bit 11
+(`0x0800`, the APPNOTE 6.3 §4.4.4 language-encoding flag) in
+**both** the local file header (LFH offset 6) and the central
+directory record (CDR offset 8) when:
 
-`<activeCodePage>UTF-8</activeCodePage>` in the application manifest
-makes the `A`-suffixed Win32 APIs interpret narrow strings as UTF-8
-without any code changes — but it requires Windows 10 1903 (May 2019)
-or later. Pakka's supported Windows floor is **Windows XP SP3**, built
-with the VS 2017 `v141_xp` toolset. (Neither the README nor
-`CMakeLists.txt` currently pin the floor explicitly — the CI matrix
-runs on Windows Server 2025 / VS 2026. The XP floor is a project
-policy that the build system happens to satisfy because nothing in
-`src/` reaches past the XP API surface.) The manifest is a no-op on
-XP/7/8/10<1903, so the explicit wide-char path is required regardless.
-The manifest can be added later as a redundant fast-path for modern
-Windows, but the wide-char work isn't optional.
+- the name contains at least one byte > 0x7F, **and**
+- the bytes form a valid UTF-8 sequence per RFC 3629.
 
-## 3. Intended fix (deferred)
+Pure-ASCII names leave bit 11 clear, which keeps byte-identical
+output for archives that don't actually need the flag. Non-ASCII
+names whose bytes are not valid UTF-8 (a library caller passing
+CP1251 directly through `pakka_add_file`) also leave bit 11 clear —
+asserting UTF-8 over non-UTF-8 bytes would produce an archive that
+pakka's own read path rejects. Both the LFH and CDR get the same GP
+flag word because the ZIP spec carries the flag field in both
+records and most readers consult both. See `pk3_gp_flags_for_name`
+in `src/pk3file.c`.
 
-UTF-8 as the canonical internal path encoding on all platforms.
-Convert UTF-8 → UTF-16 only at Win32 syscall boundaries. This matches
-the convention used by modern Rust, Go, and Python on Windows, and
-keeps the Unix code path unchanged (UTF-8 is already the universal
-narrow encoding under glibc/musl/BSD libc).
+## 5. On-disk entry-name decoding (read)
 
-### 3.1 Entry point
+pakka tries UTF-8 first regardless of any encoding flag, on the
+principle that "actually valid UTF-8" is the strongest signal
+available.
 
-Rename the current `int main(int argc, char *argv[])` body in
-`src/cli.c` to a static `cli_run(int argc, char **argv)`. The POSIX
-`main` becomes a thin wrapper that just calls `cli_run`. On Windows,
-add an `#ifdef _WIN32` `wmain(int argc, wchar_t **wargv)` that
-converts each `wargv[i]` to UTF-8 via
-`WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, ...)` (size probe
-then convert), populates a heap-allocated `char **argv_utf8`, and
-calls `cli_run`. Calling `main` by name from `wmain` is a bad seam —
-`cli_run` makes the layering explicit and testable.
+### 5.1 ZIP / PK3 / PK4
 
-The `argv_utf8` vector must be **mutable**: `strip_long_options`
-(`src/cli.c:873`, invoked from `parseopts` at `:978`) rewrites argv
-in place during option parsing. Don't share storage with a `const
-char *const *` view.
+`pk3_decode_entry_name` in `src/pk3file.c`:
 
-Set `argv_utf8[argc] = NULL` (POSIX convention; some call paths rely
-on the sentinel).
+- Bytes are valid UTF-8 → accept as-is.
+- Bytes are not valid UTF-8 **and** GP bit 11 is set → reject as
+  `PAKKA_ERR_FORMAT`. The archive asserts UTF-8 and isn't; silently
+  downgrading to CP437 would mask a malformed or crafted archive.
+- Bytes are not valid UTF-8 **and** GP bit 11 is clear → decode
+  through the CP437 high-half table (`pk3_cp437_high` in
+  `src/pk3file.c`). The low half is identical to ASCII and passes
+  through. Output is UTF-8. If the CP437 → UTF-8 expansion exceeds
+  the entry-name buffer the decoder returns `PK3_DECODE_TOOLONG`,
+  which the caller maps to `PAKKA_ERR_LIMIT` — the archive is
+  rejected rather than the name silently truncated.
 
-Use `WC_ERR_INVALID_CHARS` so malformed surrogates fail loudly instead
-of silently turning into replacement characters. On any conversion
-failure, write a clear stderr message naming the bad argument index
-and exit with a non-zero status; do not fall through with a partial
-argv.
+### 5.2 PAK / SiN / Daikatana / WAD
 
-### 3.2 Platform helpers
+These formats carry no encoding metadata, so pakka cannot
+distinguish a UTF-8 name from a CP1251 or Shift-JIS name written by
+a tool on a non-Western PC twenty years ago. The in-memory
+`entry->filename` is the raw bytes from the archive, byte-for-byte.
+Conversion or substitution (if any) happens when the name is
+**rendered or materialised** — at extract time when handing the
+name to the filesystem syscall, or at list time when writing it to
+stdout — not at archive-parse time. See §6 for the policy; the
+list operation (`pakka_fprint_sanitized` in `src/cli.c`) and the
+extract operation each apply their own UTF-8 sanitization.
 
-Add the following to `src/platform.{h,c}`. Unix backend is the existing
-POSIX call; Windows backend converts UTF-8 → UTF-16 and dispatches to
-the `W` variant.
+### 5.3 False-positive caveat
 
-    FILE *pakka_platform_fopen(const char *utf8_path, const char *mode)
-    int   pakka_platform_remove(const char *utf8_path)
-    int   pakka_platform_stat(const char *utf8_path, pakka_stat_t *out)
-    int   pakka_platform_get_file_attributes(const char *utf8_path)
-    int   pakka_platform_fullpath(const char *in_utf8, char *out_utf8, size_t cap)
-    int   pakka_platform_getcwd(char *out_utf8, size_t cap)
-    pakka_dir_t *pakka_platform_opendir(const char *utf8_path)
-    int   pakka_platform_readdir(pakka_dir_t *, char *utf8_name_out, size_t cap)
-    void  pakka_platform_closedir(pakka_dir_t *)
+The UTF-8-first-then-CP437 heuristic for ZIP is not a perfect
+inverse. Some CP1251 (and other 8-bit Cyrillic) byte sequences are
+accidentally legal UTF-8 — for example the two bytes `0xD0 0xBF`
+form the legal UTF-8 sequence U+043F `п` but in CP1251 spell `Рї`.
+Without GP bit 11 to disambiguate, pakka silently picks UTF-8 and
+the user gets a different character than they meant. This is
+inherent to any byte-only heuristic; pakka explicitly does not try
+to second-guess it.
 
-`pakka_platform_mkdir(const char *path, int mode)` and
-`pakka_platform_rename_replace` / `pakka_platform_rename_noreplace`
-already exist (`src/platform.h:91`, `:148`, `:158`). Keep their
-signatures verbatim — just swap their Win32 backends from `_mkdir` /
-`MoveFileExA` to UTF-8 → wide → `_wmkdir` / `MoveFileExW`. Don't
-collapse the rename pair into a single `movefile(flags)`: the
-no-replace semantic and Win32 error capture differ and the callers
-depend on the split.
+## 6. Extract-time handling of non-UTF-8 legacy names
 
-**Iteration is not just `_wopendir`.** The vendored dirent's
-`_wopendir` is the easy half — but the narrow `readdir()` at
-`src/vendor/dirent/dirent.h:751` converts each result back to narrow
-via `wcstombs_s`, which goes through the active codepage and undoes
-the UTF-16 win on the return path. So `cli_add_folder_r` at
-`src/cli.c:770` still emits ANSI-codepage bytes today. The Windows
-backend must call `_wreaddir` directly and convert with
-`WideCharToMultiByte(CP_UTF8, ...)`, never the narrow `readdir`.
-That's why §3.2 exposes the full `opendir`/`readdir`/`closedir` triple
-as platform helpers rather than just `opendir`.
+Legacy PAK / SiN / Daikatana / WAD archives can carry entry-name
+bytes that aren't UTF-8 (a Russian-localised PC writing CP1251, a
+Japanese PC writing Shift-JIS). On Windows those bytes cannot be
+handed to the W-suffixed Win32 / CRT APIs the platform layer
+dispatches to — `MultiByteToWideChar(CP_UTF8,
+MB_ERR_INVALID_CHARS, ...)` returns `EILSEQ`. pakka materialises
+the file under a sanitized name rather than silently dropping the
+entry. WAD names are traditionally 8-byte uppercase ASCII so this
+path is rarely exercised for WAD, but the sanitization wraps every
+PAK-class read path uniformly.
 
-Internal helpers (Win32-only, static):
+### 6.1 Substitution
 
-    static int u8_to_w(const char *utf8, wchar_t *wbuf, size_t wcap)
-    static int w_to_u8(const wchar_t *wstr, char *u8buf, size_t cap)
+`pakka_utf8_substitute_invalid` in `src/common.c` walks the source
+byte by byte. Valid UTF-8 sequences (1–4 bytes per RFC 3629) are
+copied verbatim; **each** invalid byte — one at a time, not one
+marker per contiguous run — is replaced with the fill character.
+Returns 1 if anything was substituted, 0 if the source was already
+valid UTF-8. A 4-byte CP1251 prefix becomes four fill characters.
 
-`u8_to_w` uses `MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, ...)`;
-`w_to_u8` uses `WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, ...)`.
+### 6.2 Extract
 
-**Buffer policy:** stack-allocated `wchar_t[MAX_PATH]` (260) on Win32.
-Long-path support (`\\?\`-prefixed > MAX_PATH paths) is out of scope
-per §5; treating it as a separate effort keeps this work bounded and
-avoids touching fixed-size path buffers elsewhere in pakka (`Pak_t`
-path fields, `cli.c` temp-path buffers, vendored dirent's `PATH_MAX`).
+The extract loop in `src/cli.c` runs the substitution with `_` as
+the fill char. If anything was substituted, pakka emits a `[warn]`
+line to stderr naming the entry index and the sanitized form, then
+creates the file under the sanitized name:
 
-### 3.3 Call-site replacements
+    [warn] entry 0: name not valid UTF-8, substituting invalid bytes (writing as '____.txt')
 
-Every Win32 narrow-API call site listed in §2.2 changes to its
-`pakka_platform_*` helper. The bulk lives in `src/platform.c` itself
-(already platform-conditional), with the rest in `src/pakfile.c` and
-`src/pk3file.c` (`fopen` call sites) and `src/cli.c:770` (`opendir`).
+Exit status is still success — preserving the data under a
+sanitized name is the documented default.
 
-The `pakka_platform_*` Unix backends are one-line wrappers, so the
-abstraction adds essentially zero cost on POSIX hosts.
+### 6.3 Collision check
 
-### 3.4 Wire encoding
+The pre-pass that rejects entries that would collide after extract
+normalization runs the **same** substitution before the sort. Two
+legacy CP1251 names whose first four bytes differ but are both
+4 bytes of invalid UTF-8 (e.g. CP1251 `Тест.txt` and `АБВГ.txt`)
+both substitute to `____.txt`. Without the pre-pass substitution
+they would compare distinct, both pass preflight, and one would
+silently overwrite the other on extract. The collision check in
+`src/cli.c` (in the normalized-name preflight loop preceding the
+extract pass) catches this and refuses to extract with a "collide
+after normalization" error.
 
-- Write UTF-8 in all archive entry-name fields. On the input side, the
-  argv conversion in §3.1 ensures `entry->filename` is already UTF-8 by
-  the time it reaches the writers.
-- ZIP/PK3/PK4: set GPBF bit 11 on entries whose name contains any byte
-  > 0x7F. Set it in **both** the local file header (LFH GP flags at
-  byte offset 6, ~`pk3file.c:1352`) and the central directory record
-  (CDR GP flags at byte offset 8, ~`pk3file.c:1372`); both records
-  carry independent GP flag fields per the ZIP spec and most readers
-  consult both. Lower-ASCII-only names leave bit 11 clear (the spec
-  permits either, and clearing it on pure-ASCII names keeps archives
-  byte-identical to existing pakka output for the common case).
-- PAK / SiN / Daikatana / WAD: store UTF-8 bytes in the name field as-is
-  (these formats have no encoding metadata; the convention is just
-  documented here and in the per-format docs under `dev/docs/`).
+### 6.4 List
 
-### 3.5 Public API
+`pakka_fprint_sanitized` in `src/cli.c` runs the same UTF-8
+substitution (using `?` as the fill char) plus the original
+control-byte substitution. Listing a legacy CP1251 PAK on a UTF-8
+console therefore produces printable ASCII without raw 8-bit bytes
+corrupting the TTY state, and without claiming the name is
+something it isn't.
 
-`include/pakka.h`'s `pakka_open`, `pakka_open_ex`, `pakka_create` keep
-their `const char *path` signature. Document in the header: on Windows,
-`path` is interpreted as UTF-8. Callers holding wide strings convert
-before calling. No `pakka_open_w(const wchar_t *, ...)` variant planned
-for v1 — the API surface stays single-signature.
+## 7. Public API
 
-## 4. Locked policy decisions
+Every `const char *` path or entry-name argument across
+`include/pakka.h` — `pakka_open`, `pakka_open_ex`, `pakka_create`,
+`pakka_add_file`, `pakka_add_memory`, `pakka_find_entry`,
+`pakka_open_entry`, `pakka_read_entry_alloc`, `pakka_delete` — is
+interpreted as UTF-8 on Windows. Library callers holding wide
+strings convert before calling. There is no
+`pakka_open_w(const wchar_t *, ...)` overload planned — the API
+surface stays single-signature.
 
-These are settled so future-pakka doesn't relitigate them.
+The UTF-8-on-Windows contract is documented in the comment block at
+the top of the `pakka_platform_*` declarations in `src/platform.h`.
 
-**Read-side legacy archives: best-effort fallback.** On read, try UTF-8
-first (validate the name bytes against UTF-8 syntax). If the name isn't
-valid UTF-8:
+The C API does **not** validate caller-supplied entry-name bytes
+against UTF-8 syntax. That responsibility is on the caller, the
+same way it's on the caller to pass a path the filesystem will
+accept. The ZIP writer's GP bit 11 logic uses UTF-8 validity as
+the precondition for setting the flag, so passing non-UTF-8 bytes
+to a PK3 writer produces an archive with bit 11 clear and the
+caller's bytes verbatim in the name field. APPNOTE-compliant
+readers (including pakka itself) decode such names through the
+CP437 fallback — which is almost certainly **not** what a caller
+who passed CP1251 / Shift-JIS / GB18030 bytes meant the names to
+read as. The C API contract is: callers who want the names to read
+correctly on every reader must convert to UTF-8 themselves.
 
-- **ZIP / PK3 / PK4**: interpret as CP437 (the ZIP-spec default for
-  pre-bit-11 archives), convert CP437 → UTF-8 for the entry name pakka
-  exposes to callers.
-- **PAK / SiN / Daikatana / WAD**: pass the raw bytes through unchanged
-  in the in-memory `entry->filename`. Those formats have no encoding
-  metadata at all and were authored on PCs of every locale across 30
-  years; pakka has no basis to guess, so it preserves them verbatim
-  and lets the caller decide.
+## 8. Windows floor and the manifest non-opt-in
 
-**False-positive caveat (read side).** The UTF-8 validation-then-CP437
-heuristic for ZIP is not a perfect inverse. Some CP1251 (and other
-8-bit Cyrillic) byte sequences are accidentally legal UTF-8 — e.g.
-the two bytes `0xD0 0xBF` form the legal UTF-8 sequence U+043F (`п`)
-but in CP1251 spell `Рї`. Without GPBF bit 11 to disambiguate, pakka
-will silently misclassify them as UTF-8 and pass through bytes that
-the user actually meant as CP1251. This is inherent to any byte-only
-heuristic — pakka explicitly does not try to second-guess it.
+The supported Windows floor is **Windows XP SP3** (the README
+documents the VS 2017 `v141_xp` toolset for XP/Vista/7 release
+builds; CI runs on Windows Server 2025 with VS 2026). Pakka avoids
+API calls that require later Windows versions so the same source
+tree builds against either toolset.
 
-**Extract behavior for legacy invalid-UTF-8 entry names (PAK family).**
-The raw-bytes-in-memory policy above conflicts with the "UTF-8 on
-Windows" invariant at the syscall boundary: invalid UTF-8 cannot be
-converted to UTF-16 for `CreateFileW`. Policy:
+Modern Windows offers an `<activeCodePage>UTF-8</activeCodePage>`
+element in the application manifest that makes the `A`-suffixed
+Win32 APIs interpret narrow strings as UTF-8 with no source change.
+It requires Windows 10 version 1903 (May 2019) or later. On every
+supported floor below that — XP, Vista, 7, 8, early 10 — the
+manifest is a no-op, so the explicit `wmain` + UTF-16 syscall path
+described in §3 is what handles the work. The manifest could be
+added later as a redundant fast path on modern Windows without
+changing the structural design.
 
-- **list (`-l`)**: pass the bytes through the existing
-  `pakka_fprint_sanitized` (`src/cli.c:32`), which currently
-  `?`-substitutes control bytes. Extend it to also `?`-substitute
-  byte runs that don't form valid UTF-8, so a UTF-8 console renders
-  printable output without lying about what's stored.
-- **extract (`-x`)**: log a `[warn] entry <N>: name not valid UTF-8,
-  substituting invalid bytes` warning naming the entry by index plus
-  the sanitized display name. Replace each invalid byte run with `_`
-  and create the file under the substituted name. The data is not
-  silently lost. A future `--strict` flag can switch this to "skip
-  entry" without changing the default.
-- **memory representation (`entry->filename`)**: stays the raw bytes
-  from the archive. Conversion / substitution happens at the OS
-  syscall boundary, not at archive-parse time. Callers that want the
-  display name use the same sanitization helper as `-l`.
+## 9. MSYS2 vs cmd.exe invocation
 
-**Write-side: UTF-8 always.** The active console codepage of the user's
-shell is irrelevant; conversion happens at the boundary. A user typing
-non-ASCII at a CP1251 cmd.exe prompt gets UTF-16 from
-`CommandLineToArgvW`-equivalent OS plumbing (already wide before
-`wmain` sees it), and pakka converts to UTF-8 in the wmain wrapper.
+A Windows binary built with `wmain` receives UTF-16 argv directly
+from the C runtime's command-line parsing. Under `cmd.exe` and
+PowerShell that argv reflects what the user typed (already wide
+before pakka sees it). Under MSYS2 bash the argv may have already
+been path-translated by the MSYS2 runtime (`/c/Users/...` →
+`C:\Users\...`) before the native `pakka.exe` is invoked. From
+pakka's perspective both look identical at the `wmain` boundary —
+each argument is whatever wide string the parent handed to
+`CreateProcess`, and pakka converts it to UTF-8 once.
 
-**Public API: narrow `const char *`, UTF-8 on Windows.** No wide-char
-overload. Callers with wide strings convert.
+The CI bats suite runs `pakka.exe` from MSYS2 bash (see
+`CLAUDE.md`); the same binary works under native `cmd.exe`
+invocation with no path-handling differences pakka cares about.
 
-## 5. Out of scope (for the eventual implementation)
+## 10. Out of scope
 
-- Normalization (NFC vs NFD). Windows filesystems tolerate either;
-  pakka should pass bytes through without normalizing.
-- Console output codepage. Pakka writes diagnostics to stderr/stdout
-  through `fprintf`. On legacy Windows consoles set to CP1251/CP932,
-  UTF-8 output displays as mojibake. Fix is `SetConsoleOutputCP(CP_UTF8)`
-  in the wmain wrapper — easy add but a behavior change worth its own
-  decision.
-- Long-path support (`\\?\`-prefixed > MAX_PATH paths). Independent
-  concern; out of scope for the Unicode fix.
-- Environment-variable encoding (e.g. `PAKKA_INJECT_FAULT_AT`). These
-  flow through `getenv()` and would need the same UTF-8 ↔ codepage
-  treatment if we ever start passing path-like env vars. Out of scope
-  for v1; revisit if any env var grows a path argument.
+These are intentionally not implemented today and are independent
+of the Unicode work above.
 
-## 6. Tests to add with the implementation pass
+- **Unicode normalization (NFC vs NFD).** Windows filesystems
+  tolerate either; pakka passes bytes through without normalizing.
+  An NFD name (decomposed) and the NFC equivalent (composed) appear
+  as distinct entries.
+- **Console output codepage.** pakka does not call
+  `SetConsoleOutputCP(CP_UTF8)`. On legacy CP1251 / CP932 consoles
+  pakka's UTF-8 stderr/stdout will display as mojibake. The fix is
+  trivial (one line in `wmain`) but is a behavior change with its
+  own trade-off; a separate concern.
+- **Long-path support (`\\?\`-prefixed paths > MAX_PATH).** Path
+  buffers throughout pakka are `MAX_PATH`-sized (260 wide
+  characters on Windows). Lifting that ceiling touches `Pak_t`
+  path fields, CLI temp-path buffers, the vendored dirent's
+  `PATH_MAX`, and a number of stack arrays — independent of the
+  Unicode work.
+- **Environment-variable path encoding.** `getenv()` is not routed
+  through the UTF-8 conversion layer. The only runtime env var
+  pakka reads is `PAKKA_INJECT_FAULT_AT` (operation tag + counter,
+  no path bytes); it does not need UTF-8 treatment.
+  `PAKKA_LEGACY_EXTRACT` is a compile-time `#ifdef` gate in
+  `src/platform.c`, not a runtime env var.
 
-- Round-trip a file named with Cyrillic characters through `-a`, `-l`,
-  `-x` on Windows. Verify the entry name in the archive header is the
-  expected UTF-8 byte sequence (`\xD0\xA2\xD0\xB5\xD1\x81\xD1\x82.txt`
-  for `Тест.txt`).
-- Round-trip a file named with CJK characters (`日本語.txt`) on a
-  Windows VM with a non-CJK active codepage (e.g. en-US).
-- Read a legacy ZIP/PK3 written by another tool with bit 11 clear and
-  non-UTF-8 name bytes; verify the CP437 fallback produces sensible
-  output.
-- A bats file `tests/unicode_paths.bats` skipped on non-Windows hosts
-  (the bug is Windows-only; Unix is already correct because POSIX is
-  UTF-8 throughout).
-- Extract a legacy PAK whose stored name bytes are not valid UTF-8
-  (e.g. CP1251). Verify pakka emits the documented `[warn] entry <N>:
-  name not valid UTF-8` line on stderr, that the file gets created
-  with `_`-substituted bytes, and that exit status is still success
-  (`--strict` is future).
+## 11. Test coverage
 
-**MSYS2 vs cmd.exe invocation.** The CI test harness (`bats tests/`
-from MSYS2 bash, see `CLAUDE.md`) invokes the MSVC-built `pakka.exe`
-under MSYS2. MSYS2 path-translates its own argv (e.g.
-`/c/Users/...` → `C:\Users\...`) before the binary sees it, and that
-translation happens at the C runtime / MSYS2 boundary before `wmain`
-ever runs. The Unicode fix has to work under both invocation paths:
-native `cmd.exe` (where argv arrives untranslated from
-`CommandLineToArgvW`) and MSYS2 (where it may have already been
-rewritten). The bats tests above already exercise the MSYS2 path;
-add at least one manual cmd.exe smoke case to the verification
-checklist.
+`tests/unicode_paths.bats` covers the behavior in this document:
+
+- PAK round-trip with a Cyrillic UTF-8 filename through `-c`,
+  `-l`, and `-x`.
+- PAK header byte-level assertion that the 56-byte name field
+  stores the raw UTF-8 bytes for a Cyrillic name
+  (`\xD0\xA2\xD0\xB5\xD1\x81\xD1\x82.txt` for `Тест.txt`).
+- PK3 with a Cyrillic filename: byte-level assertion that GP bit
+  11 is set in **both** the LFH (offset +6) and the CDR (offset
+  +8).
+- PK3 with a pure-ASCII filename: byte-level assertion that the
+  GP-flag high byte at LFH offset +6 is `0x00` (bit 11 clear).
+- Legacy PAK with CP1251 bytes in the name field (built by a
+  bats-side fixture writer that skips pakka): extract substitutes
+  the invalid bytes with `_`, emits the `[warn]` line to stderr,
+  and exits success with the file present.
+- Legacy PAK with two CP1251 names that both sanitize to the same
+  path: extract refuses with a collide-after-normalization error.
+- Listing a legacy CP1251 PAK: output is sanitized to printable
+  ASCII (no raw 8-bit bytes reach the TTY).
+- PK3 fixture with GP bit 11 set but non-UTF-8 bytes in the name:
+  open rejects the archive as a format error.
+- PK3 fixture with GP bit 11 clear and CP437 bytes in the name:
+  the name decodes through the CP437 high-half table (`0xE1` →
+  U+00DF `ß` → UTF-8 `\xC3\x9F` in the listing output).
+
+The suite runs on every host. POSIX exercises the same byte-level
+handling opaquely (POSIX treats the test names as bytes; the CI
+hosts' locales render them as UTF-8); the Windows CI job is what
+exercises the real `wmain` + `_wfopen` syscall path.
+
+## 12. Related docs
+
+- [`quake-pak-format.md`](quake-pak-format.md) — Quake / Q2 /
+  GoldSrc PAK; the 56-byte name field this doc refers to.
+- [`sin-pak-format.md`](sin-pak-format.md) — SiN's 120-byte name
+  field.
+- [`daikatana-pak-format.md`](daikatana-pak-format.md) —
+  Daikatana's PAK row (custom codec, same name-encoding policy).
+- [`wad-format.md`](wad-format.md) — Doom WAD; 8-byte lump names,
+  conventionally uppercase ASCII. WAD reads/writes go through the
+  same `pakka_platform_*` syscall layer and the same sanitizer
+  paths as the other PAK-class formats, but the policy in §4–§6
+  rarely triggers because the names are ASCII in practice.
+- [`pk3-pk4-format.md`](pk3-pk4-format.md) — ZIP / PK3 / PK4; GP
+  flag word layout and the LFH / CDR offsets referenced from §4.
