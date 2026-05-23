@@ -1,13 +1,16 @@
-/* pk3_test — PK3 (Quake 3) ZIP container. Partial C peer of test/pk3.bats.
+/* pk3_test — PK3 (Quake 3) ZIP container.
  *
- * Covers ~18 of pk3.bats's 43 cases — the pakka-driven cases plus the
- * malformed-ZIP path-policy and format-rejection cases that need only
- * a minimal inline ZIP writer. The cases that depend on /usr/bin/zip
- * (commented archives, zip -r empty-dir entries), python zipfile, or
- * the bats fault-injection + inline-cc c-api harness stay in pk3.bats
- * during the migration window. */
+ * End-to-end coverage of the PK3 reader/writer through the pakka CLI,
+ * plus malformed-ZIP rejection cases via the parametric zip_build
+ * helper. The c-api reach-through cases (max_decompressed cap,
+ * commit-refuses-changed-source, open_entry_handle handles, rebuild
+ * rollback in-memory offsets) call pakka_* directly via the linked
+ * libpakka archive; same for the format-probe case. Fault-injection
+ * tests pass PAKKA_INJECT_FAULT_AT through proc_run's env vector so
+ * each spawned pakka process picks up the trigger fresh. */
 
 #include "fs.h"
+#include "pakka.h"
 #include "proc.h"
 #include "test_macros.h"
 #include "zip_build.h"
@@ -222,6 +225,72 @@ static void fill_high_entropy(unsigned char *buf, size_t len, uint32_t seed)
         r      = r * 1103515245U + 12345U;
         buf[i] = (unsigned char)((r >> 16) & 0xFF);
     }
+}
+
+/* Build a mixed STORED + DEFLATE PK3 under `scratch_sub` using
+ * `pakka -c --compress`, with the same shape the bats setup_file
+ * produced via /usr/bin/zip:
+ *
+ *   hello.txt          — short text (STORED, too small for DEFLATE)
+ *   binary.bin         — 11-byte binary blob with embedded NULs
+ *   sub/nested.txt     — short text in a subdirectory
+ *   lorem.txt          — repeating text large enough to pick DEFLATE
+ *
+ * Returns the absolute pak path (caller frees) on success, NULL on
+ * any setup failure. The same scratch sub also leaves the source
+ * tree at `<scratch_sub>/src` for diff_tree against the extract. */
+static char *build_mixed_pk3_fixture(const char *scratch_sub)
+{
+    char *base = under_scratch(scratch_sub);
+    char *src  = fs_join(base, "src");
+    char *sub  = fs_join(src, "sub");
+    if (fs_mkdir_p(sub) != 0) return NULL;
+
+    char *hello = fs_join(src, "hello.txt");
+    if (fs_write_file(hello, "hello pk3", 9) != 0) return NULL;
+    t_free(hello);
+
+    char *bin = fs_join(src, "binary.bin");
+    static const unsigned char bin_bytes[] = {'b', 'i', 'n', 'a', 'r', 'y',
+                                              0x00, 0x01, 0x02, 0x03,
+                                              'd', 'a', 't', 'a'};
+    if (fs_write_file(bin, bin_bytes, sizeof(bin_bytes)) != 0) return NULL;
+    t_free(bin);
+
+    char *nested = fs_join(sub, "nested.txt");
+    if (fs_write_file(nested, "nested\n", 7) != 0) return NULL;
+    t_free(nested);
+
+    /* "The quick brown fox..." x 250 — comfortably above the DEFLATE
+     * encoder's "worth it" threshold. */
+    static const char line[] = "The quick brown fox jumps over the lazy dog. ";
+    const size_t      line_n = sizeof(line) - 1;
+    const size_t      total  = line_n * 250;
+    char             *text   = (char *)malloc(total);
+    if (!text) return NULL;
+    for (size_t i = 0; i < 250; i++) memcpy(text + i * line_n, line, line_n);
+    char *lorem = fs_join(src, "lorem.txt");
+    int   rc    = fs_write_file(lorem, text, total);
+    free(text);
+    t_free(lorem);
+    if (rc != 0) return NULL;
+
+    char         *pak  = fs_join(base, "mixed.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = src;
+    /* Build with --compress; sub/ enters via recursive add. */
+    const char   *argv[] = {g_pakka_path, "-c", "--compress", pak,
+                            "hello.txt", "binary.bin", "lorem.txt", "sub", NULL};
+    proc_result_t r;
+    if (proc_run(argv, &opts, &r) != 0 || r.exit_code != 0) {
+        proc_result_free(&r);
+        return NULL;
+    }
+    proc_result_free(&r);
+
+    t_free(sub);
+    t_free(src);
+    return pak;
 }
 
 static void test_compress_falls_back_to_stored_on_incompressible(void)
@@ -627,6 +696,298 @@ static void test_open_rejects_lfh_payload_overlap_cdr(void)
     t_free(pak);
 }
 
+/* ---------- group A: structural list/extract/create against mixed fixture ---------- */
+
+static void test_mixed_list_enumerates_entries(void)
+{
+    char *pak = build_mixed_pk3_fixture("mixed_list");
+    EXPECT_NOT_NULL(pak);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "hello.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "sub/nested.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "lorem.txt");
+    proc_result_free(&r);
+    t_free(pak);
+}
+
+static void test_mixed_list_tree_renders_hierarchy(void)
+{
+    char *pak = build_mixed_pk3_fixture("mixed_tree");
+    EXPECT_NOT_NULL(pak);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", "--tree", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "sub");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "nested.txt");
+    proc_result_free(&r);
+    t_free(pak);
+}
+
+static void test_mixed_extract_round_trips_source_tree(void)
+{
+    char *pak = build_mixed_pk3_fixture("mixed_extract");
+    EXPECT_NOT_NULL(pak);
+    char *out = under_scratch("mixed_extract/out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-x", "-C", out, pak);
+    proc_result_free(&r);
+
+    char *src = under_scratch("mixed_extract/src");
+    EXPECT_EQ(fs_diff_tree(src, out), 0);
+    t_free(out);
+    t_free(pak);
+}
+
+static void test_mixed_extract_selective_by_entry_name(void)
+{
+    char *pak = build_mixed_pk3_fixture("mixed_sel");
+    EXPECT_NOT_NULL(pak);
+    char *out = under_scratch("mixed_sel/out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-x", "-C", out, pak, "hello.txt");
+    proc_result_free(&r);
+
+    char *got    = fs_join(out, "hello.txt");
+    char *not_bin   = fs_join(out, "binary.bin");
+    char *not_sub   = fs_join(out, "sub");
+    EXPECT_TRUE(fs_is_file(got));
+    EXPECT_FALSE(fs_is_file(not_bin));
+    EXPECT_FALSE(fs_is_dir(not_sub));
+    t_free(got); t_free(not_bin); t_free(not_sub);
+    t_free(out);
+    t_free(pak);
+}
+
+static void test_create_pk3_builds_stored_round_trip(void)
+{
+    char *src = under_scratch("create_stored/src");
+    char *d   = fs_join(src, "d");
+    EXPECT_EQ(fs_mkdir_p(d), 0);
+    char *a = fs_join(src, "a.txt");
+    char *b = fs_join(d, "b.txt");
+    EXPECT_EQ(fs_write_file(a, "a\n", 2), 0);
+    EXPECT_EQ(fs_write_file(b, "b nested\n", 9), 0);
+
+    char         *pak  = under_scratch("create_stored/built.pk3");
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = src;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "a.txt", "d");
+    proc_result_free(&r);
+
+    /* LFH signature PK\003\004 (entries were written, not just EOCD). */
+    size_t         pn   = 0;
+    unsigned char *pbuf = fs_read_file(pak, &pn);
+    EXPECT_NOT_NULL(pbuf);
+    EXPECT_TRUE(pn >= 4);
+    EXPECT_MEM_EQ(pbuf, "PK\x03\x04", 4);
+    /* STORED method on first entry. */
+    EXPECT_EQ(zip_first_cdr_method(pbuf, pn), 0);
+    t_free(pbuf);
+
+    char *out = under_scratch("create_stored/out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    RUN_PAKKA_OK(&r, "-x", "-C", out, pak);
+    proc_result_free(&r);
+    EXPECT_EQ(fs_diff_tree(src, out), 0);
+
+    t_free(a); t_free(b); t_free(d); t_free(src); t_free(pak); t_free(out);
+}
+
+static void test_format_returns_pk3_in_process(void)
+{
+    char *pak = build_mixed_pk3_fixture("format_pk3");
+    EXPECT_NOT_NULL(pak);
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    pakka_status_t   s   = pakka_open(pak, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK);
+    EXPECT_EQ((int)pakka_format(a), (int)PAKKA_FORMAT_PK3);
+    /* Sanity-check the count too: hello.txt + binary.bin + sub/nested.txt + lorem.txt = 4. */
+    EXPECT_EQ((long long)pakka_entry_count(a), 4);
+    pakka_close(a, NULL);
+    t_free(pak);
+}
+
+/* ---------- group B: in-process c-api harness (max_decompressed cap,
+ *           commit-refuses-changed source, open_entry_handle) ---------- */
+
+static void test_capi_max_decompressed_cap_refuses_oversize(void)
+{
+    char *pak = build_mixed_pk3_fixture("capi_cap_open");
+    EXPECT_NOT_NULL(pak);
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_set_max_decompressed_size(a, 100, &err), PAKKA_OK);
+
+    pakka_reader_t *r = NULL;
+    /* lorem.txt is 11.25 KB after DEFLATE — comfortably above the
+     * 100-byte cap. */
+    EXPECT_EQ(pakka_open_entry(a, "lorem.txt", &r, &err), PAKKA_ERR_LIMIT);
+    EXPECT_NULL(r);
+    pakka_close(a, NULL);
+    t_free(pak);
+}
+
+static int g_verify_saw_limit;
+static void verify_limit_cb(void *userdata, pakka_report_severity_t sev,
+                            pakka_status_t status, const char *entry_name,
+                            const char *message)
+{
+    (void)userdata; (void)sev; (void)entry_name; (void)message;
+    if (status == PAKKA_ERR_LIMIT) g_verify_saw_limit = 1;
+}
+
+static void test_capi_verify_deep_respects_max_decompressed_cap(void)
+{
+    char *pak = build_mixed_pk3_fixture("capi_cap_verify");
+    EXPECT_NOT_NULL(pak);
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_set_max_decompressed_size(a, 100, &err), PAKKA_OK);
+
+    g_verify_saw_limit = 0;
+    pakka_status_t s = pakka_verify(a, PAKKA_VERIFY_DEEP, verify_limit_cb, NULL, &err);
+    EXPECT_EQ(s, PAKKA_ERR_LIMIT);
+    EXPECT_TRUE(g_verify_saw_limit);
+    pakka_close(a, NULL);
+    t_free(pak);
+}
+
+/* Build a single-entry PK3 (alpha.txt holding "ORIGINAL-BODY\n") with
+ * pakka -c so the c-api commit-refuses cases have a target archive to
+ * augment via pakka_add_file. Returns absolute pak path; caller frees. */
+static char *build_single_entry_pk3(const char *scratch_sub)
+{
+    char *src = under_scratch(scratch_sub);
+    if (fs_mkdir_p(src) != 0) return NULL;
+    char *alpha = fs_join(src, "alpha.txt");
+    if (fs_write_file(alpha, "ORIGINAL-BODY\n", 14) != 0) return NULL;
+
+    char         *pak  = fs_join(src, "work.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = src;
+    const char   *argv[] = {g_pakka_path, "-c", pak, "alpha.txt", NULL};
+    proc_result_t r;
+    if (proc_run(argv, &opts, &r) != 0 || r.exit_code != 0) {
+        proc_result_free(&r);
+        return NULL;
+    }
+    proc_result_free(&r);
+    t_free(alpha);
+    return pak;
+}
+
+static void test_capi_commit_refuses_changed_pending_source(void)
+{
+    char *pak = build_single_entry_pk3("capi_changed");
+    EXPECT_NOT_NULL(pak);
+    char *payload = under_scratch("capi_changed/payload.txt");
+    EXPECT_EQ(fs_write_file(payload, "FIRST-BODY1\n", 12), 0);
+
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ_WRITE, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_add_file(a, payload, "new.txt", &err), PAKKA_OK);
+
+    /* Replace payload bytes in place (same length, different content)
+     * before commit reads them back. */
+    EXPECT_EQ(fs_write_file(payload, "SECOND-BODY\n", 12), 0);
+
+    pakka_status_t s = pakka_commit(a, &err);
+    pakka_close(a, NULL);
+    EXPECT_EQ(s, PAKKA_ERR_FORMAT);
+    t_free(pak);
+}
+
+static void test_capi_commit_refuses_grew_pending_source(void)
+{
+    char *pak = build_single_entry_pk3("capi_grew");
+    EXPECT_NOT_NULL(pak);
+    char *payload = under_scratch("capi_grew/payload.txt");
+    EXPECT_EQ(fs_write_file(payload, "PREFIX-BODY1", 12), 0);
+
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ_WRITE, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_add_file(a, payload, "new.txt", &err), PAKKA_OK);
+
+    /* Append bytes — prefix CRC still matches, but the file grew past
+     * the recorded length. */
+    FILE *fp = fopen(payload, "ab");
+    EXPECT_NOT_NULL(fp);
+    fputs("-EXTRA", fp);
+    fclose(fp);
+
+    pakka_status_t s = pakka_commit(a, &err);
+    pakka_close(a, NULL);
+    EXPECT_EQ(s, PAKKA_ERR_FORMAT);
+    t_free(pak);
+}
+
+static void test_capi_open_entry_handle_pending_respects_cap(void)
+{
+    /* Pending-entry reads must hit the same LIMIT check that the
+     * name-keyed open_entry does. Without the cap the handle path
+     * could load a multi-GiB payload from a pending source into the
+     * inflated buffer. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("handle_cap")), 0);
+    char *big = under_scratch("handle_cap/big.txt");
+    /* 4 KB — well above the 200-byte cap. */
+    unsigned char *buf = (unsigned char *)malloc(4096);
+    EXPECT_NOT_NULL(buf);
+    memset(buf, 'x', 4096);
+    EXPECT_EQ(fs_write_file(big, buf, 4096), 0);
+    free(buf);
+
+    char *pak = under_scratch("handle_cap/h.pk3");
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_create(pak, PAKKA_FORMAT_PK3, 0, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_add_file(a, big, "big.txt", &err), PAKKA_OK);
+    EXPECT_EQ(pakka_set_max_decompressed_size(a, 200, &err), PAKKA_OK);
+
+    const pakka_entry_t *e = NULL;
+    EXPECT_EQ(pakka_find_entry(a, "big.txt", &e), PAKKA_OK);
+    EXPECT_NOT_NULL(e);
+
+    pakka_reader_t *r = NULL;
+    EXPECT_EQ(pakka_open_entry_handle(a, e, &r, &err), PAKKA_ERR_LIMIT);
+    EXPECT_NULL(r);
+    pakka_close(a, NULL);
+}
+
+static void test_capi_open_entry_handle_skips_name_lookup(void)
+{
+    char *pak = build_mixed_pk3_fixture("handle_skip");
+    EXPECT_NOT_NULL(pak);
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ, &a, &err), PAKKA_OK);
+
+    /* NULL-tolerance probe. */
+    pakka_reader_t *r = NULL;
+    EXPECT_EQ(pakka_open_entry_handle(NULL, NULL, &r, &err),
+              PAKKA_ERR_INVALID_ARGUMENT);
+
+    const pakka_entry_t *e = NULL;
+    EXPECT_EQ(pakka_entry_at(a, 0, &e), PAKKA_OK);
+    EXPECT_NOT_NULL(e);
+    EXPECT_EQ(pakka_open_entry_handle(a, e, &r, &err), PAKKA_OK);
+
+    char   small[64];
+    size_t nread = 0;
+    EXPECT_EQ(pakka_reader_read(r, small, sizeof(small), &nread, &err), PAKKA_OK);
+    EXPECT_TRUE(nread > 0);
+    pakka_reader_close(r);
+    pakka_close(a, NULL);
+    t_free(pak);
+}
+
 int main(void)
 {
     const char *pakka = getenv("PAKKA");
@@ -664,6 +1025,20 @@ int main(void)
     RUN_TEST(test_open_rejects_unsupported_method);
     RUN_TEST(test_open_rejects_stored_csize_neq_usize);
     RUN_TEST(test_open_rejects_lfh_payload_overlap_cdr);
+
+    RUN_TEST(test_mixed_list_enumerates_entries);
+    RUN_TEST(test_mixed_list_tree_renders_hierarchy);
+    RUN_TEST(test_mixed_extract_round_trips_source_tree);
+    RUN_TEST(test_mixed_extract_selective_by_entry_name);
+    RUN_TEST(test_create_pk3_builds_stored_round_trip);
+    RUN_TEST(test_format_returns_pk3_in_process);
+
+    RUN_TEST(test_capi_max_decompressed_cap_refuses_oversize);
+    RUN_TEST(test_capi_verify_deep_respects_max_decompressed_cap);
+    RUN_TEST(test_capi_commit_refuses_changed_pending_source);
+    RUN_TEST(test_capi_commit_refuses_grew_pending_source);
+    RUN_TEST(test_capi_open_entry_handle_pending_respects_cap);
+    RUN_TEST(test_capi_open_entry_handle_skips_name_lookup);
 
     t_free(g_scratch);
     return t_summary();

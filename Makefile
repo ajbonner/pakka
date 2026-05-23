@@ -462,13 +462,14 @@ $(PAKKA_TEST): test/pakka_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pakka_test.d -o $@ test/pakka_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pakka_test: $(PAKKA_TEST)
 
-# PK3 (Quake 3 / ZIP) tests. C peer of test/pk3.bats (partial: ~18 of
-# 43 cases; the rest stay in bats because they need /usr/bin/zip, an
-# inline-cc c-api harness, or fault-injection that's bats-only).
+# PK3 (Quake 3 / ZIP) tests. Drives pakka through the CLI for the
+# structural read/write surface and links libpakka for the in-process
+# c-api harness (max_decompressed cap, commit/rebuild rollback,
+# format-probe).
 PK3_TEST = $(TEST_DIR)/pk3_test
-$(PK3_TEST): test/pk3_test.c $(TEST_SUPPORT_LIB)
+$(PK3_TEST): test/pk3_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_test.d -o $@ test/pk3_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_test.d -o $@ test/pk3_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA) $(LDLIBS)
 pk3_test: $(PK3_TEST)
 
 # Q3 demo realpak tests against id's real Q3 demo pak0.pk3. Gated on
