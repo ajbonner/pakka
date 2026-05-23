@@ -265,25 +265,69 @@ static int compare_str_ptr(const void *a, const void *b)
     return strcmp(*(const char *const *)a, *(const char *const *)b);
 }
 
+#ifdef _WIN32
+/* WideCharToMultiByte(CP_UTF8, ...) wrapper. Used for FindFirstFileW
+ * results — entry names come back as UTF-16 and we round-trip them
+ * back to UTF-8 for storage in entry_list_t so downstream callers
+ * (fs_diff_tree, fs_rmtree) keep their UTF-8 path API. */
+static char *wide_to_utf8(const wchar_t *w)
+{
+    if (!w) return NULL;
+    int n = WideCharToMultiByte(CP_UTF8, 0, w, -1, NULL, 0, NULL, NULL);
+    if (n <= 0) return NULL;
+    char *out = (char *)malloc((size_t)n);
+    if (!out) return NULL;
+    if (WideCharToMultiByte(CP_UTF8, 0, w, -1, out, n, NULL, NULL) <= 0) {
+        free(out);
+        return NULL;
+    }
+    return out;
+}
+#endif
+
 static int list_dir(const char *path, entry_list_t *out)
 {
 #ifdef _WIN32
-    char pattern[1024];
-    snprintf(pattern, sizeof(pattern), "%s\\*", path);
-    WIN32_FIND_DATAA fd;
-    HANDLE           h = FindFirstFileA(pattern, &fd);
+    /* FindFirstFileW so directory entries with non-ASCII names (the
+     * unicode_paths tests Cyrillic-extract under) round-trip correctly.
+     * The narrow ANSI variant would mojibake names through CP_ACP and
+     * silently lose Cyrillic / CJK / emoji directory entries. */
+    wchar_t *wpath = path_to_wide(path);
+    if (!wpath) return -1;
+    size_t   wlen   = wcslen(wpath);
+    wchar_t *pattern = (wchar_t *)malloc((wlen + 3) * sizeof(wchar_t));
+    if (!pattern) {
+        free(wpath);
+        return -1;
+    }
+    memcpy(pattern, wpath, wlen * sizeof(wchar_t));
+    pattern[wlen]     = L'\\';
+    pattern[wlen + 1] = L'*';
+    pattern[wlen + 2] = L'\0';
+    free(wpath);
+
+    WIN32_FIND_DATAW fd;
+    HANDLE           h = FindFirstFileW(pattern, &fd);
+    free(pattern);
     if (h == INVALID_HANDLE_VALUE) {
         return -1;
     }
     do {
-        if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) {
+        if (wcscmp(fd.cFileName, L".") == 0 || wcscmp(fd.cFileName, L"..") == 0) {
             continue;
         }
-        if (entry_list_add(out, fd.cFileName) < 0) {
+        char *name = wide_to_utf8(fd.cFileName);
+        if (!name) {
             FindClose(h);
             return -1;
         }
-    } while (FindNextFileA(h, &fd));
+        if (entry_list_add(out, name) < 0) {
+            free(name);
+            FindClose(h);
+            return -1;
+        }
+        free(name);
+    } while (FindNextFileW(h, &fd));
     FindClose(h);
 #else
     DIR *d = opendir(path);
@@ -393,10 +437,43 @@ out:
     return rc;
 }
 
+#ifdef _WIN32
+/* Wide variants of remove() and rmdir() so the rmtree walk can delete
+ * non-ASCII names. Narrow remove/_rmdir interpret their argument as
+ * CP_ACP, which fails to find Cyrillic / CJK / emoji files even when
+ * fs_is_file returned true (it uses _wstat64 internally). */
+static int wide_remove_file(const char *path)
+{
+    wchar_t *w = path_to_wide(path);
+    if (!w) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc = _wremove(w);
+    free(w);
+    return rc;
+}
+static int wide_rmdir(const char *path)
+{
+    wchar_t *w = path_to_wide(path);
+    if (!w) {
+        errno = ENOMEM;
+        return -1;
+    }
+    int rc = _wrmdir(w);
+    free(w);
+    return rc;
+}
+#endif
+
 int fs_rmtree(const char *path)
 {
     if (fs_is_file(path)) {
+#ifdef _WIN32
+        return wide_remove_file(path);
+#else
         return remove(path);
+#endif
     }
     if (!fs_is_dir(path)) {
         return 0; /* nothing there — treat as success */
@@ -426,7 +503,7 @@ int fs_rmtree(const char *path)
     }
 
 #ifdef _WIN32
-    return _rmdir(path);
+    return wide_rmdir(path);
 #else
     return rmdir(path);
 #endif
