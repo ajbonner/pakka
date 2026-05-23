@@ -674,11 +674,17 @@ jobs:
           sudo apt-get install -y build-essential bats curl openssl unzip
       - run: make realpak-test-goldsrc
 
+  # Native-Windows realpak: no MSYS2 install. Fixture fetch + SHA verify
+  # + extract via dev/win/fixtures.ps1 (PowerShell 7+ ships on the runner
+  # image); test execution via CTest (pk3_q3demo_test, registered in
+  # test/CMakeLists.txt). The Linux/macOS realpak-test-q3 Makefile
+  # target still runs bats alongside the C tests, so per-job dual
+  # coverage continues during the migration window.
   realpak-test-q3-windows:
     runs-on: windows-2025-vs2026
     defaults:
       run:
-        shell: msys2 {0}
+        shell: pwsh
     steps:
       - uses: actions/checkout@v6
         with:
@@ -686,47 +692,35 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/q3demo.zip
-          key: q3demo-${{ hashFiles('Makefile') }}
+          key: q3demo-${{ hashFiles('dev/win/fixtures.ps1') }}
       - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
-      - uses: msys2/setup-msys2@v2
-        with:
-          update: false
-          install: >-
-            bash
-            coreutils
-            curl
-            diffutils
-            git
-            openssl
-            tar
-            make
-            zip
-            unzip
-            python3
-      - name: Install bats-core
-        run: |
-          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          /tmp/bats-core/install.sh /usr/local
       - name: Configure (CMake / Ninja / MSVC)
-        shell: pwsh
         # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
-        # libpakka compiles in the same fault-injection hooks the bats
+        # libpakka compiles in the same fault-injection hooks the test
         # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
         # isn't set; safe to enable across all CI jobs.
         run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
-        shell: pwsh
         run: cmake --build build/cmake
-      - name: Run Q3 realpak-test against pakka.exe
-        run: dev/win/realpak-test.sh q3
+      - name: Fetch + verify Q3 demo fixture
+        run: pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite q3
+      - name: Run Q3 realpak C test against pakka.exe
+        # CTest sets PAKKA via the test/CMakeLists.txt ENVIRONMENT
+        # property; we pass Q3DEMO_PAK0_PK3 here so the gating in
+        # pk3_q3demo_test.c flips from SKIP to RUN.
+        env:
+          Q3DEMO_PAK0_PK3: ${{ github.workspace }}\build\test\q3demo\pak0.pk3
+        run: ctest --test-dir build/cmake -R pk3_q3demo_test --output-on-failure
 
+  # Native-Windows GoldSrc realpak: same model as realpak-test-q3-windows
+  # — no MSYS2; PowerShell-only fixture prep + CTest run.
   realpak-test-goldsrc-windows:
     runs-on: windows-2025-vs2026
     defaults:
       run:
-        shell: msys2 {0}
+        shell: pwsh
     steps:
       - uses: actions/checkout@v6
         with:
@@ -736,38 +730,24 @@ jobs:
           path: |
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
-          key: goldsrc-${{ hashFiles('Makefile') }}
+          key: goldsrc-${{ hashFiles('dev/win/fixtures.ps1') }}
       - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
-      - uses: msys2/setup-msys2@v2
-        with:
-          update: false
-          install: >-
-            bash
-            coreutils
-            curl
-            diffutils
-            git
-            openssl
-            tar
-            make
-            zip
-            unzip
-            python3
-      - name: Install bats-core
-        run: |
-          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          /tmp/bats-core/install.sh /usr/local
       - name: Configure (CMake / Ninja / MSVC)
-        shell: pwsh
         # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
         # libpakka compiles in the same fault-injection hooks the bats
         # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
         # isn't set; safe to enable across all CI jobs.
         run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
-        shell: pwsh
         run: cmake --build build/cmake
-      - name: Run GoldSrc realpak-test against pakka.exe
-        run: dev/win/realpak-test.sh goldsrc
+      - name: Fetch + verify Uplink + Day One fixtures
+        run: |
+          pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite goldsrc-uplink
+          pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite goldsrc-dayone
+      - name: Run GoldSrc realpak C test against pakka.exe
+        env:
+          GOLDSRC_UPLINK_PAK0: ${{ github.workspace }}\build\test\hl-uplink\valve\pak0.pak
+          GOLDSRC_DAYONE_PAK0: ${{ github.workspace }}\build\test\hl-dayone\valve\pak0.pak
+        run: ctest --test-dir build/cmake -R pak_goldsrc_test --output-on-failure
