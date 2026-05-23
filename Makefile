@@ -451,9 +451,11 @@ $(DK_TEST): test/dk_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/dk_test.d -o $@ test/dk_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 dk_test: $(DK_TEST)
 
-# Quake PAK format tests. C peer of test/pakka.bats (partial: covers
-# the ~45 cases that aren't POSIX-symlink / chmod / shell-pipeline
-# specific). Needs PAK0 env var pointing at the canonical fixture.
+# Quake PAK format tests. End-to-end CLI surface against pak0.pak plus
+# per-policy synthetic-pak cases (name validation, normalization-
+# collision rejection, --tree rendering, bounds checks, --as alias).
+# POSIX-only cases (symlink rejection, read-only chmod) gate on
+# #ifndef _WIN32. Needs PAK0 env var pointing at the canonical fixture.
 PAKKA_TEST = $(TEST_DIR)/pakka_test
 $(PAKKA_TEST): test/pakka_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)

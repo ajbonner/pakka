@@ -468,6 +468,18 @@ static int wide_rmdir(const char *path)
 
 int fs_rmtree(const char *path)
 {
+#ifndef _WIN32
+    /* POSIX: detect symlinks via lstat and remove them as a leaf
+     * unlink — otherwise fs_is_dir(stat-follows-symlink) returns
+     * true for a symlink-to-directory and we'd recursively walk
+     * the target tree, then rmdir(symlink) fails. Tests that plant
+     * symlinks under scratch (extract-symlink-rejection cases) hit
+     * this. */
+    struct stat lst;
+    if (lstat(path, &lst) == 0 && S_ISLNK(lst.st_mode)) {
+        return unlink(path);
+    }
+#endif
     if (fs_is_file(path)) {
 #ifdef _WIN32
         return wide_remove_file(path);

@@ -1,10 +1,11 @@
-/* pakka_test — Quake PAK format. Partial C peer of test/pakka.bats.
+/* pakka_test — Quake PAK format. End-to-end coverage of the CLI
+ * surface against pak0.pak as the canonical fixture, plus per-policy
+ * synthetic-pak cases for name validation, normalization-collision
+ * rejection, --tree rendering, bounds checks, and the --as alias.
  *
- * Covers ~40 of pakka.bats's 65 cases — the ones that aren't POSIX-
- * symlink / chmod / shell-pipeline specific. The remaining cases stay
- * in pakka.bats during the migration window (those that need ln(1),
- * chmod a-w, or external commands like awk/find with specific output
- * shapes that don't add value to re-encode in C). */
+ * POSIX-only cases (symlink rejection, read-only-pak chmod, CON
+ * unsafe-bake) are #ifdef'd out on _WIN32; on Windows they SKIP at
+ * register time via RUN_TEST_POSIX. */
 
 #include "fs.h"
 #include "proc.h"
@@ -14,6 +15,11 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 
 #define PAK_HEADER_SIZE 12
 #define PAK_NAME_FIELD  56
@@ -894,6 +900,755 @@ static void test_zero_byte_file_adds_and_extracts(void)
     t_free(out);
 }
 
+/* ---------- group L: delete head + tail + delete-all ---------- */
+
+/* Pull the first whitespace-delimited token out of `s` into a
+ * caller-allocated buffer. Returns 0 on success, -1 if `s` is empty. */
+static int first_token(const char *s, char *out, size_t out_cap)
+{
+    if (!s || !*s) return -1;
+    size_t i = 0;
+    while (s[i] && s[i] != ' ' && s[i] != '\t' && s[i] != '\n' && i + 1 < out_cap) {
+        out[i] = s[i];
+        i++;
+    }
+    out[i] = '\0';
+    return i == 0 ? -1 : 0;
+}
+
+static void test_delete_head_and_tail_entries(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("del_ht")), 0);
+    char *work = fs_join(under_scratch("del_ht"), "work.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", work);
+    long long before = (long long)r.line_count;
+    /* First line: head; locate last newline and grab the line before it
+     * (output ends with trailing newline). */
+    char  head[128];
+    char  tail[128];
+    EXPECT_EQ(first_token(r.stdout_buf, head, sizeof(head)), 0);
+    const char *last_nl = NULL;
+    for (const char *p = r.stdout_buf; *p; p++) {
+        if (*p == '\n' && p[1] != '\0') last_nl = p;
+    }
+    EXPECT_NOT_NULL(last_nl);
+    EXPECT_EQ(first_token(last_nl + 1, tail, sizeof(tail)), 0);
+    EXPECT_NE(strcmp(head, tail), 0);
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-d", work, head, tail);
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-l", work);
+    EXPECT_EQ((long long)r.line_count, before - 2);
+    /* Neither name should appear anymore. */
+    char head_pat[160], tail_pat[160];
+    snprintf(head_pat, sizeof(head_pat), "%s ", head);
+    snprintf(tail_pat, sizeof(tail_pat), "%s ", tail);
+    EXPECT_NULL(strstr(r.stdout_buf, head_pat));
+    EXPECT_NULL(strstr(r.stdout_buf, tail_pat));
+    proc_result_free(&r);
+
+    /* An untouched file (demo1.dem) should still extract byte-identical
+     * to the original. */
+    char *out = fs_join(under_scratch("del_ht"), "out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    RUN_PAKKA_OK(&r, "-x", "-C", out, work);
+    proc_result_free(&r);
+
+    char *got = fs_join(out, "demo1.dem");
+    char *src = fs_join(g_extracted, "demo1.dem");
+    if (fs_is_file(got) && fs_is_file(src)) {
+        EXPECT_EQ(files_equal(got, src), 0);
+    }
+    t_free(got);
+    t_free(src);
+    t_free(out);
+    t_free(work);
+}
+
+static void test_delete_all_leaves_valid_empty_pak(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("del_all")), 0);
+    char *work = fs_join(under_scratch("del_all"), "work.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    /* Build a -d argv with every entry name. */
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", work);
+    char *listing = r.stdout_buf;
+    r.stdout_buf  = NULL; /* steal */
+    proc_result_free(&r);
+
+    /* Tokenize listing into one entry name per line, build argv. */
+    size_t       cap   = 16;
+    size_t       count = 0;
+    const char **argv  = (const char **)malloc(cap * sizeof(*argv));
+    argv[count++]      = g_pakka_path;
+    argv[count++]      = "-d";
+    argv[count++]      = work;
+    char *cursor       = listing;
+    while (*cursor) {
+        char *line_end = strchr(cursor, '\n');
+        if (!line_end) break;
+        *line_end = '\0';
+        char *space = strchr(cursor, ' ');
+        if (space) *space = '\0';
+        if (count + 2 >= cap) {
+            cap *= 2;
+            argv = (const char **)realloc(argv, cap * sizeof(*argv));
+        }
+        argv[count++] = strdup(cursor);
+        cursor        = line_end + 1;
+    }
+    argv[count] = NULL;
+
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_EQ(r.exit_code, 0);
+    proc_result_free(&r);
+
+    /* Free strdup'd argv entries (skip slots 0/1/2 — borrowed). */
+    for (size_t i = 3; i < count; i++) free((void *)argv[i]);
+    free(argv);
+    t_free(listing);
+
+    /* File should be exactly PAK_HEADER_SIZE bytes. */
+    size_t         n   = 0;
+    unsigned char *buf = fs_read_file(work, &n);
+    EXPECT_EQ((long long)n, (long long)PAK_HEADER_SIZE);
+    EXPECT_MEM_EQ(buf, "PACK", 4);
+    /* diroffset (LE u32 at byte 4) should point to header end. */
+    uint32_t diroffset = (uint32_t)buf[4] | ((uint32_t)buf[5] << 8) |
+                         ((uint32_t)buf[6] << 16) | ((uint32_t)buf[7] << 24);
+    EXPECT_EQ((long long)diroffset, (long long)PAK_HEADER_SIZE);
+    t_free(buf);
+
+    /* -l should succeed and report empty. */
+    RUN_PAKKA_OK(&r, "-l", work);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "Pak is empty");
+    proc_result_free(&r);
+
+    /* -x on a missing entry must still error. */
+    char *out = fs_join(under_scratch("del_all"), "empty_out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    const char *argv_x[] = {g_pakka_path, "-x", "-C", out, work, "any-file", NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv_x), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+    t_free(out);
+    t_free(work);
+}
+
+/* ---------- group F.1: --tree rendering (synthetic fixture) ---------- */
+
+/* Build a small pak with a known directory tree by invoking pakka -c
+ * against a freshly-laid-out source. Returns absolute path to pak.
+ * Caller frees. */
+static char *build_tree_fixture(const char *scratch_sub)
+{
+    char *base = under_scratch(scratch_sub);
+    char *src  = fs_join(base, "src");
+    char *gfx  = fs_join(src, "gfx");
+    char *maps = fs_join(src, "maps");
+    if (fs_mkdir_p(gfx) != 0) return NULL;
+    if (fs_mkdir_p(maps) != 0) return NULL;
+    char *p;
+    p = fs_join(src, "default.cfg");      fs_write_file(p, "cfg\n", 4);     t_free(p);
+    p = fs_join(gfx, "menudot1.lmp");     fs_write_file(p, "dot1\n", 5);    t_free(p);
+    p = fs_join(gfx, "menudot2.lmp");     fs_write_file(p, "dot2\n", 5);    t_free(p);
+    p = fs_join(gfx, "pop.lmp");          fs_write_file(p, "pop\n", 4);     t_free(p);
+    p = fs_join(maps, "b_batt0.bsp");     fs_write_file(p, "battle\n", 7);  t_free(p);
+    p = fs_join(maps, "start.bsp");       fs_write_file(p, "start\n", 6);   t_free(p);
+    p = fs_join(src, "quake.rc");         fs_write_file(p, "quake\n", 6);   t_free(p);
+
+    char *pak = fs_join(base, "tree.pak");
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = src;
+    const char   *argv[] = {g_pakka_path, "-c", pak, "default.cfg", "gfx",
+                            "maps", "quake.rc", NULL};
+    if (proc_run(argv, &opts, &r) != 0) { t_free(src); t_free(gfx); t_free(maps); t_free(pak); return NULL; }
+    int rc = r.exit_code;
+    proc_result_free(&r);
+    t_free(src);
+    t_free(gfx);
+    t_free(maps);
+    if (rc != 0) { t_free(pak); return NULL; }
+    return pak;
+}
+
+/* Strip every \r byte from `s` in place (MSVC pakka.exe emits CRLF). */
+static void strip_cr(char *s)
+{
+    char *r = s, *w = s;
+    while (*r) {
+        if (*r != '\r') *w++ = *r;
+        r++;
+    }
+    *w = '\0';
+}
+
+static void test_tree_renders_hierarchy_with_summary(void)
+{
+    char *pak = build_tree_fixture("tree_render");
+    EXPECT_NOT_NULL(pak);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", pak, "--tree");
+    strip_cr(r.stdout_buf);
+
+    /* pakka emits regular U+0020 spaces inside the indent (three after
+     * each vertical bar), not NBSP. */
+    static const char expected[] =
+        ".\n"
+        "\xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 default.cfg\n"
+        "\xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 gfx\n"
+        "\xe2\x94\x82   \xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 menudot1.lmp\n"
+        "\xe2\x94\x82   \xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 menudot2.lmp\n"
+        "\xe2\x94\x82   \xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 pop.lmp\n"
+        "\xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 maps\n"
+        "\xe2\x94\x82   \xe2\x94\x9c\xe2\x94\x80\xe2\x94\x80 b_batt0.bsp\n"
+        "\xe2\x94\x82   \xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 start.bsp\n"
+        "\xe2\x94\x94\xe2\x94\x80\xe2\x94\x80 quake.rc\n"
+        "\n"
+        "2 directories, 7 files\n";
+    EXPECT_STREQ(r.stdout_buf, expected);
+    proc_result_free(&r);
+    t_free(pak);
+}
+
+static void test_tree_empty_pak_prints_zero_summary(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("tree_empty")), 0);
+    char *work = fs_join(under_scratch("tree_empty"), "work.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    /* Delete everything via the same mass-delete path as
+     * test_delete_all. */
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", work);
+    char *listing = r.stdout_buf;
+    r.stdout_buf  = NULL;
+    proc_result_free(&r);
+
+    size_t cap = 16, count = 0;
+    const char **argv = (const char **)malloc(cap * sizeof(*argv));
+    argv[count++] = g_pakka_path;
+    argv[count++] = "-d";
+    argv[count++] = work;
+    char *cursor  = listing;
+    while (*cursor) {
+        char *eol = strchr(cursor, '\n');
+        if (!eol) break;
+        *eol = '\0';
+        char *sp = strchr(cursor, ' ');
+        if (sp) *sp = '\0';
+        if (count + 2 >= cap) { cap *= 2; argv = (const char **)realloc(argv, cap * sizeof(*argv)); }
+        argv[count++] = strdup(cursor);
+        cursor        = eol + 1;
+    }
+    argv[count] = NULL;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_EQ(r.exit_code, 0);
+    proc_result_free(&r);
+    for (size_t i = 3; i < count; i++) free((void *)argv[i]);
+    free(argv);
+    t_free(listing);
+
+    RUN_PAKKA_OK(&r, "-l", work, "--tree");
+    strip_cr(r.stdout_buf);
+    EXPECT_STREQ(r.stdout_buf, ".\n\n0 directories, 0 files\n");
+    proc_result_free(&r);
+    t_free(work);
+}
+
+static void test_tree_literal_path_preserved_after_double_dash(void)
+{
+    /* "--" should end option parsing so a pak entry literally named
+     * "--tree" can still be matched. The pak has no such entry, so
+     * we expect a not-found error — NOT the "--tree may only be used
+     * with -l" diagnostic. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("tree_literal/out")), 0);
+    char *work = fs_join(under_scratch("tree_literal"), "work.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    const char *argv[] = {g_pakka_path, "-x", "-C",
+                          under_scratch("tree_literal/out"),
+                          work, "--", "--tree", NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s]) {
+            EXPECT_NULL(strstr(streams[s], "--tree may only be used with -l"));
+        }
+    }
+    proc_result_free(&r);
+    t_free(work);
+}
+
+/* ---------- group M: control-byte sanitization on -l ---------- */
+
+static void test_list_sanitizes_control_byte_to_question_mark(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("ctrl_list")), 0);
+    char         *pak    = fs_join(under_scratch("ctrl_list"), "inj.pak");
+    unsigned char name[] = {'n', 'a', 'u', 'g', 'h', 't', 'y', 0x1B, 'n', 'a', 'm', 'e'};
+    EXPECT_EQ(write_pak_one_entry_bytes(pak, name, sizeof(name)), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", pak);
+    /* Raw ESC must NOT appear in the output. */
+    EXPECT_NULL(strchr(r.stdout_buf, 0x1B));
+    EXPECT_STR_CONTAINS(r.stdout_buf, "naughty?name");
+    proc_result_free(&r);
+    t_free(pak);
+}
+
+/* ---------- group N: --as multi-pair + incomplete ---------- */
+
+static void test_as_multiple_aliased_pairs(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("as_multi")), 0);
+    char *a = fs_join(under_scratch("as_multi"), "a.bin");
+    char *b = fs_join(under_scratch("as_multi"), "b.bin");
+    char *pak = fs_join(under_scratch("as_multi"), "multi.pak");
+    EXPECT_EQ(fs_write_file(a, "a\n", 2), 0);
+    EXPECT_EQ(fs_write_file(b, "bb\n", 3), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-c", pak,
+                 "--as", "virt/a.txt", a,
+                 "--as", "virt/b.txt", b);
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "virt/a.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "virt/b.txt");
+    proc_result_free(&r);
+    t_free(a);
+    t_free(b);
+    t_free(pak);
+}
+
+static void test_as_rejects_incomplete_pair(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("as_inc")), 0);
+    char *pak = fs_join(under_scratch("as_inc"), "inc.pak");
+
+    const char *argv[] = {g_pakka_path, "-c", pak, "--as", "virt/only.txt", NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "--as requires two arguments")) found = 1;
+    }
+    if (!found) {
+        proc_result_free(&r);
+        t_free(pak);
+        FAIL("expected '--as requires two arguments' diagnostic");
+    }
+    proc_result_free(&r);
+    t_free(pak);
+}
+
+/* ---------- group O: add rejection paths ---------- */
+
+static void test_add_rejects_duplicate_name(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("add_dupe")), 0);
+    char *work = fs_join(under_scratch("add_dupe"), "work.pak");
+    char *src  = fs_join(under_scratch("add_dupe"), "dupe.txt");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+    EXPECT_EQ(fs_write_file(src, "first\n", 6), 0);
+
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("add_dupe");
+    RUN_PAKKA_OK_CWD(&r, &opts, "-a", "work.pak", "dupe.txt");
+    proc_result_free(&r);
+
+    /* Same name a second time — must refuse. */
+    EXPECT_EQ(fs_write_file(src, "second\n", 7), 0);
+    const char *argv[] = {g_pakka_path, "-a", "work.pak", "dupe.txt", NULL};
+    EXPECT_EQ(proc_run(argv, &opts, &r), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "already exists")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'already exists' diagnostic on duplicate add");
+    t_free(work);
+    t_free(src);
+}
+
+static void test_add_rejects_56_byte_name_overflow(void)
+{
+    /* Pre-fix: strcpy(entry->filename, path) corrupted the heap. Now
+     * rejected with a 'too long' diagnostic before the copy. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("name_overflow")), 0);
+    char *work = fs_join(under_scratch("name_overflow"), "work.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    /* 70-char name (well above the 56-byte field). */
+    char long_name[71];
+    memset(long_name, 'a', 70);
+    long_name[70] = '\0';
+    char *src = fs_join(under_scratch("name_overflow"), long_name);
+    EXPECT_EQ(fs_write_file(src, "x\n", 2), 0);
+
+    const char   *argv[] = {g_pakka_path, "-a", work, src, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "too long")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'too long' diagnostic on 70-byte name");
+    t_free(work);
+    t_free(src);
+}
+
+/* ---------- group P: create refuses to clobber existing destination ---------- */
+
+static void test_create_refuses_to_overwrite_existing(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("noclobber")), 0);
+    char *target  = fs_join(under_scratch("noclobber"), "target.pak");
+    char *payload = fs_join(under_scratch("noclobber"), "payload");
+    static const char sentinel[] = "do not clobber me\n";
+    EXPECT_EQ(fs_write_file(target, sentinel, sizeof(sentinel) - 1), 0);
+    EXPECT_EQ(fs_write_file(payload, "payload\n", 8), 0);
+
+    const char   *argv[] = {g_pakka_path, "-c", target, payload, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+
+    /* Original content must survive byte-identically. */
+    size_t         got_n = 0;
+    unsigned char *got   = fs_read_file(target, &got_n);
+    EXPECT_NOT_NULL(got);
+    EXPECT_EQ((long long)got_n, (long long)(sizeof(sentinel) - 1));
+    EXPECT_MEM_EQ(got, sentinel, sizeof(sentinel) - 1);
+    t_free(got);
+    t_free(target);
+    t_free(payload);
+}
+
+/* ---------- group J.1: entry offset+length past EOF ---------- */
+
+static void test_entry_offset_plus_length_past_eof_rejected(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("off_plus_len")), 0);
+    char         *pak = fs_join(under_scratch("off_plus_len"), "p.pak");
+    unsigned char hdr[PAK_HEADER_SIZE];
+    memcpy(hdr, "PACK", 4);
+    put_u32_le(hdr, 4, PAK_HEADER_SIZE);
+    put_u32_le(hdr, 8, PAK_DIR_ENTRY);
+
+    unsigned char dir[PAK_DIR_ENTRY];
+    /* offset=12 (valid header end) but length=999 in a 76-byte file. */
+    EXPECT_EQ(fill_pak_dir_row(dir, "bogus", 5, PAK_HEADER_SIZE, 999), 0);
+
+    FILE *f = fopen(pak, "wb");
+    EXPECT_NOT_NULL(f);
+    fwrite(hdr, 1, sizeof(hdr), f);
+    fwrite(dir, 1, sizeof(dir), f);
+    fclose(f);
+
+    const char   *argv[] = {g_pakka_path, "-l", pak, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "out of range")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'out of range' diagnostic");
+    t_free(pak);
+}
+
+/* ---------- group Q: non-linear layout preservation on add ---------- */
+
+static void test_add_preserves_bytes_on_non_linear_layout(void)
+{
+    /* Regression for the find_tail bug. id's pak0.pak has entries out
+     * of byte order — directory's last entry is NOT at the file's byte
+     * tail. Old code seeked to dir-tail->offset+length and overwrote
+     * higher-offset live data. The fix walks every entry and seeks to
+     * the true max(offset+length). */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("nonlinear")), 0);
+    char *src_pak = fs_join(under_scratch("nonlinear"), "non_linear.pak");
+    char *work    = fs_join(under_scratch("nonlinear"), "work.pak");
+
+    /* Layout (LE):
+     *   bytes  0..11 : "PACK" + diroffset=17 + dirlength=128
+     *   bytes 12..16 : "hello" (afile payload)
+     *   bytes 17..80 : dir entry 0 = "bfile" (offset=145, length=5)
+     *   bytes 81..144: dir entry 1 = "afile" (offset=12,  length=5)
+     *   bytes 145..149: "world" (bfile payload) */
+    unsigned char hdr[PAK_HEADER_SIZE];
+    memcpy(hdr, "PACK", 4);
+    put_u32_le(hdr, 4, 17);
+    put_u32_le(hdr, 8, 128);
+
+    unsigned char dir_b[PAK_DIR_ENTRY], dir_a[PAK_DIR_ENTRY];
+    EXPECT_EQ(fill_pak_dir_row(dir_b, "bfile", 5, 145, 5), 0);
+    EXPECT_EQ(fill_pak_dir_row(dir_a, "afile", 5, 12, 5), 0);
+
+    FILE *f = fopen(src_pak, "wb");
+    EXPECT_NOT_NULL(f);
+    fwrite(hdr, 1, sizeof(hdr), f);
+    fwrite("hello", 1, 5, f);
+    fwrite(dir_b, 1, sizeof(dir_b), f);
+    fwrite(dir_a, 1, sizeof(dir_a), f);
+    fwrite("world", 1, 5, f);
+    fclose(f);
+
+    /* Sanity: both entries extract correctly before any add. */
+    char *pre = fs_join(under_scratch("nonlinear"), "pre");
+    EXPECT_EQ(fs_mkdir_p(pre), 0);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-x", "-C", pre, src_pak);
+    proc_result_free(&r);
+    char *pre_a = fs_join(pre, "afile");
+    char *pre_b = fs_join(pre, "bfile");
+    EXPECT_TRUE(fs_is_file(pre_a));
+    EXPECT_TRUE(fs_is_file(pre_b));
+
+    /* Copy + add a new entry, then verify all three survive. */
+    EXPECT_EQ(copy_file(src_pak, work), 0);
+    char *cfile = fs_join(under_scratch("nonlinear"), "cfile");
+    EXPECT_EQ(fs_write_file(cfile, "new content\n", 12), 0);
+
+    proc_opts_t opts = {0};
+    opts.cwd         = under_scratch("nonlinear");
+    RUN_PAKKA_OK_CWD(&r, &opts, "-a", "work.pak", "cfile");
+    proc_result_free(&r);
+
+    char *post = fs_join(under_scratch("nonlinear"), "post");
+    EXPECT_EQ(fs_mkdir_p(post), 0);
+    RUN_PAKKA_OK(&r, "-x", "-C", post, work);
+    proc_result_free(&r);
+
+    char          *post_a = fs_join(post, "afile");
+    char          *post_b = fs_join(post, "bfile");
+    char          *post_c = fs_join(post, "cfile");
+    size_t         an     = 0, bn = 0, cn = 0;
+    unsigned char *ad     = fs_read_file(post_a, &an);
+    unsigned char *bd     = fs_read_file(post_b, &bn);
+    unsigned char *cd     = fs_read_file(post_c, &cn);
+    EXPECT_EQ((long long)an, 5);
+    EXPECT_MEM_EQ(ad, "hello", 5);
+    EXPECT_EQ((long long)bn, 5);
+    EXPECT_MEM_EQ(bd, "world", 5);
+    EXPECT_EQ((long long)cn, 12);
+    EXPECT_MEM_EQ(cd, "new content\n", 12);
+
+    t_free(ad); t_free(bd); t_free(cd);
+    t_free(post_a); t_free(post_b); t_free(post_c); t_free(post);
+    t_free(cfile);
+    t_free(pre_a); t_free(pre_b); t_free(pre);
+    t_free(src_pak);
+    t_free(work);
+}
+
+/* ---------- group R: POSIX-only ---------- */
+
+#ifndef _WIN32
+
+static void test_extract_refuses_symlink_in_destination_tree(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("sl_dest")), 0);
+    char *pak     = fs_join(under_scratch("sl_dest"), "ok.pak");
+    char *out     = fs_join(under_scratch("sl_dest"), "out");
+    char *outside = fs_join(under_scratch("sl_dest"), "outside");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    EXPECT_EQ(fs_mkdir_p(outside), 0);
+
+    /* Pak with one zero-length "models/x" entry. */
+    unsigned char hdr[PAK_HEADER_SIZE];
+    memcpy(hdr, "PACK", 4);
+    put_u32_le(hdr, 4, PAK_HEADER_SIZE);
+    put_u32_le(hdr, 8, PAK_DIR_ENTRY);
+    unsigned char dir[PAK_DIR_ENTRY];
+    EXPECT_EQ(fill_pak_dir_row(dir, "models/x", 8, 76, 0), 0);
+    FILE *f = fopen(pak, "wb");
+    EXPECT_NOT_NULL(f);
+    fwrite(hdr, 1, sizeof(hdr), f);
+    fwrite(dir, 1, sizeof(dir), f);
+    fclose(f);
+
+    /* Plant the symlink at out/models pointing at outside/. */
+    char *link = fs_join(out, "models");
+    EXPECT_EQ(symlink(outside, link), 0);
+
+    const char   *argv[] = {g_pakka_path, "-x", "-C", out, pak, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+
+    /* The escape target must remain untouched. */
+    char *outside_x = fs_join(outside, "x");
+    EXPECT_FALSE(fs_is_file(outside_x));
+    t_free(outside_x);
+    t_free(link);
+    t_free(pak);
+    t_free(out);
+    t_free(outside);
+}
+
+static void test_add_skips_symlinks_inside_directory_tree(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("sl_add_skip")), 0);
+    char *src_sub   = fs_join(under_scratch("sl_add_skip"), "src/sub");
+    char *elsewhere = fs_join(under_scratch("sl_add_skip"), "elsewhere");
+    EXPECT_EQ(fs_mkdir_p(src_sub), 0);
+    EXPECT_EQ(fs_mkdir_p(elsewhere), 0);
+
+    char *real_txt   = fs_join(src_sub, "real.txt");
+    char *secret_txt = fs_join(elsewhere, "secret.txt");
+    EXPECT_EQ(fs_write_file(real_txt, "real\n", 5), 0);
+    EXPECT_EQ(fs_write_file(secret_txt, "OFF-LIMITS\n", 11), 0);
+
+    char *leak = fs_join(src_sub, "leak");
+    EXPECT_EQ(symlink(secret_txt, leak), 0);
+
+    char *pak = fs_join(under_scratch("sl_add_skip"), "out.pak");
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("sl_add_skip");
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "src");
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "src/sub/real.txt");
+    EXPECT_NULL(strstr(r.stdout_buf, "leak"));
+    EXPECT_NULL(strstr(r.stdout_buf, "secret"));
+    proc_result_free(&r);
+
+    t_free(real_txt); t_free(secret_txt); t_free(leak);
+    t_free(src_sub); t_free(elsewhere); t_free(pak);
+}
+
+static void test_add_rejects_symlink_as_top_level_path(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("sl_add_top")), 0);
+    char *real = fs_join(under_scratch("sl_add_top"), "real.txt");
+    char *link = fs_join(under_scratch("sl_add_top"), "link.txt");
+    char *work = fs_join(under_scratch("sl_add_top"), "work.pak");
+    EXPECT_EQ(fs_write_file(real, "real\n", 5), 0);
+    EXPECT_EQ(symlink(real, link), 0);
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+
+    const char   *argv[] = {g_pakka_path, "-a", work, link, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s]) {
+            for (const char *p = streams[s]; *p; p++) {
+                if ((p[0] == 's' || p[0] == 'S') && strncmp(p + 1, "ymlink", 6) == 0) { found = 1; break; }
+            }
+        }
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'symlink' diagnostic");
+    t_free(real); t_free(link); t_free(work);
+}
+
+static void test_add_refuses_to_bake_unsafe_entry_name(void)
+{
+    /* Add a file literally named "CON" — POSIX permits the filename;
+     * pakka's create-time is_unsafe_extract_path check rejects it so
+     * the bytes never reach the pak. Windows reserves CON at the OS
+     * level so the file can't be created; skipped via #ifndef _WIN32. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("bake_unsafe")), 0);
+    char *work = fs_join(under_scratch("bake_unsafe"), "work.pak");
+    char *con  = fs_join(under_scratch("bake_unsafe"), "CON");
+    EXPECT_EQ(copy_file(g_rebuilt, work), 0);
+    EXPECT_EQ(fs_write_file(con, "evil\n", 5), 0);
+
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("bake_unsafe");
+    const char   *argv[] = {g_pakka_path, "-a", "work.pak", "CON", NULL};
+    EXPECT_EQ(proc_run(argv, &opts, &r), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "not safe to extract")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'not safe to extract' diagnostic");
+    t_free(work);
+    t_free(con);
+}
+
+static void test_list_read_only_pak_still_lists(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("ro_list")), 0);
+    char *ro = fs_join(under_scratch("ro_list"), "ro.pak");
+    EXPECT_EQ(copy_file(g_rebuilt, ro), 0);
+    EXPECT_EQ(chmod(ro, S_IRUSR | S_IRGRP | S_IROTH), 0);
+
+    proc_result_t r;
+    const char   *argv[] = {g_pakka_path, "-l", ro, NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_EQ(r.exit_code, 0);
+    proc_result_free(&r);
+
+    /* Restore writable so scratch teardown can rm. */
+    chmod(ro, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    t_free(ro);
+}
+
+static void test_list_read_only_pak_still_extracts(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("ro_extract")), 0);
+    char *ro  = fs_join(under_scratch("ro_extract"), "ro.pak");
+    char *out = fs_join(under_scratch("ro_extract"), "out");
+    EXPECT_EQ(copy_file(g_rebuilt, ro), 0);
+    EXPECT_EQ(chmod(ro, S_IRUSR | S_IRGRP | S_IROTH), 0);
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+
+    proc_result_t r;
+    const char   *argv[] = {g_pakka_path, "-x", "-C", out, ro, "default.cfg", NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_EQ(r.exit_code, 0);
+    proc_result_free(&r);
+
+    char *got = fs_join(out, "default.cfg");
+    EXPECT_TRUE(fs_is_file(got));
+    t_free(got);
+
+    chmod(ro, S_IRUSR | S_IWUSR | S_IRGRP | S_IROTH);
+    t_free(ro);
+    t_free(out);
+}
+
+#endif /* _WIN32 */
+
 /* ---------- main ---------- */
 
 static int setup_extracted_and_rebuilt(void)
@@ -1073,6 +1828,36 @@ int main(void)
     RUN_TEST(test_entry_offset_inside_header_rejected);
 
     RUN_TEST(test_zero_byte_file_adds_and_extracts);
+
+    RUN_TEST(test_delete_head_and_tail_entries);
+    RUN_TEST(test_delete_all_leaves_valid_empty_pak);
+
+    RUN_TEST(test_tree_renders_hierarchy_with_summary);
+    RUN_TEST(test_tree_empty_pak_prints_zero_summary);
+    RUN_TEST(test_tree_literal_path_preserved_after_double_dash);
+
+    RUN_TEST(test_list_sanitizes_control_byte_to_question_mark);
+
+    RUN_TEST(test_as_multiple_aliased_pairs);
+    RUN_TEST(test_as_rejects_incomplete_pair);
+
+    RUN_TEST(test_add_rejects_duplicate_name);
+    RUN_TEST(test_add_rejects_56_byte_name_overflow);
+
+    RUN_TEST(test_create_refuses_to_overwrite_existing);
+
+    RUN_TEST(test_entry_offset_plus_length_past_eof_rejected);
+
+    RUN_TEST(test_add_preserves_bytes_on_non_linear_layout);
+
+#ifndef _WIN32
+    RUN_TEST(test_extract_refuses_symlink_in_destination_tree);
+    RUN_TEST(test_add_skips_symlinks_inside_directory_tree);
+    RUN_TEST(test_add_rejects_symlink_as_top_level_path);
+    RUN_TEST(test_add_refuses_to_bake_unsafe_entry_name);
+    RUN_TEST(test_list_read_only_pak_still_lists);
+    RUN_TEST(test_list_read_only_pak_still_extracts);
+#endif
 
     t_free(g_extracted);
     t_free(g_rebuilt);
