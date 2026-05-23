@@ -337,9 +337,10 @@ pakka's perspective both look identical at the `wmain` boundary —
 each argument is whatever wide string the parent handed to
 `CreateProcess`, and pakka converts it to UTF-8 once.
 
-The CI bats suite runs `pakka.exe` from MSYS2 bash (see
-`CLAUDE.md`); the same binary works under native `cmd.exe`
-invocation with no path-handling differences pakka cares about.
+The Windows CI builds `pakka.exe` via CMake/MSVC and exercises it
+via CTest from native PowerShell/cmd.exe; the same binary works
+under interactive `cmd.exe` invocation with no path-handling
+differences pakka cares about.
 
 ## 10. Out of scope
 
@@ -382,10 +383,10 @@ of the Unicode work above.
   +8).
 - PK3 with a pure-ASCII filename: byte-level assertion that the
   GP-flag high byte at LFH offset +6 is `0x00` (bit 11 clear).
-- Legacy PAK with CP1251 bytes in the name field (built by a
-  bats-side fixture writer that skips pakka): extract substitutes
-  the invalid bytes with `_`, emits the `[warn]` line to stderr,
-  and exits success with the file present.
+- Legacy PAK with CP1251 bytes in the name field (built by an
+  inline byte writer that skips pakka): extract substitutes the
+  invalid bytes with `_`, emits the `[warn]` line to stderr, and
+  exits success with the file present.
 - Legacy PAK with two CP1251 names that both sanitize to the same
   path: extract refuses with a collide-after-normalization error.
 - Listing a legacy CP1251 PAK: output is sanitized to printable

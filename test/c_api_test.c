@@ -1,8 +1,8 @@
-/* C-API test binary. Exercises the public pakka_* functions that the
- * bats CLI suite can't reach: NULL-argument tolerance, structured
+/* C-API test binary. Exercises the public pakka_* functions that
+ * black-box CLI tests can't reach: NULL-argument tolerance, structured
  * error fields, opaque entry accessors, create+close round-trip on an
  * empty archive, add/delete/commit round-trips, verify callback,
- * memory APIs, ZIP-magic rejection. Invoked from test/c_api_test.bats.
+ * memory APIs, ZIP-magic rejection.
  *
  * Usage: c_api_test <pak0.pak> <scratch_dir>
  *   pak0.pak     — known-good fixture, must contain at least 1 entry
@@ -1287,10 +1287,10 @@ static int test_set_compression(const char *scratch_dir) {
 
     /* Read the two entries back; both decode correctly regardless of
      * method. pakka's reader doesn't expose method directly so we
-     * verify by round-trip — the proof that the second entry is
-     * STORED comes from the bats suite's unzip -v assertion, not
-     * here. This case pins "no crash + correct bytes" after the
-     * setting-reset. */
+     * verify by round-trip — the method-specific assertions
+     * (STORED vs DEFLATE in the CDR) live in test/pk3_test.c via
+     * zip_first_cdr_method / zip_nth_cdr_method. This case pins
+     * "no crash + correct bytes" after the setting-reset. */
     arc = NULL;
     s = pakka_open(path, PAKKA_OPEN_READ, &arc, &err);
     EXPECT_EQ(s, PAKKA_OK, "reopen read-only after reset test");

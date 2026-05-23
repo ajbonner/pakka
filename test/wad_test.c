@@ -1,4 +1,4 @@
-/* wad_test — Doom WAD format (IWAD + PWAD). C peer of test/wad.bats.
+/* wad_test — Doom WAD format (IWAD + PWAD) end-to-end tests.
  *
  * 12-byte header (magic + numlumps u32 LE + infotableofs u32 LE)
  * followed by lump payloads, with the directory at infotableofs
@@ -49,9 +49,9 @@ typedef struct {
     size_t      payload_len;
 } wad_entry_t;
 
-/* Build a WAD with `entries` lumps. Marker convention: NULL payload OR
- * payload_len == 0 records filepos=0, size=0 (matches the bats
- * write_wad_synth pattern). */
+/* Build a WAD with `entries` lumps. Marker convention: NULL payload
+ * OR payload_len == 0 records filepos=0, size=0 (an in-pak marker
+ * entry rather than a real lump). */
 static int write_wad_synth(const char         *path,
                            const char         *magic, /* "IWAD" or "PWAD" */
                            const wad_entry_t  *entries,

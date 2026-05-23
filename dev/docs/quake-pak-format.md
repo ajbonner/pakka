@@ -286,7 +286,7 @@ code path.
 
 ## 7. Test coverage
 
-- `test/pakka.bats` — end-to-end CLI tests against id's shareware
+- `test/pakka_test.c` — end-to-end CLI tests against id's shareware
   `pak0.pak` (downloaded + SHA-verified by `make test`). Covers
   list, extract, create, add, delete, verify, and the
   out-of-order / orphan-byte cases id's archive exhibits.

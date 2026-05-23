@@ -1,5 +1,4 @@
-/* unicode_paths_test — non-ASCII path handling. C peer of
- * test/unicode_paths.bats.
+/* unicode_paths_test — non-ASCII path handling.
  *
  * Tests pakka's UTF-8 ↔ UTF-16 conversion at the Windows syscall
  * boundary (wmain wrapper, ZIP GPBF bit 11, CP437 fallback, invalid-

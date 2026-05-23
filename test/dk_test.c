@@ -1,4 +1,4 @@
-/* dk_test — Daikatana pak format. C peer of test/dk.bats.
+/* dk_test — Daikatana pak format end-to-end tests.
  *
  * Same "PACK" magic as Quake, but directory entries are 72 bytes (extra
  * trailing u32 pair for compressed_size + is_compressed). Custom byte-
@@ -245,8 +245,8 @@ static int copy_file(const char *src, const char *dst)
     return rc;
 }
 
-/* Build an LCG-driven 256-byte high-entropy buffer matching the bats
- * pseudo-random generator: r = r*1103515245 + 12345, take byte at
+/* Build an LCG-driven 256-byte high-entropy buffer for the
+ * incompressible-fallback assertion: r = r*1103515245 + 12345, take byte at
  * (r >> 16) & 0xFF. Seed 0xC0FFEE. */
 static void build_lcg_buffer(unsigned char buf[256])
 {

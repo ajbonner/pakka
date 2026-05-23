@@ -16,11 +16,11 @@ CPPFLAGS = -Iinclude -Isrc -D_XOPEN_SOURCE=700 -D_FILE_OFFSET_BITS=64 -D_DEBUG=1
 # Opt-in fault-injection hook (PAKKA_INJECT_FAULT_AT="op:N" env var,
 # read by pakka_test_should_fault in src/platform.c). Compiled into
 # binaries only when the user invokes a test target, so a plain
-# `make` produces a release-style build without the hook. The bats
-# suite (`make test`) gets it automatically; the c_api_test exerciser
-# and inline cc invocations link against the test-built libpakka.a
-# and pick up the hook through it. CMake / Windows release builds
-# never define PAKKA_TEST_BUILD.
+# `make` produces a release-style build without the hook. `make test`
+# (and any realpak target) sets PAKKA_TEST_BUILD across libpakka +
+# the C test binaries so the hook is reachable from the in-process
+# fault-injection cases in test/pk3_test.c. CMake / Windows release
+# builds never define PAKKA_TEST_BUILD.
 ifneq ($(filter test test-fault realpak-test realpak-test-q3 realpak-test-goldsrc, $(MAKECMDGOALS)),)
 CPPFLAGS += -DPAKKA_TEST_BUILD
 PAKKA_BUILD_MODE := test
@@ -39,9 +39,10 @@ BUILD_DIR=build
 # so sharing OBJ/LIB lets the wrong-flavor .o or .a be reused after a
 # mode switch — especially painful at second-resolution mtime
 # comparisons where back-to-back builds collide. Splitting per mode
-# keeps each cache warm and avoids the ambiguity. The bats suite picks
-# up the right libpakka.a via the $LIBPAKKA env var the test target
-# passes through.
+# keeps each cache warm and avoids the ambiguity. The C test binaries
+# under build/test/ link directly against the per-mode libpakka.a via
+# the $(LIBPAKKA) Makefile variable, so the right archive is always
+# selected.
 OBJ_DIR=$(BUILD_DIR)/obj-$(PAKKA_BUILD_MODE)
 LIB_DIR=$(BUILD_DIR)/lib-$(PAKKA_BUILD_MODE)
 TEST_DIR=$(BUILD_DIR)/test
@@ -131,9 +132,8 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 #
 # Both wrappers are plain ZIPs from archive.org; we unzip then copy
 # the inner pak0 out to a canonical path under build/test/. unzip is
-# in every base Linux/BSD/macOS install plus MSYS2 — no extra
-# dependency vs. the 7z/unrar paths the upstream archive uploaders
-# could have chosen.
+# in every base Linux/BSD/macOS install — no extra dependency vs. the
+# 7z/unrar paths the upstream archive uploaders could have chosen.
 #
 # Fixture A: Half-Life Uplink (1999 free standalone demo Valve made
 # public for the launch promotion; the executable was distributed
@@ -254,11 +254,11 @@ lint-advisory:
 	@dev/lint/add-path-symmetry.sh $(CURDIR)
 
 # Coverage report. Builds with -fprofile-arcs -ftest-coverage, runs
-# the full bats suite, and renders an HTML lcov tree under
+# the full C test suite, and renders an HTML lcov tree under
 # build/coverage/. Needs lcov + genhtml; on macOS install via
 # `brew install lcov`. Not wired into `make test` because the
-# instrumented build adds ~30% runtime to bats and the report is only
-# useful as a periodic artifact, not on every iteration.
+# instrumented build adds ~30% runtime to the test pass and the
+# report is only useful as a periodic artifact, not on every iteration.
 
 # libFuzzer harnesses. Need clang with -fsanitize=fuzzer (Ubuntu's
 # clang ships this by default; macOS needs `brew install llvm` +
@@ -364,7 +364,7 @@ $(LIBPAKKA): $(LIB_OBJECTS)
 # linked against the static archive. Exercises every pakka_* public
 # function: NULL tolerance, structured-error population, opaque-entry
 # accessors, the streaming reader, add/delete/commit round-trips, and
-# the verify report callback — none of which the bats CLI suite can
+# the verify report callback — none of which black-box CLI tests can
 # reach.
 C_API_TEST = $(TEST_DIR)/c_api_test
 $(C_API_TEST): test/c_api_test.c $(LIBPAKKA)
@@ -541,9 +541,9 @@ $(PAK0): verify-tarball
 	@cd $(TEST_DIR) && tar xzf quakesw.tar.gz
 	@cp $(TEST_DIR)/id1/pak0.pak $(PAK0)
 
-# Download + SHA-verify pak0.pak only. Useful for CI configurations that
-# build pakka through a non-Make path (e.g. CMake/MSVC on Windows) but
-# still want to drive the bats suite against the canonical fixture.
+# Download + SHA-verify pak0.pak only. The Windows CTest path uses
+# dev/win/fixtures.ps1 to produce the same fixture on the Windows side;
+# this target is the Unix-Makefile entry point.
 fixture: $(PAK0)
 
 test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) $(PK3_Q3DEMO_TEST) $(PAK_GOLDSRC_TEST) $(UNICODE_PATHS_TEST) symbol-audit
@@ -605,7 +605,8 @@ $(Q3DEMO_PAK0_PK3): $(TARGET) verify-q3demo
 # plain ZIPs; we unzip then copy the inner pak file out to the
 # canonical $(GOLDSRC_*_PAK0) path. The inner paths use the names
 # Valve shipped (spaces, uppercase .PAK) — we normalize to lowercase
-# valve/pak0.pak on copy so the bats env vars point at a predictable
+# valve/pak0.pak on copy so the realpak env vars
+# (GOLDSRC_UPLINK_PAK0 / GOLDSRC_DAYONE_PAK0) point at a predictable
 # location.
 $(GOLDSRC_UPLINK_WRAPPER):
 	@mkdir -p $(TEST_DIR)
@@ -651,16 +652,16 @@ $(GOLDSRC_DAYONE_PAK0): verify-goldsrc-dayone
 # game-engine archives downloaded from archive.org rather than the
 # synthetic Quake 1 shareware pak used by `make test`. The "realpak"
 # label distinguishes them from `make test` (smaller, single-format
-# fixture) — they're not slow in wall-clock terms, the bats suites run
-# in under a minute; the only cost is the first-time fixture download,
-# which is SHA-pinned and cached in CI.
+# fixture) — they're not slow in wall-clock terms, the C realpak
+# tests finish in seconds; the only cost is the first-time fixture
+# download, which is SHA-pinned and cached in CI.
 
 # `make realpak-test` is the umbrella — runs both q3 and goldsrc.
 realpak-test: realpak-test-q3 realpak-test-goldsrc
 
 # Full PK3 suite against id's real Q3 demo pak0.pk3. Pulls 93 MiB from
-# archive.org; CI caches the wrapper zip by Makefile hash so reruns
-# skip the download.
+# archive.org; CI caches the wrapper zip by dev/fixtures.mk hash so
+# reruns skip the download until the pin changes.
 realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) $(PK3_Q3DEMO_TEST) symbol-audit
 	@echo "==> pk3_q3demo_test"
 	@PAKKA=$(abspath $(TARGET)) Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) \

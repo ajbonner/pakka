@@ -2,8 +2,8 @@
 # Build + smoke-test pakka inside the running NetBSD 3.0/sparc guest.
 # Assumes run-vm.sh has the guest up with SSH reachable on host port
 # $PAKKA_NBSD_SSH_PORT. Uses scp to ship a source tarball, then
-# ssh+gmake to build and run the symlink-safe extract smoke from
-# test/pakka.bats.
+# ssh+gmake to build and run a symlink-safe-extract smoke check
+# (the same path test/pakka_test.c covers in detail on modern hosts).
 #
 # NetBSD 3.0/sparc has no usable pkgsrc binary archive (vendor only
 # keeps 7.0+ in pkgsrc-archive), so the run-vm.sh post-install dance

@@ -2,8 +2,7 @@
  * pakka_dk_deflate() through src/common.h (the public surface
  * exposes neither). Decoder coverage: every opcode class plus the
  * bounds and termination contracts. Encoder coverage: worst-case
- * bound + round-trip integrity through the decoder. Wrapped by
- * test/dk_codec_test.bats. */
+ * bound + round-trip integrity through the decoder. */
 
 #include <stdio.h>
 #include <stdlib.h>

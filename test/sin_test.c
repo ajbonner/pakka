@@ -1,4 +1,4 @@
-/* sin_test — SiN (Ritual, 1998) pak format. C peer of test/sin.bats.
+/* sin_test — SiN (Ritual, 1998) pak format end-to-end tests.
  *
  * Differs from Quake/Q2 PAK in three places: "SPAK" magic, 120-byte
  * filename field (vs PAK's 56), 128-byte directory entry (vs 64).
@@ -298,9 +298,9 @@ static void test_add_rejects_120_byte_name(void)
 
 static void test_freshly_created_spak_lists_ok(void)
 {
-    /* User-visible signal that pakka recognises the SPAK format on the
-     * read side after creating one. Mirrors the bats "format: pakka_format()
-     * reports SIN" case — without a stable text-format API to grep for. */
+    /* User-visible signal that pakka recognises the SPAK format on
+     * the read side after creating one. CLI-only check; the
+     * pakka_format() API itself is exercised via c_api_test. */
     char *src = under_scratch("fmt/src");
     EXPECT_EQ(fs_mkdir_p(src), 0);
     char *xtxt = fs_join(src, "x.txt");

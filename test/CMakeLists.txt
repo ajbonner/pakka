@@ -16,9 +16,8 @@ else()
 endif()
 
 # Build a test executable + apply uniform warning flags. Output goes to
-# CMAKE_BINARY_DIR (not the test/ subdir) so Windows CI's existing
-# `test -x build/cmake/<name>.exe` checks keep working through the
-# migration window.
+# CMAKE_BINARY_DIR (not the test/ subdir) so Windows CI's
+# `test -x build/cmake/<name>.exe` checks resolve directly.
 function(pakka_add_test_exe name source)
     add_executable(${name} ${source})
     set_target_properties(${name} PROPERTIES
@@ -35,18 +34,17 @@ function(pakka_add_test_exe name source)
     endif()
 endfunction()
 
-# c_api_test (NULL tolerance, round-trips, accessors, verify, memory APIs)
-# and dk_codec_test (opcode boundaries / overlap / bounds / termination)
-# build the binaries that the bats wrappers c_api_test.bats and
-# dk_codec_test.bats invoke. Now also registered with CTest so they run
-# in the native test path alongside their bats peers.
+# c_api_test (NULL tolerance, round-trips, accessors, verify, memory
+# APIs) and dk_codec_test (opcode boundaries / overlap / bounds /
+# termination) are the public-API regression binaries. Both are
+# registered as native CTest targets.
 #
 # c_api_test takes two positional args: <pak0.pak> <scratch_dir>. The
 # fixture lives at ${CMAKE_SOURCE_DIR}/build/test/pak0.pak (downloaded
-# via `make fixture` on Unix; fixtures.ps1 on Windows will land it at
-# the same path). The scratch dir needs to be fresh every run — the
-# bats wrapper used `mktemp -d` for this; under CTest we use a fixture
-# test that rm -rf's + mkdir's the scratch dir before c_api_test runs.
+# via `make fixture` on Unix; fixtures.ps1 on Windows lands it at the
+# same path). The scratch dir needs to be fresh every run — we wire
+# a CTest fixture pair that rm -rf's + mkdir's the scratch dir before
+# c_api_test runs.
 pakka_add_test_exe(c_api_test c_api_test.c)
 
 add_test(NAME _c_api_scratch_clean

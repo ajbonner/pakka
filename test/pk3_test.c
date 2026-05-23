@@ -228,8 +228,7 @@ static void test_compress_encodes_deflate_on_compressible(void)
 }
 
 /* Build a buffer using a small LCG to ensure determinism + high entropy.
- * urandom would also work but introduces flake risk. The bats's
- * /dev/urandom test is platform-specific; we replicate the contract
+ * urandom would also work but introduces flake risk; this contract is
  * (incompressible input → STORED fallback) with the LCG. */
 static void fill_high_entropy(unsigned char *buf, size_t len, uint32_t seed)
 {
@@ -241,8 +240,7 @@ static void fill_high_entropy(unsigned char *buf, size_t len, uint32_t seed)
 }
 
 /* Build a mixed STORED + DEFLATE PK3 under `scratch_sub` using
- * `pakka -c --compress`, with the same shape the bats setup_file
- * produced via /usr/bin/zip:
+ * `pakka -c --compress`. The fixture shape:
  *
  *   hello.txt          — short text (STORED, too small for DEFLATE)
  *   binary.bin         — 11-byte binary blob with embedded NULs
@@ -550,8 +548,8 @@ static void test_open_rejects_dotdot_traversal_in_zip(void)
     EXPECT_EQ(fs_mkdir_p(under_scratch("zip_dotdot")), 0);
     char *pak = under_scratch("zip_dotdot/traversal.pk3");
 
-    /* Extract path also exercises the policy; we use -x rather than -l
-     * because the bats test does -x and asserts "nothing escaped". */
+    /* Extract path also exercises the policy; we use -x so we can
+     * also assert that nothing escapes the destination tree. */
     const char  *name    = "../escape.txt";
     const char  *payload = "escape\n";
     zip_single_t p       = {0};
@@ -1184,8 +1182,8 @@ static void test_commit_rebuild_also_drops_eocd_comment(void)
 
 /* Inline 2-entry ZIP writer: one regular STORED entry + one
  * trailing-slash zero-payload "directory" entry. Used to pin pakka's
- * "silently skip trailing-slash entries" tolerance without needing
- * /usr/bin/zip -r. */
+ * "silently skip trailing-slash entries" tolerance using an inline
+ * writer rather than an external zip tool. */
 static int write_dir_marker_pk3(const char *path)
 {
     static const char real_name[] = "real.txt";

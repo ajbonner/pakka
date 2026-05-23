@@ -1,9 +1,10 @@
 # fixtures.ps1 — native-Windows fixture download + verify + extract.
 #
-# Replaces the MSYS2-bound `make fixture` / `make verify-q3demo` /
-# `make verify-goldsrc-*` flow for Windows CI. Uses only PowerShell 7+
-# native cmdlets (Invoke-WebRequest, Get-FileHash, Expand-Archive)
-# plus the tar.exe that ships with Windows 10+.
+# PowerShell-native equivalent of the Makefile's fixture flow
+# (`make fixture` / `make verify-q3demo` / `make verify-goldsrc-*`).
+# Uses only PowerShell 7+ native cmdlets (Invoke-WebRequest,
+# Get-FileHash, Expand-Archive) plus the tar.exe that ships with
+# Windows 10+.
 #
 # URLs + SHA-256 pins are parsed from dev/fixtures.mk so this script
 # and the Makefile share one source of truth. Path layout + extraction

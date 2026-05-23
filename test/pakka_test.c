@@ -82,8 +82,8 @@ static int write_pak_one_entry_bytes(const char *path,
     return fclose(f) == 0 ? 0 : -1;
 }
 
-/* Minimal valid PAK with one zero-length entry. Mirrors bats's
- * write_pak_one_entry — 12-byte header + 64-byte dir entry, no payload. */
+/* Minimal valid PAK with one zero-length entry: 12-byte header +
+ * 64-byte dir entry, no payload. */
 static int write_pak_one_entry(const char *path, const char *name)
 {
     return write_pak_one_entry_bytes(path, name, strlen(name));

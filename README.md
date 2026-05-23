@@ -266,44 +266,37 @@ extract-specific, add, delete (including the head, the tail, and every entry),
 
     $ make test
 
-`make test` depends on two gates that run before any bats test:
+`make test` runs the full C test suite directly — `symbol-audit`,
+`c_api_test`, `dk_codec_test`, and a per-format binary
+(`pakka_test`, `pk3_test`, `pk4_test`, `dk_test`, `sin_test`,
+`wad_test`, `unicode_paths_test`, `large_file_test`, plus the
+realpak suites). No bats, no shell harness; every case is in
+`test/*_test.c`.
 
-* `make symbol-audit` — runs `nm -g build/lib/libpakka.a` and fails the
-  build if any defined global lacks the `pakka_` prefix. Keeps the
-  library namespace-clean.
-* `test/c_api_test.c` — a 900-line C-API exerciser linked only
-  against `libpakka.a` (no internal headers). Covers NULL tolerance,
-  round-trips, structured-error population, and the
-  `pakka_open_entry` / `pakka_reader_read` streaming surface that the
-  bats CLI tests can't reach.
+* `symbol-audit` — runs `nm -g build/lib-test/libpakka.a` and fails
+  if any defined global lacks the `pakka_` prefix. Keeps the library
+  namespace-clean.
+* `c_api_test` — a c-API exerciser linked only against the public
+  header. Covers NULL tolerance, round-trips, structured-error
+  population, and the `pakka_open_entry` / `pakka_reader_read`
+  streaming surface that black-box CLI tests can't reach.
 
-Requires [bats-core](https://github.com/bats-core/bats-core)
-(`brew install bats-core`, `apt install bats`, `pkg install bats-core`, etc.),
-plus `curl`, `openssl`, and `tar` for fetching and verifying the test fixture.
+Requires a C99 compiler, `make`, `curl`, `openssl`, and `tar`
+(`unzip` only for the optional GoldSrc realpak suites).
 
 ### Running tests on Windows
 
-There's no `make test` one-shot on Windows because the build (MSVC `cl.exe`)
-and the test runner (bats under MSYS2 bash) live in different shells. After
-building `pakka.exe` via CMake (see Installation), open the **MSYS2 MSYS**
-shell, `cd` to the repo, and run:
+The Windows test path is `cmake -G Ninja -DPAKKA_TEST_BUILD=ON .` +
+`ctest` — no bash, no MSYS2. From a stock PowerShell or `cmd.exe`:
 
-    $ make fixture                                   # download + SHA-verify pak0.pak
-    $ export PAKKA="$PWD/build/cmake/pakka.exe"      # must be a fully-qualified path
-    $ bats test/
+    cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
+    cmake --build build/cmake
+    pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite quake
+    ctest --test-dir build/cmake --output-on-failure
 
-**Gotcha:** `PAKKA` has to be **absolute**, not relative. `bats` may `chdir`
-into a temp directory inside `setup_file` before invoking pakka, so a
-relative path resolves wrong and every test fails to find the binary.
-
-`bats-core` isn't in any MSYS2 repo; install from upstream once:
-
-    $ git clone --depth 1 --branch v1.13.0 \
-        https://github.com/bats-core/bats-core.git /tmp/bats-core
-    $ /tmp/bats-core/install.sh /usr/local
-
-MSYS2 packages needed alongside bats: `pacman -S --needed bash coreutils curl
-diffutils git openssl tar make python3 zip unzip`.
+`dev/win/fixtures.ps1` is the PowerShell-native equivalent of `make
+fixture` / `make verify-*`. It and the Makefile share fixture URLs
++ SHA-256 pins via `dev/fixtures.mk`.
 
 `make realpak-test-q3` is an opt-in suite that exercises pakka against
 a real game-engine archive. It downloads id's Q3 demo wrapper from
@@ -315,17 +308,15 @@ Uplink and Day One PAKs (138 MiB combined). `make realpak-test` is an
 umbrella that runs both. Not part of `make test` because of the
 download sizes and archive.org's intermittent availability.
 
-The Windows MSVC build can't drive `make realpak-test-q3` / `make
-realpak-test-goldsrc` directly — those targets depend on the cc-built
-`pakka` binary and on `symbol-audit` against `libpakka.a`, neither of
-which exist in the CMake/Ninja path. Use `dev/win/realpak-test.sh`
-from MSYS2 instead; it reuses the Makefile's download + SHA-verify
-steps and drives the extract / bats invocations against
-`build/cmake/pakka.exe`:
+On Windows the same coverage is reached through CTest: set the fixture
+env var to the path `fixtures.ps1` produces, then filter the CTest run:
 
-    $ dev/win/realpak-test.sh            # both suites
-    $ dev/win/realpak-test.sh q3         # Q3 demo PK3 only (~93 MiB)
-    $ dev/win/realpak-test.sh goldsrc    # Half-Life PAK fixtures (~138 MiB)
+    $env:Q3DEMO_PAK0_PK3 = "$pwd\build\test\q3demo\pak0.pk3"
+    ctest --test-dir build/cmake -R pk3_q3demo_test --output-on-failure
+
+    $env:GOLDSRC_UPLINK_PAK0 = "$pwd\build\test\hl-uplink\valve\pak0.pak"
+    $env:GOLDSRC_DAYONE_PAK0 = "$pwd\build\test\hl-dayone\valve\pak0.pak"
+    ctest --test-dir build/cmake -R pak_goldsrc_test --output-on-failure
 
 `make lint` runs [clang-tidy](https://clang.llvm.org/extra/clang-tidy/) with
 a curated check set (`.clang-tidy` at the repo root). On macOS, install via
@@ -344,17 +335,17 @@ CI coverage currently includes:
 
 | OS | Architecture | libc / toolchain | Coverage |
 |---|---|---|---|
-| macOS 26 | Intel x86_64 | Apple clang | full bats |
-| macOS 26 | Apple Silicon arm64 | Apple clang | full bats |
-| Ubuntu latest | x86_64 | glibc / gcc | full bats |
-| Ubuntu 24.04 | arm64 | glibc / gcc | full bats |
-| Alpine 3.23 | x86_64 | musl / gcc | full bats |
-| Ubuntu latest | x86_64 (`-m32`) | glibc / gcc (32-bit ABI) | full bats |
-| Debian bookworm-slim (Docker / QEMU) | s390x | glibc / gcc, **big-endian** | full bats |
-| FreeBSD 15.0 | amd64 | clang | full bats |
-| FreeBSD 15.0 | amd64 (`-m32`) | clang (32-bit ABI) | full bats |
-| OpenBSD 7.8 | amd64 | clang | full bats |
-| Windows Server 2025 (VS 2026) | x86_64 | MSVC cl.exe + CMake/Ninja | full bats |
+| macOS 26 | Intel x86_64 | Apple clang | full C suite |
+| macOS 26 | Apple Silicon arm64 | Apple clang | full C suite + realpak Q3/GoldSrc |
+| Ubuntu latest | x86_64 | glibc / gcc | full C suite + realpak Q3/GoldSrc |
+| Ubuntu 24.04 | arm64 | glibc / gcc | full C suite |
+| Alpine 3.23 | x86_64 | musl / gcc | full C suite |
+| Ubuntu latest | x86_64 (`-m32`) | glibc / gcc (32-bit ABI) | full C suite |
+| Debian bookworm-slim (Docker / QEMU) | s390x | glibc / gcc, **big-endian** | full C suite |
+| FreeBSD 15.0 | amd64 | clang | full C suite |
+| FreeBSD 15.0 | amd64 (`-m32`) | clang (32-bit ABI) | full C suite |
+| OpenBSD 7.8 | amd64 | clang | full C suite |
+| Windows Server 2025 (VS 2026) | x86_64 | MSVC cl.exe + CMake/Ninja | full C suite + realpak Q3/GoldSrc |
 | Debian Sarge-derived (Docker) | i386 | glibc 2.3.2 / gcc 3.3 / GNU make **3.79.1** | build + symlink-safe extract check |
 | Red Hat Linux 9 rootfs (Docker) | i386 | glibc 2.3.2 / gcc 3.2.2 / GNU make 3.79.1 | build + symlink-safe extract check |
 | NetBSD 3.0 (QEMU) | sparc | BSD libc / gcc 3.3 / GNU make 3.81, **big-endian** | build + symlink-safe extract check |
@@ -370,19 +361,20 @@ pre-openat (`PAKKA_LEGACY_EXTRACT`) BSD code path. Modern BSDs in the
 matrix all take the `openat`/`mkdirat` path.
 
 The legacy build jobs run `make` + a banner + symlink-safe extract
-check (not the full bats suite — bash 2.05b / minimal userland on
-the older guests). The Debian Sarge and Red Hat Linux 9 jobs keep
-pakka's **Linux legacy floor** intact: gcc 3.0+ (first FSF release with
-adequate C99 support), glibc 2.2.5+, GNU make 3.79.1+, Linux kernel
-2.4+. Concrete distros that meet that floor with default packages
-include Red Hat Linux 8.0 (Sept 2002), Red Hat Linux 9 (March 2003),
-and Debian 3.1 Sarge (June 2005). The NetBSD/sparc job is a separate
-class — BSD libc + big-endian SPARC + the pre-openat BSD branch of
-`PAKKA_LEGACY_EXTRACT` (NetBSD < 6.0, FreeBSD < 8.0, OpenBSD < 5.0).
+check (not the full C test suite — minimal userland on the older
+guests can't satisfy every transitive build dependency). The Debian
+Sarge and Red Hat Linux 9 jobs keep pakka's **Linux legacy floor**
+intact: gcc 3.0+ (first FSF release with adequate C99 support),
+glibc 2.2.5+, GNU make 3.79.1+, Linux kernel 2.4+. Concrete distros
+that meet that floor with default packages include Red Hat Linux 8.0
+(Sept 2002), Red Hat Linux 9 (March 2003), and Debian 3.1 Sarge
+(June 2005). The NetBSD/sparc job is a separate class — BSD libc +
+big-endian SPARC + the pre-openat BSD branch of `PAKKA_LEGACY_EXTRACT`
+(NetBSD < 6.0, FreeBSD < 8.0, OpenBSD < 5.0).
 
-The Windows job builds `pakka.exe` via CMake/MSVC and runs the bats suite
-through MSYS2 bash. POSIX builds remain Makefile-driven; CMake is the
-Windows-only path.
+The Windows job builds `pakka.exe` via CMake/MSVC and runs the same
+C test binaries via CTest. POSIX builds remain Makefile-driven; CMake
+is the Windows path.
 
 ## Contributing
 1. Fork it!

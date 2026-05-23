@@ -16,7 +16,8 @@ typedef struct {
      * child is SIGKILL'd (POSIX) / TerminateProcess'd (Windows). */
     int timeout_ms;
 
-    /* If non-zero, merge stderr into stdout (matches bats `run` default). */
+    /* If non-zero, merge stderr into stdout so callers see one
+     * combined stream. */
     int merge_stderr;
 } proc_opts_t;
 

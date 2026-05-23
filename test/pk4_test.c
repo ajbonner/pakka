@@ -1,10 +1,5 @@
 /* pk4_test — pakka's handling of the PK4 (Doom 3) container.
  *
- * Partial C peer of test/pk4.bats. Ports the 4 cases that build their
- * own fixtures via pakka itself; the 3 bats cases that depend on
- * /usr/bin/zip stay in pk4.bats during the migration window and are
- * exercised by the Unix bats path.
- *
  * PK4 is byte-identical to PK3 on disk; this suite covers the format-
  * labeling layer (extension sniff, ZIP create dispatch, magic-wins-
  * over-extension) plus the delete/rebuild commit path under a PK4
@@ -79,7 +74,8 @@ static int copy_file(const char *src, const char *dst)
 
 static void test_create_builds_valid_zip(void)
 {
-    /* Mirrors pk4.bats "pk4 create: -c .pk4 builds a valid ZIP and round-trips". */
+    /* `pakka -c foo.pk4 a.txt d` writes a valid ZIP that round-trips
+     * through pakka -x and through the LFH signature check. */
     char *src     = under_scratch("create/src");
     char *src_d   = fs_join(src, "d");
     EXPECT_EQ(fs_mkdir_p(src_d), 0);
@@ -122,7 +118,7 @@ static void test_create_builds_valid_zip(void)
 
 static void test_create_uppercase_pk4_extension(void)
 {
-    /* Mirrors pk4.bats "pk4 create: uppercase .PK4 extension is also recognised". */
+    /* Uppercase .PK4 extension is also recognised as the PK4 format. */
     char *src = under_scratch("upper/src");
     EXPECT_EQ(fs_mkdir_p(src), 0);
     char *xtxt = fs_join(src, "x.txt");
@@ -150,7 +146,8 @@ static void test_create_uppercase_pk4_extension(void)
 
 static void test_delete_rebuild_produces_valid_pk4(void)
 {
-    /* Mirrors pk4.bats "pk4 delete + close: rebuild path produces a valid PK4". */
+    /* delete + close exercises the rebuild commit path and must
+     * produce a valid PK4 that opens + extracts cleanly. */
     char *src = under_scratch("del/src");
     EXPECT_EQ(fs_mkdir_p(src), 0);
     char *keep   = fs_join(src, "keep.txt");
@@ -192,10 +189,11 @@ static void test_delete_rebuild_produces_valid_pk4(void)
 }
 
 /* Build a multi-entry DEFLATE PK4 via pakka -c --compress so the
- * round-trip tests have a fixture without needing /usr/bin/zip. The
- * resulting archive's DEFLATE-encoded entries exercise the same reader
- * path the bats tests cover. Returns absolute path to the built pak,
- * or NULL on any setup failure; the caller frees the path. */
+ * round-trip tests have a real-DEFLATE fixture without depending on
+ * external tools. The resulting archive's DEFLATE-encoded entries
+ * exercise the same reader path a real-world Doom 3 PK4 hits. Returns
+ * absolute path to the built pak, or NULL on any setup failure; the
+ * caller frees the path. */
 static char *build_deflate_pk4_fixture(void)
 {
     char *src    = under_scratch("deflate_fixture/src");
@@ -277,8 +275,9 @@ static void test_verify_synthetic_pk4_passes_deep_checks(void)
 
 static void test_pack_magic_in_pk4_opens_as_pak(void)
 {
-    /* Mirrors pk4.bats "pk4 open: PACK magic in a .pk4 file opens as
-     * PAK (magic wins)". Extension is only the tiebreaker between PK3
+    /* PACK-magic content in a .pk4 file opens as the underlying PAK
+     * format (magic wins over extension) rather than failing the ZIP
+     * signature check. Extension is only the tiebreaker between PK3
      * and PK4 labels — magic still decides what container is being
      * read. A PAK file renamed to .pk4 must still read as a PAK. */
     char *src = under_scratch("magic/src");
@@ -332,7 +331,7 @@ int main(void)
     g_scratch = strdup(scratch);
 
     /* Build the DEFLATE fixture once — the three round-trip tests
-     * share it (mirroring the bats setup_file pattern). The fixture
+     * share it. The fixture
      * builder uses under_scratch internally, which is arena-tracked
      * and freed at t_test_end; strdup'ing here detaches the strings
      * so they outlive the per-test cleanup. */

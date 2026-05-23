@@ -361,12 +361,15 @@ servers). The constrained-subset stance is documented in id's
 
 ## 8. Test coverage
 
-- `test/pk3.bats` — end-to-end CLI tests against synthetic PK3
+- `test/pk3_test.c` — end-to-end CLI tests against synthetic PK3
   archives covering STORED + DEFLATE entries, LFH/CDR/EOCD
   validation, encryption / data-descriptor / ZIP64 / multi-disk
   refusals, symlink rejection, control-byte name rejection,
   directory-marker tolerance, mixed STORED+DEFLATE write, and
-  rebuild-after-delete.
+  rebuild-after-delete. Also drives the c-API harness in-process
+  (max_decompressed cap, commit-refuses-changed-source,
+  open_entry_handle paths, rebuild rollback in-memory) and the
+  fault-injection cases via subprocess respawn.
 - `test/pk4_test.c` — the same shape re-run with `.pk4` extensions
   + `--format pk4`, asserting that the bytes are identical to the
   PK3 case and the only observable difference is the label
@@ -380,7 +383,7 @@ servers). The constrained-subset stance is documented in id's
 - `test/c_api_test.c` — public-API round-trip for both PK3 and
   PK4, including the PK3 ↔ PK4 label round-trip through
   `pakka_create` + `pakka_open`.
-- `linux-glibc-x86_64-zlib` CI job — full bats suite against the
+- `linux-glibc-x86_64-zlib` CI job — full C test suite against the
   zlib DEFLATE backend, catches divergence between the vendored
   and zlib codecs.
 - `linux-glibc-s390x-be` CI job — same suite under QEMU big-endian

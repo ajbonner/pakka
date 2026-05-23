@@ -1,9 +1,9 @@
 /* large_file_test — 32-bit fseek/ftell ceiling regression.
  *
  * Synthesizes a sparse pak whose directory sits above LONG_MAX so the
- * wide-seek path actually fires on 32-bit hosts. Mirrors what
- * large_file.bats does with truncate(1) + dd, but without depending on
- * those binaries — the test does its own fseeko / _fseeki64 writes. */
+ * wide-seek path actually fires on 32-bit hosts. The test does its
+ * own fseeko / _fseeki64 writes to plant the directory entry at the
+ * required offset — no truncate(1) / dd dependency. */
 
 #include "fs.h"
 #include "proc.h"
@@ -102,9 +102,9 @@ static int make_large_pak(const char *path)
         return -1;
     }
 
-    /* Extend the file to LARGE_FILE_SIZE so pakka sees the same
-     * trailing hole the bats fixture has. fwriting one byte at
-     * (SIZE - 1) plus a sparse-friendly filesystem keeps the disk
+    /* Extend the file to LARGE_FILE_SIZE so the directory entry's
+     * offset sits past the 32-bit fseek ceiling. fwriting one byte
+     * at (SIZE - 1) plus a sparse-friendly filesystem keeps the disk
      * footprint near zero on ext4 / APFS / NTFS. */
     if (seek_to(f, LARGE_FILE_SIZE - 1) != 0) {
         fclose(f);

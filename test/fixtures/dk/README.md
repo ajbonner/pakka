@@ -2,22 +2,24 @@
 
 Cross-validates pakka's DK decoder against an external encoder's
 output, complementing the synthetic in-process round-trip tests
-(`test/dk.bats`, `test/dk_codec_test.c`) that only exercise pakka
+(`test/dk_test.c`, `test/dk_codec_test.c`) that only exercise pakka
 against itself.
 
 ## Layout
 
 - `inputs/` — four small files of synthetic bytes, committed to git
-  so the bats consumer can `cmp` extracted payloads against the
-  source. Regenerate with `python3 inputs/generate.py` — the script
-  is deterministic across machines, Python versions, and endianness.
+  so the test consumer can byte-compare extracted payloads against
+  the source. Regenerate with `python3 inputs/generate.py` — the
+  script is deterministic across machines, Python versions, and
+  endianness.
 - `inputs/dkpak_output.txt` — captured stdout from the `dkpak`
   invocation that built `user.pak`. Kept as a transcript of the
   per-entry compression decisions and totals; informational only.
 - `user.pak` — DK pak produced by packing `inputs/*` through
   Daikatana's `dkpak` packer in `-userpak` mode. Tracked in git,
-  consumed by the `dk real fixture` bats case. **The packed bytes are
-  exclusively from `inputs/`; no game assets are included.**
+  consumed by the `dk real fixture` case in `test/dk_test.c`. **The
+  packed bytes are exclusively from `inputs/`; no game assets are
+  included.**
 
 ## What each input exercises
 
@@ -43,10 +45,10 @@ is named `user.pak`; with one (e.g. `dkpak -userpak PAK9.PAK`), the
 argument wins.
 
 The committed fixture uses the `maps/`+`textures/`+root layout that
-matches dktools_readme.htm's user-pak authoring convention. The bats
-consumer pins these names when comparing extracted payloads to
-`inputs/`; a different staging layout would need matching updates in
-`test/dk.bats`.
+matches dktools_readme.htm's user-pak authoring convention. The
+consumer in `test/dk_test.c` pins these names when comparing
+extracted payloads to `inputs/`; a different staging layout would
+need matching updates there.
 
 ## Regenerating
 
@@ -64,7 +66,7 @@ python3 inputs/generate.py             # idempotent; overwrites the four files
 #       <staging>/notes.txt
 #    Any other layout works — `-userpak` ships the user's tree as-is.
 #    If you change the layout, also update the entry-name patterns in
-#    test/dk.bats's "dk real fixture" case.
+#    test/dk_test.c's `dk real fixture` case.
 #
 # 2. Run `dkpak.exe -userpak` from <staging> (under Wine on macOS /
 #    Linux). With no filename arg, dkpak writes user.pak in the
@@ -78,12 +80,12 @@ python3 inputs/generate.py             # idempotent; overwrites the four files
 # decisions and totals.
 ```
 
-The bats consumer reads only `user.pak` and `inputs/*` — it makes no
-assumption about how `user.pak` was produced. Any DK packer that emits
-the same four routed names is a valid fixture.
+The C consumer reads only `user.pak` and `inputs/*` — it makes no
+assumption about how `user.pak` was produced. Any DK packer that
+emits the same four routed names is a valid fixture.
 
 ## Fixture required
 
-`test/dk.bats` hard-fails the `dk real fixture: ...` case when
+`test/dk_test.c` hard-fails the `dk real fixture: ...` case when
 `user.pak` is missing — the pak is committed and CI should not
 silently lose this coverage to an accidental deletion.

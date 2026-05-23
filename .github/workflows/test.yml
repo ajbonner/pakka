@@ -745,9 +745,9 @@ jobs:
               -type f -exec touch {} +
       - run: make realpak-test-goldsrc
 
-  # Native-Windows realpak: no MSYS2 install. Fixture fetch + SHA verify
-  # + extract via dev/win/fixtures.ps1 (PowerShell 7+ ships on the runner
-  # image); test execution via CTest (pk3_q3demo_test, registered in
+  # Windows realpak: fixture fetch + SHA verify + extract via
+  # dev/win/fixtures.ps1 (PowerShell 7+ ships on the runner image);
+  # test execution via CTest (pk3_q3demo_test, registered in
   # test/CMakeLists.txt).
   realpak-test-q3-windows:
     runs-on: windows-2025-vs2026
@@ -777,8 +777,8 @@ jobs:
           Q3DEMO_PAK0_PK3: ${{ github.workspace }}\build\test\q3demo\pak0.pk3
         run: ctest --test-dir build/cmake -R pk3_q3demo_test --output-on-failure --timeout 600
 
-  # Native-Windows GoldSrc realpak: same model as realpak-test-q3-windows
-  # — no MSYS2; PowerShell-only fixture prep + CTest run.
+  # Windows GoldSrc realpak: same model as realpak-test-q3-windows —
+  # PowerShell fixture prep + CTest run.
   realpak-test-goldsrc-windows:
     runs-on: windows-2025-vs2026
     needs: [windows-msvc-x86_64]

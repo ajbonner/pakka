@@ -151,6 +151,8 @@ Docker images) lives under `dev/legacy/ci/`.
 
 ## Out of scope
 
-Running the bats integration suite inside RH9 isn't covered yet — bash
-2.05b is too old for bats-core 1.x. A host-driven smoke fixture or a
-vendored mini-bats would be a separate piece of work.
+Running the full C test suite inside RH9 isn't covered yet — the
+minimal userland here can't host every transitive build dependency
+of the test harness. The host CI matrix exercises the modern
+toolchains for that coverage; the RH9 image is intentionally limited
+to the build + symlink-safe-extract smoke check.
