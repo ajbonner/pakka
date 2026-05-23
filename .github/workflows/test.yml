@@ -15,10 +15,12 @@ concurrency:
 permissions:
   contents: read
 
-# Cache key strategy: `hashFiles('Makefile')` evaluates only inside a
-# job/step (not workflow-level env), so it's inlined in every cache step.
-# Hashing the Makefile means any change to QUAKE_URL or QUAKE_SHA256
-# rolls the key; the tarball is OS-independent so all jobs share it.
+# Cache key strategy: every fixture cache hashes dev/fixtures.mk, which
+# pins URL + SHA-256 for the quakesw / Q3 demo / GoldSrc wrappers. Only
+# edits to that file roll the key, so unrelated Makefile / fixtures.ps1
+# changes don't bust the cache and force a re-download from libsdl.org /
+# archive.org. Per-OS scope is automatic (actions/cache stores caches
+# per platform), so a Linux hit doesn't try to seed a Windows job.
 jobs:
   lint:
     runs-on: ubuntu-latest
@@ -60,7 +62,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: make test
 
   macos-apple-silicon-arm64:
@@ -72,7 +74,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: make test
 
   linux-glibc-x86_64:
@@ -84,7 +86,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl
@@ -127,7 +129,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl zlib1g-dev
@@ -204,7 +206,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl lcov
@@ -229,7 +231,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl
@@ -252,7 +254,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl
@@ -272,7 +274,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - uses: docker/setup-qemu-action@v4
         with:
           platforms: s390x
@@ -308,7 +310,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: make test
 
   # 32-bit ABI build on a 64-bit kernel/libc via -m32. Not a true i386 OS,
@@ -322,7 +324,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: |
           sudo apt-get update
           sudo apt-get install -y gcc-multilib build-essential curl openssl
@@ -339,7 +341,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - uses: vmactions/freebsd-vm@v1
         with:
           release: '15.0'
@@ -359,7 +361,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - uses: vmactions/freebsd-vm@v1
         with:
           release: '15.0'
@@ -377,7 +379,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - uses: vmactions/openbsd-vm@v1
         with:
           release: '7.8'
@@ -403,7 +405,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('dev/win/fixtures.ps1') }}
+          key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       # Fork of ilammy/msvc-dev-cmd that's actively maintained and
       # runs on Node 24 (ilammy's v1.13.0 is still on Node 20).
       - uses: TheMrMilchmann/setup-msvc-dev@v4
@@ -618,9 +620,9 @@ jobs:
   # target uses. The C-test suites themselves run in seconds; the 93
   # MiB Q3 demo + 48 MiB Uplink + 90 MiB Day One downloads are the
   # only meaningful wall-clock cost, and they're cached on a
-  # hashFiles('Makefile') key (URLs + SHA256s live there) so the zip
-  # is fetched once and reused across reruns and across the
-  # Linux/Windows pair for each suite. Q3 and GoldSrc are split into
+  # hashFiles('dev/fixtures.mk') key (URLs + SHA256s live there) so the
+  # zip is fetched once and reused across reruns until the pins change.
+  # Q3 and GoldSrc are split into
   # separate jobs so failures attribute cleanly. Each realpak job
   # consumes the artifact published by its platform's main test job
   # (linux-glibc-x86_64 / windows-msvc-x86_64) so pakka + the test
@@ -636,7 +638,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/q3demo.zip
-          key: q3demo-${{ hashFiles('Makefile') }}
+          key: q3demo-${{ hashFiles('dev/fixtures.mk') }}
       - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-binaries
@@ -666,7 +668,7 @@ jobs:
           path: |
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
-          key: goldsrc-${{ hashFiles('Makefile') }}
+          key: goldsrc-${{ hashFiles('dev/fixtures.mk') }}
       - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-binaries
@@ -696,7 +698,7 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/q3demo.zip
-          key: q3demo-${{ hashFiles('dev/win/fixtures.ps1') }}
+          key: q3demo-${{ hashFiles('dev/fixtures.mk') }}
       - uses: actions/download-artifact@v8
         with:
           name: windows-msvc-x86_64-build
@@ -728,7 +730,7 @@ jobs:
           path: |
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
-          key: goldsrc-${{ hashFiles('dev/win/fixtures.ps1') }}
+          key: goldsrc-${{ hashFiles('dev/fixtures.mk') }}
       - uses: actions/download-artifact@v8
         with:
           name: windows-msvc-x86_64-build

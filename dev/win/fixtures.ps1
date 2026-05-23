@@ -5,9 +5,10 @@
 # native cmdlets (Invoke-WebRequest, Get-FileHash, Expand-Archive)
 # plus the tar.exe that ships with Windows 10+.
 #
-# URLs and SHA-256 pins MUST stay aligned with the Makefile at
-# `Makefile:107-156`. The Unix path still uses the Makefile recipes;
-# this is the parallel Windows-only implementation.
+# URLs + SHA-256 pins are parsed from dev/fixtures.mk so this script
+# and the Makefile share one source of truth. Path layout + extraction
+# shape stay here because they're Windows-specific (canonical lowercase
+# pak0.pak, tar.exe vs Expand-Archive choice).
 #
 # Usage:
 #   pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite quake
@@ -33,11 +34,25 @@ $RepoRoot = (Resolve-Path "$PSScriptRoot/../..").Path
 $TestDir  = Join-Path $RepoRoot 'build/test'
 New-Item -ItemType Directory -Path $TestDir -Force | Out-Null
 
-# Per-fixture URL + SHA-256 pin + path layout. Keep aligned with Makefile.
+# Parse dev/fixtures.mk into a hashtable. The file is plain KEY=VALUE
+# lines (Make-syntax assignments); blank lines and `#` comments skipped.
+$Pins = @{}
+$pinFile = Join-Path $RepoRoot 'dev/fixtures.mk'
+Get-Content -LiteralPath $pinFile | ForEach-Object {
+    $line = $_.Trim()
+    if ($line -eq '' -or $line.StartsWith('#')) { return }
+    if ($line -match '^([A-Z0-9_]+)=(.+)$') {
+        $Pins[$matches[1]] = $matches[2]
+    }
+}
+
+# Per-fixture mapping: URL + SHA pin come from dev/fixtures.mk; the
+# rest (archive path, inner path inside the wrapper, canonical output
+# path, extraction kind) is Windows-side layout.
 $Fixtures = @{
     'quake' = @{
-        Url       = 'https://www.libsdl.org/projects/quake/data/quakesw-1.0.6.tar.gz'
-        Sha256    = 'd173e9f828b932a8160d4c65927281d0c28131cd922f0bf0d69e92a35185b499'
+        Url       = $Pins['QUAKE_URL']
+        Sha256    = $Pins['QUAKE_SHA256']
         Archive   = Join-Path $TestDir 'quakesw.tar.gz'
         InnerPath = 'id1/pak0.pak'
         OutPath   = Join-Path $TestDir 'pak0.pak'
@@ -45,16 +60,16 @@ $Fixtures = @{
         Kind      = 'targz'
     }
     'q3' = @{
-        Url       = 'https://archive.org/download/Q3A-Demo/Quake%203%20Arena%20Demo.zip'
-        Sha256    = 'e9f89ef064317634aab3b3a3add131887967fc04744526bd624e1914b1e25b3e'
+        Url       = $Pins['Q3DEMO_URL']
+        Sha256    = $Pins['Q3DEMO_SHA256']
         Archive   = Join-Path $TestDir 'q3demo.zip'
         InnerPath = 'Quake 3 Arena Demo/demoq3/pak0.pk3'
         OutPath   = Join-Path $TestDir 'q3demo/pak0.pk3'
         Kind      = 'zip'
     }
     'goldsrc-uplink' = @{
-        Url       = 'https://archive.org/download/half-life-day-one/Half-LifeUplink.zip'
-        Sha256    = '6e06a9f25d36ec12750da8f94af24a71f26af2330a665a9d4922421db4459aa4'
+        Url       = $Pins['GOLDSRC_UPLINK_URL']
+        Sha256    = $Pins['GOLDSRC_UPLINK_SHA256']
         Archive   = Join-Path $TestDir 'hl-uplink.zip'
         # Uplink's inner pak is uppercase .PAK; the canonical out path
         # we expose to tests is lowercase to match the Day One layout.
@@ -63,8 +78,8 @@ $Fixtures = @{
         Kind      = 'zip'
     }
     'goldsrc-dayone' = @{
-        Url       = 'https://archive.org/download/half-life-day-one/Half-Life%20Day%20One.zip'
-        Sha256    = '35098523a078cd2cde858a261e7071f1e1e79ae0c38fac9302186d3cd9bd001d'
+        Url       = $Pins['GOLDSRC_DAYONE_URL']
+        Sha256    = $Pins['GOLDSRC_DAYONE_SHA256']
         Archive   = Join-Path $TestDir 'hl-dayone.zip'
         InnerPath = 'Half-Life Day One/valve/pak0.pak'
         OutPath   = Join-Path $TestDir 'hl-dayone/valve/pak0.pak'

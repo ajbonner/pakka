@@ -104,8 +104,12 @@ LIB_OBJECTS=$(LIB_SOURCES:$(SRC_DIR)/%.c=$(OBJ_DIR)/%.o) \
 CLI_OBJECTS=$(OBJ_DIR)/cli.o
 LIBPAKKA=$(LIB_DIR)/libpakka.a
 
-QUAKE_URL=https://www.libsdl.org/projects/quake/data/quakesw-1.0.6.tar.gz
-QUAKE_SHA256=d173e9f828b932a8160d4c65927281d0c28131cd922f0bf0d69e92a35185b499
+# Fixture URLs + SHA-256 pins live in dev/fixtures.mk so the CI cache
+# key can hash just that file and stay warm across unrelated Makefile
+# edits. dev/win/fixtures.ps1 parses the same file on Windows — single
+# source of truth for both build systems.
+include dev/fixtures.mk
+
 QUAKE_TARBALL=$(TEST_DIR)/quakesw.tar.gz
 PAK0=$(TEST_DIR)/pak0.pak
 
@@ -114,8 +118,6 @@ PAK0=$(TEST_DIR)/pak0.pak
 # only — not pulled by default `make test`. archive.org's CDN is
 # occasionally 503; if the fetch fails, realpak-test-q3 fails but
 # normal CI is unaffected.
-Q3DEMO_URL=https://archive.org/download/Q3A-Demo/Quake%203%20Arena%20Demo.zip
-Q3DEMO_SHA256=e9f89ef064317634aab3b3a3add131887967fc04744526bd624e1914b1e25b3e
 Q3DEMO_ZIP=$(TEST_DIR)/q3demo.zip
 Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 
@@ -125,7 +127,7 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 # parity-confirmation fixtures against real Valve writer output, not a
 # separate code path. Driven by `realpak-test-goldsrc` (separate from
 # the Q3 demo's `realpak-test-q3`); default `make test` leaves them
-# untouched and test/pak_goldsrc.bats skips when the env vars are unset.
+# untouched.
 #
 # Both wrappers are plain ZIPs from archive.org; we unzip then copy
 # the inner pak0 out to a canonical path under build/test/. unzip is
@@ -146,13 +148,9 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 # Both fixtures are fetched at test time only; the SHA pin ensures
 # we run against the exact bytes we tested against. Neither file is
 # committed to this repository.
-GOLDSRC_UPLINK_URL=https://archive.org/download/half-life-day-one/Half-LifeUplink.zip
-GOLDSRC_UPLINK_SHA256=6e06a9f25d36ec12750da8f94af24a71f26af2330a665a9d4922421db4459aa4
 GOLDSRC_UPLINK_WRAPPER=$(TEST_DIR)/hl-uplink.zip
 GOLDSRC_UPLINK_PAK0=$(TEST_DIR)/hl-uplink/valve/pak0.pak
 
-GOLDSRC_DAYONE_URL=https://archive.org/download/half-life-day-one/Half-Life%20Day%20One.zip
-GOLDSRC_DAYONE_SHA256=35098523a078cd2cde858a261e7071f1e1e79ae0c38fac9302186d3cd9bd001d
 GOLDSRC_DAYONE_WRAPPER=$(TEST_DIR)/hl-dayone.zip
 GOLDSRC_DAYONE_PAK0=$(TEST_DIR)/hl-dayone/valve/pak0.pak
 
