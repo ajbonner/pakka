@@ -148,8 +148,8 @@ static void test_extract_recovers_payload(void)
     EXPECT_EQ((long long)len, 4);
     EXPECT_MEM_EQ(buf, "data", 4);
 
-    free(buf);
-    free(tiny_path);
+    t_free(buf);
+    t_free(tiny_path);
     proc_result_free(&r);
 }
 
@@ -194,7 +194,7 @@ int main(void)
     RUN_TEST(test_extract_recovers_payload);
     RUN_TEST(test_verify_passes);
 
-    free(g_large_pak);
-    free(g_out_dir);
+    t_free(g_large_pak);
+    t_free(g_out_dir);
     return t_summary();
 }

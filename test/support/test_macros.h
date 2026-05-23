@@ -14,6 +14,21 @@ void t_test_begin(const char *name);
 void t_test_end(void);
 int  t_summary(void);
 
+/* Track a heap pointer for automatic release at t_test_end. Returns
+ * the same pointer (passthrough) so it can wrap an allocator call:
+ *   char *p = t_track(fs_join(a, b));
+ * If the caller later explicitly free()s the pointer, they should
+ * also call t_untrack to remove it from the cleanup list — otherwise
+ * t_arena_release will double-free. */
+void *t_track(void *p);
+void  t_untrack(void *p);
+
+/* Drop-in replacement for free() that's safe whether the pointer is
+ * arena-tracked (from under_scratch) or untracked (from fs_read_file,
+ * strdup, etc.). Tests use this exclusively so the arena and explicit
+ * free()s coexist without double-frees. */
+#define t_free(p) do { t_untrack(p); free(p); } while (0)
+
 /* Variadic form (no `##` GNU extension) keeps the header --pedantic
  * clean. Split into two fprintf calls so callers don't have to pad
  * a dummy argument when their message has no format specifiers. */

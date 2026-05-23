@@ -142,7 +142,7 @@ static int dispatch_child(int argc, char **argv)
     if (strcmp(cmd, "echo-cwd") == 0)    return child_echo_cwd();
     if (strcmp(cmd, "echo-argv") == 0)   return child_echo_argv(argc, argv);
     if (strcmp(cmd, "exit-code") == 0)   return atoi(argv[2]);
-    if (strcmp(cmd, "abort") == 0)       { abort(); return 0; }
+    if (strcmp(cmd, "abort") == 0) { abort(); }
     return -1;
 }
 

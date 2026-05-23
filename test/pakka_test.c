@@ -25,7 +25,7 @@ static char       *g_extracted;    /* setup_file: PAK0 extracted */
 static char       *g_rebuilt;      /* setup_file: rebuilt.pak from extracted */
 static char       *g_scratch;
 
-static char *under_scratch(const char *sub) { return fs_join(g_scratch, sub); }
+static char *under_scratch(const char *sub) { return (char *)t_track(fs_join(g_scratch, sub)); }
 
 static void put_u32_le(unsigned char *buf, size_t off, uint32_t v)
 {
@@ -147,7 +147,7 @@ static int copy_file(const char *src, const char *dst)
     unsigned char *buf = fs_read_file(src, &n);
     if (!buf) return -1;
     int rc = fs_write_file(dst, buf, n);
-    free(buf);
+    t_free(buf);
     return rc;
 }
 
@@ -173,7 +173,7 @@ static int count_files_win32(const char *path)
         } else if (fs_is_file(child)) {
             count++;
         }
-        free(child);
+        t_free(child);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
     return count;
@@ -195,7 +195,7 @@ static int count_files_recursive(const char *path)
         } else if (fs_is_file(child)) {
             count++;
         }
-        free(child);
+        t_free(child);
     }
     closedir(d);
     return count;
@@ -208,8 +208,8 @@ static int files_equal(const char *a, const char *b)
     unsigned char *ad = fs_read_file(a, &an);
     unsigned char *bd = fs_read_file(b, &bn);
     int            rc = (ad && bd && an == bn && memcmp(ad, bd, an) == 0) ? 0 : 1;
-    free(ad);
-    free(bd);
+    t_free(ad);
+    t_free(bd);
     return rc;
 }
 
@@ -231,7 +231,7 @@ static void test_round_trip_content_identical(void)
     RUN_PAKKA_OK(&r, "-x", "-C", re_extracted, g_rebuilt);
     proc_result_free(&r);
     EXPECT_EQ(fs_diff_tree(g_extracted, re_extracted), 0);
-    free(re_extracted);
+    t_free(re_extracted);
 }
 
 static void test_byte_delta_matches_orphan_size(void)
@@ -245,8 +245,8 @@ static void test_byte_delta_matches_orphan_size(void)
     EXPECT_NOT_NULL(orig);
     EXPECT_NOT_NULL(neu);
     EXPECT_EQ((long long)(orig_n - new_n), 410616);
-    free(orig);
-    free(neu);
+    t_free(orig);
+    t_free(neu);
 }
 
 static void test_extract_specific_files_only(void)
@@ -261,9 +261,9 @@ static void test_extract_specific_files_only(void)
     char *out_default = fs_join(out, "default.cfg");
     char *src_default = fs_join(g_extracted, "default.cfg");
     EXPECT_EQ(files_equal(out_default, src_default), 0);
-    free(out_default);
-    free(src_default);
-    free(out);
+    t_free(out_default);
+    t_free(src_default);
+    t_free(out);
 }
 
 static void test_add_new_entry_round_trips(void)
@@ -292,10 +292,10 @@ static void test_add_new_entry_round_trips(void)
 
     out_add = fs_join(out, "added.txt");
     EXPECT_EQ(files_equal(out_add, added), 0);
-    free(out_add);
-    free(work);
-    free(added);
-    free(out);
+    t_free(out_add);
+    t_free(work);
+    t_free(added);
+    t_free(out);
 }
 
 static void test_extract_missing_path_errors(void)
@@ -308,7 +308,7 @@ static void test_extract_missing_path_errors(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(out);
+    t_free(out);
 }
 
 static void test_extract_duplicate_path_args_succeed(void)
@@ -322,9 +322,9 @@ static void test_extract_duplicate_path_args_succeed(void)
     char *src = fs_join(g_extracted, "default.cfg");
     EXPECT_TRUE(fs_is_file(got));
     EXPECT_EQ(files_equal(got, src), 0);
-    free(got);
-    free(src);
-    free(out);
+    t_free(got);
+    t_free(src);
+    t_free(out);
 }
 
 /* ---------- group B: magic / format error paths ---------- */
@@ -340,7 +340,7 @@ static void test_pak_with_only_magic_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_pak_with_truncated_directory_rejected(void)
@@ -361,7 +361,7 @@ static void test_pak_with_truncated_directory_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_bad_pack_magic_rejected(void)
@@ -379,7 +379,7 @@ static void test_bad_pack_magic_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 /* ---------- group C: per-entry-name policy (write_pak_one_entry) ---------- */
@@ -406,13 +406,13 @@ static void expect_refuses(const char *name, const char *scratch_sub)
                 r.stdout_buf ? r.stdout_buf : "",
                 r.stderr_buf ? r.stderr_buf : "");
         proc_result_free(&r);
-        free(pak);
-        free(out);
+        t_free(pak);
+        t_free(out);
         FAIL("expected 'Refusing to extract' diagnostic");
     }
     proc_result_free(&r);
-    free(pak);
-    free(out);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_refuses_con(void)        { expect_refuses("CON", "con"); }
@@ -437,8 +437,8 @@ static void test_refuses_control_byte(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
-    free(out);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_com10_allowed(void)
@@ -456,9 +456,9 @@ static void test_com10_allowed(void)
     proc_result_free(&r);
     char *got = fs_join(out, "COM10");
     EXPECT_TRUE(fs_is_file(got));
-    free(got);
-    free(pak);
-    free(out);
+    t_free(got);
+    t_free(pak);
+    t_free(out);
 }
 
 /* ---------- group D: path-traversal rejection ---------- */
@@ -484,8 +484,8 @@ static void test_refuses_empty_all_nul_name(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
-    free(out);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_legit_dotdot_substring_still_extracts(void)
@@ -503,9 +503,9 @@ static void test_legit_dotdot_substring_still_extracts(void)
     proc_result_free(&r);
     char *got = fs_join(out, "foo..bar");
     EXPECT_TRUE(fs_is_file(got));
-    free(got);
-    free(pak);
-    free(out);
+    t_free(got);
+    t_free(pak);
+    t_free(out);
 }
 
 /* ---------- group E: normalization-collision rejection ---------- */
@@ -529,8 +529,8 @@ static void test_refuses_case_fold_collision(void)
     }
     if (!found) {
         proc_result_free(&r);
-        free(pak);
-        free(out);
+        t_free(pak);
+        t_free(out);
         FAIL("expected 'collide after normalization' diagnostic");
     }
     /* Neither variant should be materialized. */
@@ -539,10 +539,10 @@ static void test_refuses_case_fold_collision(void)
     EXPECT_FALSE(fs_is_file(out_upper));
     EXPECT_FALSE(fs_is_file(out_lower));
     proc_result_free(&r);
-    free(out_upper);
-    free(out_lower);
-    free(pak);
-    free(out);
+    t_free(out_upper);
+    t_free(out_lower);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_refuses_slash_backslash_collision(void)
@@ -558,8 +558,8 @@ static void test_refuses_slash_backslash_collision(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
-    free(out);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_preflight_rejects_archive_on_later_unsafe(void)
@@ -583,10 +583,10 @@ static void test_preflight_rejects_archive_on_later_unsafe(void)
     char *safe_dir = fs_join(out, "safe");
     EXPECT_FALSE(fs_is_file(safe_a));
     EXPECT_FALSE(fs_is_dir(safe_dir));
-    free(safe_a);
-    free(safe_dir);
-    free(pak);
-    free(out);
+    t_free(safe_a);
+    t_free(safe_dir);
+    t_free(pak);
+    t_free(out);
 }
 
 /* ---------- group F: --tree rendering ---------- */
@@ -630,11 +630,11 @@ static void test_d_requires_at_least_one_path(void)
     }
     if (!found) {
         proc_result_free(&r);
-        free(work);
+        t_free(work);
         FAIL("expected 'requires at least one path' diagnostic");
     }
     proc_result_free(&r);
-    free(work);
+    t_free(work);
 }
 
 static void test_a_requires_at_least_one_path(void)
@@ -648,7 +648,7 @@ static void test_a_requires_at_least_one_path(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(work);
+    t_free(work);
 }
 
 static void test_rejects_empty_pakfile_name(void)
@@ -719,11 +719,11 @@ static void test_extract_refuses_dash_C_regular_file(void)
     }
     if (!found) {
         proc_result_free(&r);
-        free(not_a_dir);
+        t_free(not_a_dir);
         FAIL("expected 'not a directory' diagnostic for -C regular file");
     }
     proc_result_free(&r);
-    free(not_a_dir);
+    t_free(not_a_dir);
 }
 
 /* ---------- group H: --as ---------- */
@@ -742,8 +742,8 @@ static void test_as_stores_virtual_entry_name(void)
     RUN_PAKKA_OK(&r, "-l", pak);
     EXPECT_STR_CONTAINS(r.stdout_buf, "virtual/name.txt");
     proc_result_free(&r);
-    free(src);
-    free(pak);
+    t_free(src);
+    t_free(pak);
 }
 
 static void test_as_rejects_outside_a_c(void)
@@ -779,7 +779,7 @@ static void test_verify_fails_on_duplicate_exact_names(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_verify_rejects_normalized_collision(void)
@@ -793,7 +793,7 @@ static void test_verify_rejects_normalized_collision(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 /* ---------- group J: bounds checks ---------- */
@@ -819,7 +819,7 @@ static void test_diroffset_past_eof_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_dirlength_wraps_past_eof_rejected(void)
@@ -833,7 +833,7 @@ static void test_dirlength_wraps_past_eof_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_entry_offset_inside_header_rejected(void)
@@ -860,7 +860,7 @@ static void test_entry_offset_inside_header_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 /* ---------- group K: zero-byte entry ---------- */
@@ -887,19 +887,25 @@ static void test_zero_byte_file_adds_and_extracts(void)
     size_t         n   = 0;
     unsigned char *buf = fs_read_file(got, &n);
     EXPECT_EQ((long long)n, 0);
-    free(buf);
-    free(got);
-    free(src);
-    free(pak);
-    free(out);
+    t_free(buf);
+    t_free(got);
+    t_free(src);
+    t_free(pak);
+    t_free(out);
 }
 
 /* ---------- main ---------- */
 
 static int setup_extracted_and_rebuilt(void)
 {
-    g_extracted = under_scratch("setup/extracted");
-    g_rebuilt   = under_scratch("setup/rebuilt.pak");
+    /* strdup detaches from the arena — t_test_end would otherwise free
+     * these between tests since under_scratch is arena-tracked. */
+    char *raw_e = under_scratch("setup/extracted");
+    char *raw_r = under_scratch("setup/rebuilt.pak");
+    if (!raw_e || !raw_r) return -1;
+    g_extracted = strdup(raw_e);
+    g_rebuilt   = strdup(raw_r);
+    if (!g_extracted || !g_rebuilt) return -1;
     if (fs_mkdir_p(g_extracted) != 0) return -1;
 
     const char   *argv1[] = {g_pakka_path, "-x", "-C", g_extracted, g_pak0_path, NULL};
@@ -969,9 +975,9 @@ static int setup_extracted_and_rebuilt(void)
     int rc           = proc_run(argv2, &opts, &r);
     int exit_code    = r.exit_code;
     proc_result_free(&r);
-    for (size_t i = 0; i < n; i++) free(entries[i]);
-    free(entries);
-    free(argv2);
+    for (size_t i = 0; i < n; i++) t_free(entries[i]);
+    t_free(entries);
+    t_free(argv2);
     if (rc != 0 || exit_code != 0) return -1;
     return 0;
 }
@@ -1068,8 +1074,8 @@ int main(void)
 
     RUN_TEST(test_zero_byte_file_adds_and_extracts);
 
-    free(g_extracted);
-    free(g_rebuilt);
-    free(g_scratch);
+    t_free(g_extracted);
+    t_free(g_rebuilt);
+    t_free(g_scratch);
     return t_summary();
 }

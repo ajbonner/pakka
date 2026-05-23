@@ -22,7 +22,10 @@ static char       *g_scratch;
 
 static char *under_scratch(const char *sub)
 {
-    return fs_join(g_scratch, sub);
+    /* t_track adds the malloc'd path to the per-test arena; t_test_end
+     * frees it after each test. Tests must NOT explicitly free the
+     * result — that would double-free against the arena cleanup. */
+    return (char *)t_track(fs_join(g_scratch, sub));
 }
 
 /* Write a u32 little-endian to a fixed-size buffer at the given offset. */
@@ -102,11 +105,11 @@ static int file_starts_with(const char *path, const char magic[4])
     size_t         len = 0;
     unsigned char *buf = fs_read_file(path, &len);
     if (!buf || len < 4) {
-        free(buf);
+        t_free(buf);
         return -1;
     }
     int rc = memcmp(buf, magic, 4);
-    free(buf);
+    t_free(buf);
     return rc;
 }
 
@@ -123,7 +126,6 @@ static void test_open_spak_magic_recognised(void)
     EXPECT_NOT_NULL(r.stdout_buf);
     EXPECT_STR_CONTAINS(r.stdout_buf, "maps/sintest.bsp");
     proc_result_free(&r);
-    free(pak);
 }
 
 static void test_extract_round_trips(void)
@@ -147,10 +149,8 @@ static void test_extract_round_trips(void)
     EXPECT_EQ((long long)n, (long long)strlen("hello-sin-roundtrip"));
     EXPECT_MEM_EQ(got, "hello-sin-roundtrip", n);
 
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
+    t_free(got);
+    t_free(extracted);
 }
 
 static void test_create_sin_extension_produces_spak(void)
@@ -171,9 +171,7 @@ static void test_create_sin_extension_produces_spak(void)
     EXPECT_TRUE(fs_is_file(pak));
     EXPECT_EQ(file_starts_with(pak, "SPAK"), 0);
 
-    free(src);
-    free(ftxt);
-    free(pak);
+    t_free(ftxt);
 }
 
 static void test_format_override_overrides_extension(void)
@@ -195,15 +193,13 @@ static void test_format_override_overrides_extension(void)
     EXPECT_TRUE(fs_is_file(pak));
     EXPECT_EQ(file_starts_with(pak, "SPAK"), 0);
 
-    free(src);
-    free(ftxt);
-    free(pak);
+    t_free(ftxt);
 }
 
 static void test_create_add_list_extract_round_trip(void)
 {
     char *src = under_scratch("rt/src");
-    EXPECT_EQ(fs_mkdir_p(fs_join(src, "maps")), 0);
+    EXPECT_EQ(fs_mkdir_p(t_track(fs_join(src, "maps"))), 0);
     char *maps_e1m1 = fs_join(src, "maps/e1m1.bsp");
     char *p_blast   = fs_join(src, "p_blast.mdl");
     EXPECT_EQ(fs_write_file(maps_e1m1, "level data\n", 11), 0);
@@ -230,11 +226,8 @@ static void test_create_add_list_extract_round_trip(void)
 
     EXPECT_EQ(fs_diff_tree(src, out_dir), 0);
 
-    free(src);
-    free(maps_e1m1);
-    free(p_blast);
-    free(pak);
-    free(out_dir);
+    t_free(maps_e1m1);
+    t_free(p_blast);
 }
 
 /* Run pakka and return its exit code; caller decides whether to
@@ -267,8 +260,6 @@ static void test_add_accepts_119_byte_name(void)
     RUN_PAKKA_OK(&r, "-a", pak, "--as", longname, src);
     proc_result_free(&r);
 
-    free(pak);
-    free(src);
 }
 
 static void test_add_rejects_120_byte_name(void)
@@ -303,8 +294,6 @@ static void test_add_rejects_120_byte_name(void)
     }
     proc_result_free(&r);
 
-    free(pak);
-    free(src);
 }
 
 static void test_freshly_created_spak_lists_ok(void)
@@ -328,9 +317,7 @@ static void test_freshly_created_spak_lists_ok(void)
     RUN_PAKKA_OK(&r, "-l", pak);
     proc_result_free(&r);
 
-    free(src);
-    free(xtxt);
-    free(pak);
+    t_free(xtxt);
 }
 
 static void test_format_pak_rejects_spak(void)
@@ -354,7 +341,6 @@ static void test_format_pak_rejects_spak(void)
         FAIL("expected 'format_hint' diagnostic for --format pak on SPAK");
     }
     proc_result_free(&r);
-    free(pak);
 }
 
 static void test_delete_rebuild_keeps_remaining_entries(void)
@@ -389,11 +375,9 @@ static void test_delete_rebuild_keeps_remaining_entries(void)
     }
     proc_result_free(&r);
 
-    free(src);
-    free(a);
-    free(b);
-    free(c);
-    free(pak);
+    t_free(a);
+    t_free(b);
+    t_free(c);
 }
 
 int main(void)
@@ -427,6 +411,6 @@ int main(void)
     RUN_TEST(test_format_pak_rejects_spak);
     RUN_TEST(test_delete_rebuild_keeps_remaining_entries);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

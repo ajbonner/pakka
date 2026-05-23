@@ -29,7 +29,7 @@ static char       *g_deflate_src; /* source tree, kept for fs_diff_tree */
 
 static char *under_scratch(const char *sub)
 {
-    return fs_join(g_scratch, sub);
+    return (char *)t_track(fs_join(g_scratch, sub));
 }
 
 static int write_text(const char *path, const char *content)
@@ -71,7 +71,7 @@ static int copy_file(const char *src, const char *dst)
     unsigned char *buf = fs_read_file(src, &n);
     if (!buf) return -1;
     int rc = fs_write_file(dst, buf, n);
-    free(buf);
+    t_free(buf);
     return rc;
 }
 
@@ -103,7 +103,7 @@ static void test_create_builds_valid_zip(void)
     EXPECT_NOT_NULL(bp);
     EXPECT_TRUE(blen >= 4);
     EXPECT_MEM_EQ(bp, "PK\x03\x04", 4);
-    free(bp);
+    t_free(bp);
 
     char *out_dir = under_scratch("create/out");
     EXPECT_EQ(fs_mkdir_p(out_dir), 0);
@@ -112,12 +112,12 @@ static void test_create_builds_valid_zip(void)
 
     EXPECT_EQ(fs_diff_tree(src, out_dir), 0);
 
-    free(src);
-    free(src_d);
-    free(atxt);
-    free(btxt);
-    free(built);
-    free(out_dir);
+    t_free(src);
+    t_free(src_d);
+    t_free(atxt);
+    t_free(btxt);
+    t_free(built);
+    t_free(out_dir);
 }
 
 static void test_create_uppercase_pk4_extension(void)
@@ -141,11 +141,11 @@ static void test_create_uppercase_pk4_extension(void)
     EXPECT_NOT_NULL(bp);
     EXPECT_TRUE(blen >= 4);
     EXPECT_MEM_EQ(bp, "PK\x03\x04", 4);
-    free(bp);
+    t_free(bp);
 
-    free(src);
-    free(xtxt);
-    free(built);
+    t_free(src);
+    t_free(xtxt);
+    t_free(built);
 }
 
 static void test_delete_rebuild_produces_valid_pk4(void)
@@ -182,13 +182,13 @@ static void test_delete_rebuild_produces_valid_pk4(void)
     EXPECT_TRUE(fs_is_file(out_keep));
     EXPECT_FALSE(fs_is_file(out_remove));
 
-    free(src);
-    free(keep);
-    free(remove);
-    free(pak);
-    free(out_dir);
-    free(out_keep);
-    free(out_remove);
+    t_free(src);
+    t_free(keep);
+    t_free(remove);
+    t_free(pak);
+    t_free(out_dir);
+    t_free(out_keep);
+    t_free(out_remove);
 }
 
 /* Build a multi-entry DEFLATE PK4 via pakka -c --compress so the
@@ -216,7 +216,7 @@ static char *build_deflate_pk4_fixture(void)
     for (size_t i = 0; i < 250; i++) memcpy(lorem_data + i * ln, line, ln);
     char *lorem = fs_join(src, "lorem.txt");
     int   rc    = fs_write_file(lorem, lorem_data, total);
-    free(lorem_data);
+    t_free(lorem_data);
     if (rc != 0) return NULL;
 
     char *pak = under_scratch("deflate_fixture/mixed.pk4");
@@ -231,10 +231,10 @@ static char *build_deflate_pk4_fixture(void)
     proc_result_free(&r);
     if (exit_code != 0) return NULL;
 
-    free(src_d);
-    free(hello);
-    free(nested);
-    free(lorem);
+    t_free(src_d);
+    t_free(hello);
+    t_free(nested);
+    t_free(lorem);
 
     /* Stash src for the diff_tree-based round-trip test; pak path is
      * the function's return value. Caller frees both. */
@@ -264,7 +264,7 @@ static void test_extract_deflate_round_trips(void)
     proc_result_free(&r);
 
     EXPECT_EQ(fs_diff_tree(g_deflate_src, out_dir), 0);
-    free(out_dir);
+    t_free(out_dir);
 }
 
 static void test_verify_synthetic_pk4_passes_deep_checks(void)
@@ -302,10 +302,10 @@ static void test_pack_magic_in_pk4_opens_as_pak(void)
     EXPECT_STR_CONTAINS(r.stdout_buf, "p.txt");
     proc_result_free(&r);
 
-    free(src);
-    free(ptxt);
-    free(real_pak);
-    free(disguised);
+    t_free(src);
+    t_free(ptxt);
+    t_free(real_pak);
+    t_free(disguised);
 }
 
 int main(void)
@@ -332,8 +332,14 @@ int main(void)
     g_scratch = strdup(scratch);
 
     /* Build the DEFLATE fixture once — the three round-trip tests
-     * share it (mirroring the bats setup_file pattern). */
-    g_deflate_pk4 = build_deflate_pk4_fixture();
+     * share it (mirroring the bats setup_file pattern). The fixture
+     * builder uses under_scratch internally, which is arena-tracked
+     * and freed at t_test_end; strdup'ing here detaches the strings
+     * so they outlive the per-test cleanup. */
+    char *raw_pk4 = build_deflate_pk4_fixture();
+    g_deflate_pk4 = raw_pk4 ? strdup(raw_pk4) : NULL;
+    char *src_dup = g_deflate_src ? strdup(g_deflate_src) : NULL;
+    g_deflate_src = src_dup;
 
     RUN_TEST(test_create_builds_valid_zip);
     RUN_TEST(test_create_uppercase_pk4_extension);
@@ -343,6 +349,6 @@ int main(void)
     RUN_TEST(test_verify_synthetic_pk4_passes_deep_checks);
     RUN_TEST(test_pack_magic_in_pk4_opens_as_pak);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

@@ -26,7 +26,7 @@ static char       *g_scratch;
 
 static char *under_scratch(const char *sub)
 {
-    return fs_join(g_scratch, sub);
+    return (char *)t_track(fs_join(g_scratch, sub));
 }
 
 static void put_u32_le(unsigned char *buf, size_t off, uint32_t v)
@@ -157,7 +157,7 @@ static long file_size(const char *path)
     size_t         n   = 0;
     unsigned char *buf = fs_read_file(path, &n);
     if (!buf) return -1;
-    free(buf);
+    t_free(buf);
     return (long)n;
 }
 
@@ -179,8 +179,8 @@ static void test_empty_iwad_has_12_byte_header(void)
     EXPECT_MEM_EQ(buf, "IWAD", 4);
     EXPECT_EQ((long long)get_u32_le(buf, 4), 0);
     EXPECT_EQ((long long)get_u32_le(buf, 8), 12);
-    free(buf);
-    free(pak);
+    t_free(buf);
+    t_free(pak);
 }
 
 static void test_wad_extension_defaults_to_pwad(void)
@@ -197,8 +197,8 @@ static void test_wad_extension_defaults_to_pwad(void)
     EXPECT_EQ((long long)n, 12);
     EXPECT_MEM_EQ(buf, "PWAD", 4);
     EXPECT_EQ((long long)get_u32_le(buf, 4), 0);
-    free(buf);
-    free(pak);
+    t_free(buf);
+    t_free(pak);
 }
 
 static void test_two_entry_iwad_lists_in_dir_order(void)
@@ -221,7 +221,7 @@ static void test_two_entry_iwad_lists_in_dir_order(void)
     EXPECT_NOT_NULL(pos_cmp);
     EXPECT_TRUE(pos_pal < pos_cmp);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_extract_single_entry_byte_identical(void)
@@ -244,10 +244,10 @@ static void test_extract_single_entry_byte_identical(void)
     unsigned char *got = fs_read_file(extracted, &n);
     EXPECT_EQ((long long)n, (long long)strlen("palette-bytes"));
     EXPECT_MEM_EQ(got, "palette-bytes", n);
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
+    t_free(got);
+    t_free(extracted);
+    t_free(out_dir);
+    t_free(pak);
 }
 
 static void test_eight_char_lump_name_accepted(void)
@@ -266,8 +266,8 @@ static void test_eight_char_lump_name_accepted(void)
     EXPECT_STR_CONTAINS(r.stdout_buf, "LINEDEFS");
     proc_result_free(&r);
 
-    free(pak);
-    free(src);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_directory_row_order_filepos_size_name(void)
@@ -289,8 +289,8 @@ static void test_directory_row_order_filepos_size_name(void)
     EXPECT_EQ((long long)get_u32_le(buf, 29), 13);
     EXPECT_MEM_EQ(buf + 33, "PLAYPAL\0", 8);
 
-    free(buf);
-    free(pak);
+    t_free(buf);
+    t_free(pak);
 }
 
 static void test_create_and_add_round_trips_row_order(void)
@@ -316,9 +316,9 @@ static void test_create_and_add_round_trips_row_order(void)
     EXPECT_EQ((long long)get_u32_le(buf, 29), 13);
     EXPECT_MEM_EQ(buf + 33, "PLAYPAL\0", 8);
 
-    free(buf);
-    free(pak);
-    free(src);
+    t_free(buf);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_marker_lump_accepted(void)
@@ -333,7 +333,7 @@ static void test_marker_lump_accepted(void)
     RUN_PAKKA_OK(&r, "-l", pak);
     EXPECT_STR_CONTAINS(r.stdout_buf, "F_START");
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_duplicate_lump_names_load(void)
@@ -357,7 +357,7 @@ static void test_duplicate_lump_names_load(void)
     }
     EXPECT_EQ((long long)hits, 2);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_dup_name_pwad_ok_pak_rejects(void)
@@ -400,9 +400,9 @@ static void test_dup_name_pwad_ok_pak_rejects(void)
     }
     proc_result_free(&r);
 
-    free(pwad);
-    free(pak);
-    free(src);
+    t_free(pwad);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_extract_all_refuses_dup_collision(void)
@@ -440,8 +440,8 @@ static void test_extract_all_refuses_dup_collision(void)
     }
     proc_result_free(&r);
 
-    free(pak);
-    free(out_dir);
+    t_free(pak);
+    t_free(out_dir);
 }
 
 static void test_extract_by_name_first_match(void)
@@ -467,10 +467,10 @@ static void test_extract_by_name_first_match(void)
     unsigned char *got = fs_read_file(extracted, &n);
     EXPECT_EQ((long long)n, 5);
     EXPECT_MEM_EQ(got, "first", 5);
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
+    t_free(got);
+    t_free(extracted);
+    t_free(out_dir);
+    t_free(pak);
 }
 
 static void test_delete_removes_first_match(void)
@@ -493,8 +493,8 @@ static void test_delete_removes_first_match(void)
     EXPECT_NOT_NULL(buf);
     EXPECT_MEM_EQ(buf, "PWAD", 4);
     EXPECT_EQ((long long)get_u32_le(buf, 4), 1);
-    free(buf);
-    free(pak);
+    t_free(buf);
+    t_free(pak);
 }
 
 static void test_rebuild_middle_delete_preserves_survivors(void)
@@ -521,7 +521,7 @@ static void test_rebuild_middle_delete_preserves_survivors(void)
     EXPECT_MEM_EQ(buf, "PWAD", 4);
     EXPECT_EQ((long long)get_u32_le(buf, 4), 2);
     EXPECT_EQ((long long)get_u32_le(buf, 8), 24);
-    free(buf);
+    t_free(buf);
 
     EXPECT_EQ(fs_mkdir_p(out_dir), 0);
     RUN_PAKKA_OK(&r, "-x", "-C", out_dir, pak);
@@ -534,11 +534,11 @@ static void test_rebuild_middle_delete_preserves_survivors(void)
     EXPECT_FALSE(fs_is_file(bbb));
     EXPECT_TRUE(fs_is_file(ccc));
 
-    free(aaa);
-    free(bbb);
-    free(ccc);
-    free(out_dir);
-    free(pak);
+    t_free(aaa);
+    t_free(bbb);
+    t_free(ccc);
+    t_free(out_dir);
+    t_free(pak);
 }
 
 static void test_format_hint_mismatch(void)
@@ -565,8 +565,8 @@ static void test_format_hint_mismatch(void)
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
 
-    free(wad);
-    free(pk3);
+    t_free(wad);
+    t_free(pk3);
 }
 
 static void test_auto_resolves_to_iwad_without_pack_probe(void)
@@ -586,7 +586,7 @@ static void test_auto_resolves_to_iwad_without_pack_probe(void)
         FAIL("AUTO mode on WAD surfaced a Daikatana-related diagnostic");
     }
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_oversize_numlumps_rejected(void)
@@ -622,7 +622,7 @@ static void test_oversize_numlumps_rejected(void)
         FAIL("expected 'too many' / 'max' diagnostic on oversize numlumps");
     }
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_garbage_filepos_rejected(void)
@@ -666,7 +666,7 @@ static void test_garbage_filepos_rejected(void)
         FAIL("expected 'out of range' / 'bytes out' diagnostic");
     }
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_verify_valid_passes_truncated_fails(void)
@@ -703,8 +703,8 @@ static void test_verify_valid_passes_truncated_fails(void)
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
 
-    free(ok_pak);
-    free(bad_pak);
+    t_free(ok_pak);
+    t_free(bad_pak);
 }
 
 static void test_verify_duplicate_lump_names_warning(void)
@@ -748,7 +748,7 @@ static void test_verify_duplicate_lump_names_warning(void)
         }
     }
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 int main(void)
@@ -792,6 +792,6 @@ int main(void)
     RUN_TEST(test_verify_valid_passes_truncated_fails);
     RUN_TEST(test_verify_duplicate_lump_names_warning);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

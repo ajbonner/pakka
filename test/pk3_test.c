@@ -20,7 +20,7 @@
 static const char *g_pakka_path;
 static char       *g_scratch;
 
-static char *under_scratch(const char *sub) { return fs_join(g_scratch, sub); }
+static char *under_scratch(const char *sub) { return (char *)t_track(fs_join(g_scratch, sub)); }
 
 static void put_u16_le(unsigned char *buf, size_t off, uint16_t v)
 {
@@ -85,11 +85,11 @@ static void test_empty_pk3_is_22_byte_eocd_only(void)
     unsigned char *buf = fs_read_file(pak, &n);
     EXPECT_EQ((long long)n, 22);
     EXPECT_MEM_EQ(buf, "PK\x05\x06", 4);
-    free(buf);
+    t_free(buf);
 
     RUN_PAKKA_OK(&r, "-l", pak);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_add_duplicate_entry_refused(void)
@@ -110,8 +110,8 @@ static void test_add_duplicate_entry_refused(void)
     EXPECT_EQ(fs_write_file(src, "second\n", 7), 0);
     const char *argv[]  = {g_pakka_path, "-a", pak, "a.txt", NULL};
     if (proc_run(argv, &opts, &r) != 0) {
-        free(pak);
-        free(src);
+        t_free(pak);
+        t_free(src);
         FAIL("proc_run failed to launch pakka");
     }
     EXPECT_NE(r.exit_code, 0);
@@ -125,13 +125,13 @@ static void test_add_duplicate_entry_refused(void)
                 r.stdout_buf ? r.stdout_buf : "",
                 r.stderr_buf ? r.stderr_buf : "");
         proc_result_free(&r);
-        free(pak);
-        free(src);
+        t_free(pak);
+        t_free(src);
         FAIL("expected 'duplicate' diagnostic on add of same entry");
     }
     proc_result_free(&r);
-    free(pak);
-    free(src);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_delete_close_rebuild_produces_valid_pk3(void)
@@ -167,13 +167,13 @@ static void test_delete_close_rebuild_produces_valid_pk3(void)
     EXPECT_TRUE(fs_is_file(out_keep));
     EXPECT_FALSE(fs_is_file(out_remove));
 
-    free(src);
-    free(keep_src);
-    free(remove_src);
-    free(pak);
-    free(out_dir);
-    free(out_keep);
-    free(out_remove);
+    t_free(src);
+    t_free(keep_src);
+    t_free(remove_src);
+    t_free(pak);
+    t_free(out_dir);
+    t_free(out_keep);
+    t_free(out_remove);
 }
 
 static void test_compress_encodes_deflate_on_compressible(void)
@@ -190,7 +190,7 @@ static void test_compress_encodes_deflate_on_compressible(void)
     EXPECT_NOT_NULL(payload);
     for (size_t i = 0; i < 500; i++) memcpy(payload + i * line_n, line, line_n);
     EXPECT_EQ(fs_write_file(lorem, payload, total), 0);
-    free(payload);
+    t_free(payload);
 
     char *pak = under_scratch("compress_deflate/c.pk3");
 
@@ -204,11 +204,11 @@ static void test_compress_encodes_deflate_on_compressible(void)
     unsigned char *pbuf = fs_read_file(pak, &pn);
     EXPECT_NOT_NULL(pbuf);
     EXPECT_EQ(zip_first_cdr_method(pbuf, pn), 8);
-    free(pbuf);
+    t_free(pbuf);
 
-    free(src);
-    free(lorem);
-    free(pak);
+    t_free(src);
+    t_free(lorem);
+    t_free(pak);
 }
 
 /* Build a buffer using a small LCG to ensure determinism + high entropy.
@@ -247,11 +247,11 @@ static void test_compress_falls_back_to_stored_on_incompressible(void)
     EXPECT_NOT_NULL(pbuf);
     /* Method 0 = STORED — encoder's auto-fallback fired. */
     EXPECT_EQ(zip_first_cdr_method(pbuf, pn), 0);
-    free(pbuf);
+    t_free(pbuf);
 
-    free(src);
-    free(rnd);
-    free(pak);
+    t_free(src);
+    t_free(rnd);
+    t_free(pak);
 }
 
 static void test_compress_mixed_archive(void)
@@ -269,7 +269,7 @@ static void test_compress_mixed_archive(void)
     EXPECT_NOT_NULL(text);
     for (size_t i = 0; i < 2000; i++) memcpy(text + i * line_n, line, line_n);
     EXPECT_EQ(fs_write_file(txt, text, total), 0);
-    free(text);
+    t_free(text);
 
     unsigned char nbuf[4096];
     fill_high_entropy(nbuf, sizeof(nbuf), 0xC0FFEE);
@@ -289,12 +289,12 @@ static void test_compress_mixed_archive(void)
     /* Order in CDR follows the create argv order: text.txt first, noise.bin second. */
     EXPECT_EQ(zip_nth_cdr_method(pbuf, pn, 0), 8);
     EXPECT_EQ(zip_nth_cdr_method(pbuf, pn, 1), 0);
-    free(pbuf);
+    t_free(pbuf);
 
-    free(src);
-    free(txt);
-    free(noise);
-    free(pak);
+    t_free(src);
+    t_free(txt);
+    t_free(noise);
+    t_free(pak);
 }
 
 static void test_compress_round_trip_byte_identical(void)
@@ -310,7 +310,7 @@ static void test_compress_round_trip_byte_identical(void)
     char  *text   = (char *)malloc(total);
     for (size_t i = 0; i < 300; i++) memcpy(text + i * line_n, line, line_n);
     EXPECT_EQ(fs_write_file(lorem, text, total), 0);
-    free(text);
+    t_free(text);
 
     unsigned char rbuf[4096];
     fill_high_entropy(rbuf, sizeof(rbuf), 0xCAFEBABE);
@@ -331,11 +331,11 @@ static void test_compress_round_trip_byte_identical(void)
 
     EXPECT_EQ(fs_diff_tree(src, out_dir), 0);
 
-    free(src);
-    free(lorem);
-    free(rnd);
-    free(pak);
-    free(out_dir);
+    t_free(src);
+    t_free(lorem);
+    t_free(rnd);
+    t_free(pak);
+    t_free(out_dir);
 }
 
 static void test_compress_verify_deep_accepts(void)
@@ -350,7 +350,7 @@ static void test_compress_verify_deep_accepts(void)
     char  *text   = (char *)malloc(total);
     for (size_t i = 0; i < 1000; i++) memcpy(text + i * line_n, line, line_n);
     EXPECT_EQ(fs_write_file(v, text, total), 0);
-    free(text);
+    t_free(text);
 
     char *pak = under_scratch("compress_vd/v.pk3");
 
@@ -363,9 +363,9 @@ static void test_compress_verify_deep_accepts(void)
     RUN_PAKKA_OK(&r, "--verify", "--deep", pak);
     proc_result_free(&r);
 
-    free(src);
-    free(v);
-    free(pak);
+    t_free(src);
+    t_free(v);
+    t_free(pak);
 }
 
 static void test_compress_rejected_on_pak_target(void)
@@ -386,13 +386,13 @@ static void test_compress_rejected_on_pak_target(void)
     }
     if (!found) {
         proc_result_free(&r);
-        free(target);
-        free(src);
+        t_free(target);
+        t_free(src);
         FAIL("expected 'PK3' or 'DEFLATE' in diagnostic on .pak target");
     }
     proc_result_free(&r);
-    free(target);
-    free(src);
+    t_free(target);
+    t_free(src);
 }
 
 /* ---------- tests: malformed-ZIP rejection ---------- */
@@ -409,7 +409,7 @@ static void test_multi_disk_spanning_marker_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_zip64_sentinels_rejected(void)
@@ -434,7 +434,7 @@ static void test_zip64_sentinels_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static int expect_pakka_rejects(const char *pak, const char *needle_a,
@@ -490,9 +490,9 @@ static void test_open_rejects_dotdot_traversal_in_zip(void)
     /* Nothing should have escaped out of the destination tree. */
     char *escape = fs_join(under_scratch("zip_dotdot"), "escape.txt");
     EXPECT_FALSE(fs_is_file(escape));
-    free(escape);
-    free(pak);
-    free(out);
+    t_free(escape);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_open_rejects_embedded_nul_in_name(void)
@@ -510,7 +510,7 @@ static void test_open_rejects_embedded_nul_in_name(void)
     EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "control byte", NULL), 0);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_open_rejects_zip_entry_with_reserved_name(void)
@@ -534,8 +534,8 @@ static void test_open_rejects_zip_entry_with_reserved_name(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
-    free(out);
+    t_free(pak);
+    t_free(out);
 }
 
 static void test_open_rejects_encrypted_entry(void)
@@ -554,7 +554,7 @@ static void test_open_rejects_encrypted_entry(void)
     EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "Encrypted", NULL), 0);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_open_rejects_unsupported_method(void)
@@ -573,7 +573,7 @@ static void test_open_rejects_unsupported_method(void)
     EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "method", NULL), 0);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_open_rejects_stored_csize_neq_usize(void)
@@ -596,7 +596,7 @@ static void test_open_rejects_stored_csize_neq_usize(void)
     EXPECT_EQ(zip_write_single(pak, &p), 0);
 
     EXPECT_EQ(expect_pakka_rejects(pak, "csize != usize", NULL), 0);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_open_rejects_lfh_payload_overlap_cdr(void)
@@ -624,7 +624,7 @@ static void test_open_rejects_lfh_payload_overlap_cdr(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 int main(void)
@@ -665,6 +665,6 @@ int main(void)
     RUN_TEST(test_open_rejects_stored_csize_neq_usize);
     RUN_TEST(test_open_rejects_lfh_payload_overlap_cdr);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

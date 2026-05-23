@@ -20,7 +20,7 @@ static const char *g_uplink_path;
 static const char *g_dayone_path;
 static char       *g_scratch;
 
-static char *under_scratch(const char *sub) { return fs_join(g_scratch, sub); }
+static char *under_scratch(const char *sub) { return (char *)t_track(fs_join(g_scratch, sub)); }
 
 #define RUN_PAKKA_OK(out_result, ...) do {                                  \
     const char *_argv[] = { g_pakka_path, __VA_ARGS__, NULL };              \
@@ -51,7 +51,7 @@ static int copy_file(const char *src, const char *dst)
     unsigned char *buf = fs_read_file(src, &n);
     if (!buf) return -1;
     int rc = fs_write_file(dst, buf, n);
-    free(buf);
+    t_free(buf);
     return rc;
 }
 
@@ -110,9 +110,9 @@ static void test_uplink_format_aliases_match(void)
     EXPECT_TRUE(strlen(pak_out) > 0);
     EXPECT_STREQ(pak_out, gs_out);
     EXPECT_STREQ(pak_out, hl_out);
-    free(pak_out);
-    free(gs_out);
-    free(hl_out);
+    t_free(pak_out);
+    t_free(gs_out);
+    t_free(hl_out);
 }
 
 static void test_uplink_tree_renders(void)
@@ -152,8 +152,8 @@ static void test_uplink_full_extract_materializes_asset_families(void)
     char *models = fs_join(out, "models");
     EXPECT_TRUE(fs_is_dir(maps));
     EXPECT_TRUE(fs_is_dir(models));
-    free(maps);
-    free(models);
+    t_free(maps);
+    t_free(models);
 
     /* Uplink's tram-ride opener map t0a0.bsp = 3,003,032 bytes. */
     char  *bsp = fs_join(out, "maps/t0a0.bsp");
@@ -161,9 +161,9 @@ static void test_uplink_full_extract_materializes_asset_families(void)
     size_t n   = 0;
     unsigned char *buf = fs_read_file(bsp, &n);
     EXPECT_EQ((long long)n, 3003032);
-    free(buf);
-    free(bsp);
-    free(out);
+    t_free(buf);
+    t_free(bsp);
+    t_free(out);
 }
 
 static void test_uplink_delete_rebuild_drops_only_victim(void)
@@ -188,7 +188,7 @@ static void test_uplink_delete_rebuild_drops_only_victim(void)
     char *space      = strchr(first, ' ');
     if (space) *space = '\0';
     char *victim     = strdup(first);
-    free(first);
+    t_free(first);
     EXPECT_NOT_NULL(victim);
 
     /* Count lines before. */
@@ -209,19 +209,19 @@ static void test_uplink_delete_rebuild_drops_only_victim(void)
     char victim_prefix[256];
     snprintf(victim_prefix, sizeof(victim_prefix), "%s ", victim);
     if (strstr(after, victim_prefix)) {
-        free(before);
-        free(after);
-        free(victim);
+        t_free(before);
+        t_free(after);
+        t_free(victim);
         FAIL("victim still appears in listing after delete");
     }
 
     RUN_PAKKA_OK(&r, "--verify", mut);
     proc_result_free(&r);
 
-    free(before);
-    free(after);
-    free(victim);
-    free(mut);
+    t_free(before);
+    t_free(after);
+    t_free(victim);
+    t_free(mut);
 }
 
 /* ---------- dayone ---------- */
@@ -244,8 +244,8 @@ static void test_dayone_format_alias_matches(void)
     EXPECT_NOT_NULL(gs_out);
     EXPECT_TRUE(strlen(pak_out) > 0);
     EXPECT_STREQ(pak_out, gs_out);
-    free(pak_out);
-    free(gs_out);
+    t_free(pak_out);
+    t_free(gs_out);
 }
 
 static void test_dayone_structural_verify_passes(void)
@@ -273,7 +273,7 @@ static void test_dayone_extract_spot_checks_c0a0_bsp(void)
 
     char *maps = fs_join(out, "maps");
     EXPECT_TRUE(fs_is_dir(maps));
-    free(maps);
+    t_free(maps);
 
     /* c0a0.bsp = 2,232,604 bytes (Black Mesa monorail intro). */
     char  *bsp = fs_join(out, "maps/c0a0.bsp");
@@ -281,9 +281,9 @@ static void test_dayone_extract_spot_checks_c0a0_bsp(void)
     size_t n   = 0;
     unsigned char *buf = fs_read_file(bsp, &n);
     EXPECT_EQ((long long)n, 2232604);
-    free(buf);
-    free(bsp);
-    free(out);
+    t_free(buf);
+    t_free(bsp);
+    t_free(out);
 }
 
 int main(void)
@@ -317,6 +317,6 @@ int main(void)
     RUN_TEST(test_dayone_structural_verify_passes);
     RUN_TEST(test_dayone_extract_spot_checks_c0a0_bsp);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

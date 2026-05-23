@@ -44,7 +44,7 @@ static const unsigned char CYR_CP1251_BYTES_B[] = {0xC0, 0xC1, 0xC2, 0xC3, '.', 
 static const char *g_pakka_path;
 static char       *g_scratch;
 
-static char *under_scratch(const char *sub) { return fs_join(g_scratch, sub); }
+static char *under_scratch(const char *sub) { return (char *)t_track(fs_join(g_scratch, sub)); }
 
 static void put_u32_le(unsigned char *buf, size_t off, uint32_t v)
 {
@@ -174,9 +174,9 @@ static void test_pak_add_list_round_trips_cyrillic_utf8(void)
     EXPECT_TRUE(find_bytes((const unsigned char *)r.stdout_buf, r.stdout_len,
                            CYR_UTF8_PREFIX, sizeof(CYR_UTF8_PREFIX)) >= 0);
     proc_result_free(&r);
-    free(src);
-    free(pak);
-    free(dir);
+    t_free(src);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_pak_archive_header_stores_raw_utf8_bytes(void)
@@ -200,10 +200,10 @@ static void test_pak_archive_header_stores_raw_utf8_bytes(void)
     unsigned char *pbuf = fs_read_file(pak, &pn);
     EXPECT_NOT_NULL(pbuf);
     EXPECT_TRUE(find_bytes(pbuf, pn, CYR_UTF8_PREFIX, sizeof(CYR_UTF8_PREFIX)) >= 0);
-    free(pbuf);
-    free(src);
-    free(pak);
-    free(dir);
+    t_free(pbuf);
+    t_free(src);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_pak_extract_round_trips_cyrillic_utf8(void)
@@ -231,12 +231,12 @@ static void test_pak_extract_round_trips_cyrillic_utf8(void)
     unsigned char *buf = fs_read_file(extracted, &n);
     EXPECT_EQ((long long)n, 5);
     EXPECT_MEM_EQ(buf, "hello", 5);
-    free(buf);
-    free(extracted);
-    free(out);
-    free(src);
-    free(pak);
-    free(dir);
+    t_free(buf);
+    t_free(extracted);
+    t_free(out);
+    t_free(src);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_pk3_gpbf_bit11_set_for_cyrillic(void)
@@ -271,10 +271,10 @@ static void test_pk3_gpbf_bit11_set_for_cyrillic(void)
     EXPECT_TRUE(cdr_off >= 0);
     EXPECT_EQ((long long)pbuf[cdr_off + 8],  0x00);
     EXPECT_EQ((long long)pbuf[cdr_off + 9],  0x08);
-    free(pbuf);
-    free(src);
-    free(pak);
-    free(dir);
+    t_free(pbuf);
+    t_free(src);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_pk3_gpbf_bit11_clear_for_ascii(void)
@@ -298,10 +298,10 @@ static void test_pk3_gpbf_bit11_clear_for_ascii(void)
     /* GP flags word at LFH+6 must be entirely zero (no bit 11). */
     EXPECT_EQ((long long)pbuf[6], 0x00);
     EXPECT_EQ((long long)pbuf[7], 0x00);
-    free(pbuf);
-    free(src);
-    free(pak);
-    free(dir);
+    t_free(pbuf);
+    t_free(src);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_legacy_pak_extract_substitutes_invalid_utf8(void)
@@ -332,9 +332,9 @@ static void test_legacy_pak_extract_substitutes_invalid_utf8(void)
                 r.stdout_buf ? r.stdout_buf : "",
                 r.stderr_buf ? r.stderr_buf : "");
         proc_result_free(&r);
-        free(pak);
-        free(out);
-        free(dir);
+        t_free(pak);
+        t_free(out);
+        t_free(dir);
         FAIL("expected 'not valid UTF-8' diagnostic");
     }
     proc_result_free(&r);
@@ -342,10 +342,10 @@ static void test_legacy_pak_extract_substitutes_invalid_utf8(void)
     /* "____.txt" must exist. */
     char *substituted = fs_join(out, "____.txt");
     EXPECT_TRUE(fs_is_file(substituted));
-    free(substituted);
-    free(pak);
-    free(out);
-    free(dir);
+    t_free(substituted);
+    t_free(pak);
+    t_free(out);
+    t_free(dir);
 }
 
 static void test_list_invalid_utf8_renders_sanitized(void)
@@ -371,14 +371,14 @@ static void test_list_invalid_utf8_renders_sanitized(void)
         if (c < 0x20 || c > 0x7E) {
             fprintf(stderr, "    unsanitized byte 0x%02X at offset %zu\n", c, i);
             proc_result_free(&r);
-            free(pak);
-            free(dir);
+            t_free(pak);
+            t_free(dir);
             FAIL("pakka -l output contains non-printable / non-ASCII byte");
         }
     }
     proc_result_free(&r);
-    free(pak);
-    free(dir);
+    t_free(pak);
+    t_free(dir);
 }
 
 static void test_pk3_bit11_set_with_invalid_utf8_rejected(void)
@@ -415,11 +415,11 @@ static void test_pk3_bit11_set_with_invalid_utf8_rejected(void)
                 r.stdout_buf ? r.stdout_buf : "",
                 r.stderr_buf ? r.stderr_buf : "");
         proc_result_free(&r);
-        free(pak);
+        t_free(pak);
         FAIL("expected 'UTF-8 flag' / 'not valid UTF-8' diagnostic");
     }
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_pk3_bit11_clear_cp437_decodes_via_fallback(void)
@@ -446,7 +446,7 @@ static void test_pk3_bit11_clear_cp437_decodes_via_fallback(void)
     EXPECT_TRUE(find_bytes((const unsigned char *)r.stdout_buf, r.stdout_len,
                            eszett_utf8, sizeof(eszett_utf8)) >= 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_legacy_pak_collision_after_sanitization_detected(void)
@@ -479,15 +479,15 @@ static void test_legacy_pak_collision_after_sanitization_detected(void)
                 r.stdout_buf ? r.stdout_buf : "",
                 r.stderr_buf ? r.stderr_buf : "");
         proc_result_free(&r);
-        free(pak);
-        free(out);
-        free(dir);
+        t_free(pak);
+        t_free(out);
+        t_free(dir);
         FAIL("expected 'collide' diagnostic on post-sanitization collision");
     }
     proc_result_free(&r);
-    free(pak);
-    free(out);
-    free(dir);
+    t_free(pak);
+    t_free(out);
+    t_free(dir);
 }
 
 int main(void)
@@ -519,6 +519,6 @@ int main(void)
     RUN_TEST(test_pk3_bit11_set_with_invalid_utf8_rejected);
     RUN_TEST(test_pk3_bit11_clear_cp437_decodes_via_fallback);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }

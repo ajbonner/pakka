@@ -23,7 +23,7 @@ static char       *g_scratch;
 
 static char *under_scratch(const char *sub)
 {
-    return fs_join(g_scratch, sub);
+    return (char *)t_track(fs_join(g_scratch, sub));
 }
 
 static void put_u32_le(unsigned char *buf, size_t off, uint32_t v)
@@ -165,13 +165,13 @@ static int probe_dk_dir(const char *path, dk_entry_t *out, size_t cap)
     unsigned char *buf = fs_read_file(path, &n);
     if (!buf) return -1;
     if (n < DK_HEADER_SIZE || memcmp(buf, "PACK", 4) != 0) {
-        free(buf);
+        t_free(buf);
         return -1;
     }
     uint32_t diroffset = get_u32_le(buf, 4);
     uint32_t dirlength = get_u32_le(buf, 8);
     if (dirlength % DK_DIR_ENTRY != 0 || diroffset + dirlength > n) {
-        free(buf);
+        t_free(buf);
         return -1;
     }
     size_t entries = dirlength / DK_DIR_ENTRY;
@@ -188,7 +188,7 @@ static int probe_dk_dir(const char *path, dk_entry_t *out, size_t cap)
         out[i].is_compressed  = get_u32_le(row, DK_NAME_FIELD + 12);
     }
 
-    free(buf);
+    t_free(buf);
     return (int)entries;
 }
 
@@ -241,7 +241,7 @@ static int copy_file(const char *src, const char *dst)
     unsigned char *buf = fs_read_file(src, &n);
     if (!buf) return -1;
     int rc = fs_write_file(dst, buf, n);
-    free(buf);
+    t_free(buf);
     return rc;
 }
 
@@ -275,7 +275,7 @@ static void test_open_stored_only_lists(void)
     RUN_PAKKA_OK(&r, "-l", pak, "--format", "daikatana");
     EXPECT_STR_CONTAINS(r.stdout_buf, "weapons/blast.mdl");
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_extract_stored_round_trip(void)
@@ -296,10 +296,10 @@ static void test_extract_stored_round_trip(void)
     unsigned char *got = fs_read_file(out_file, &n);
     EXPECT_EQ((long long)n, 16);
     EXPECT_MEM_EQ(got, "model-bytes-here", 16);
-    free(got);
-    free(out_file);
-    free(out_dir);
-    free(pak);
+    t_free(got);
+    t_free(out_file);
+    t_free(out_dir);
+    t_free(pak);
 }
 
 static void test_extract_compressed_literal_decodes(void)
@@ -320,10 +320,10 @@ static void test_extract_compressed_literal_decodes(void)
     unsigned char *got = fs_read_file(out_file, &n);
     EXPECT_EQ((long long)n, 11);
     EXPECT_MEM_EQ(got, "wall-pixels", 11);
-    free(got);
-    free(out_file);
-    free(out_dir);
-    free(pak);
+    t_free(got);
+    t_free(out_file);
+    t_free(out_dir);
+    t_free(pak);
 }
 
 static void test_create_empty_then_open_with_hint(void)
@@ -340,7 +340,7 @@ static void test_create_empty_then_open_with_hint(void)
      * verifies identity. */
     RUN_PAKKA_OK(&r, "-l", pak, "--format", "daikatana");
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_add_non_compressible_extension_stays_stored(void)
@@ -373,11 +373,11 @@ static void test_add_non_compressible_extension_stays_stored(void)
     unsigned char *got = fs_read_file(extracted, &got_n);
     EXPECT_EQ((long long)got_n, 11);
     EXPECT_MEM_EQ(got, "hello world", 11);
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
-    free(src);
+    t_free(got);
+    t_free(extracted);
+    t_free(out_dir);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_add_compressible_redundant_payload_encoded(void)
@@ -414,11 +414,11 @@ static void test_add_compressible_redundant_payload_encoded(void)
     unsigned char *got = fs_read_file(extracted, &got_n);
     EXPECT_EQ((long long)got_n, 4096);
     EXPECT_MEM_EQ(got, zeros, sizeof(zeros));
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
-    free(src);
+    t_free(got);
+    t_free(extracted);
+    t_free(out_dir);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_add_incompressible_falls_back_to_stored(void)
@@ -457,11 +457,11 @@ static void test_add_incompressible_falls_back_to_stored(void)
     unsigned char *got = fs_read_file(extracted, &got_n);
     EXPECT_EQ((long long)got_n, 256);
     EXPECT_MEM_EQ(got, buf, sizeof(buf));
-    free(got);
-    free(extracted);
-    free(out_dir);
-    free(pak);
-    free(src);
+    t_free(got);
+    t_free(extracted);
+    t_free(out_dir);
+    t_free(pak);
+    t_free(src);
 }
 
 static void test_mixed_extensions_layout_consistent(void)
@@ -501,13 +501,13 @@ static void test_mixed_extensions_layout_consistent(void)
     unsigned char *buf = fs_read_file(pak, &m);
     EXPECT_NOT_NULL(buf);
     uint32_t diroffset = get_u32_le(buf, 4);
-    free(buf);
+    t_free(buf);
     uint32_t end = probe_dk_payload_end(pak);
     EXPECT_EQ((long long)diroffset, (long long)end);
 
-    free(pak);
-    free(txt);
-    free(bmp);
+    t_free(pak);
+    t_free(txt);
+    t_free(bmp);
 }
 
 static void test_delete_keeps_survivor_bit_identical(void)
@@ -541,8 +541,8 @@ static void test_delete_keeps_survivor_bit_identical(void)
     unsigned char *got = fs_read_file(pre_keep, &got_n);
     EXPECT_EQ((long long)got_n, 1024);
     EXPECT_MEM_EQ(got, keep_buf, sizeof(keep_buf));
-    free(got);
-    free(pre_keep);
+    t_free(got);
+    t_free(pre_keep);
 
     /* Delete drops dropme.txt and forces a rebuild. */
     RUN_PAKKA_OK(&r, "-d", pak, "--format", "daikatana", "dropme.txt");
@@ -556,22 +556,22 @@ static void test_delete_keeps_survivor_bit_identical(void)
     got = fs_read_file(post_keep, &got_n);
     EXPECT_EQ((long long)got_n, 1024);
     EXPECT_MEM_EQ(got, keep_buf, sizeof(keep_buf));
-    free(got);
+    t_free(got);
 
     char *post_drop = fs_join(post, "dropme.txt");
     EXPECT_FALSE(fs_is_file(post_drop));
-    free(post_drop);
+    t_free(post_drop);
 
     dk_entry_t entries[8];
     int        n = probe_dk_dir(pak, entries, 8);
     EXPECT_EQ(n, 1);
 
-    free(post_keep);
-    free(pre);
-    free(post);
-    free(pak);
-    free(a);
-    free(b);
+    t_free(post_keep);
+    t_free(pre);
+    t_free(post);
+    t_free(pak);
+    t_free(a);
+    t_free(b);
 }
 
 static void test_deep_verify_accepts_well_formed_compressed(void)
@@ -583,7 +583,7 @@ static void test_deep_verify_accepts_well_formed_compressed(void)
     proc_result_t r;
     RUN_PAKKA_OK(&r, "--verify", "--deep", pak, "--format", "daikatana");
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_pakka_built_passes_deep_verify(void)
@@ -605,8 +605,8 @@ static void test_pakka_built_passes_deep_verify(void)
 
     RUN_PAKKA_OK(&r, "--verify", "--deep", pak, "--format", "daikatana");
     proc_result_free(&r);
-    free(pak);
-    free(src);
+    t_free(pak);
+    t_free(src);
 }
 
 /* Build a malformed DK pak: 5-byte literal opcode (carries 5 bytes
@@ -645,7 +645,7 @@ static void test_deep_verify_rejects_flen0_with_stream(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_deep_verify_rejects_csize0_with_declared_length(void)
@@ -673,7 +673,7 @@ static void test_deep_verify_rejects_csize0_with_declared_length(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_read_entry_alloc_rejects_flen0_stream(void)
@@ -691,8 +691,8 @@ static void test_read_entry_alloc_rejects_flen0_stream(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
-    free(out_dir);
+    t_free(pak);
+    t_free(out_dir);
 }
 
 static void test_deep_verify_rejects_truncated_stream(void)
@@ -722,7 +722,7 @@ static void test_deep_verify_rejects_truncated_stream(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_ambiguous_576_rejected(void)
@@ -736,7 +736,7 @@ static void test_ambiguous_576_rejected(void)
     EXPECT_EQ(run_pakka_capture(&r, argv), 0);
     EXPECT_NE(r.exit_code, 0);
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_hint_daikatana_parses_as_dk(void)
@@ -749,7 +749,7 @@ static void test_hint_daikatana_parses_as_dk(void)
     RUN_PAKKA_OK(&r, "-l", pak, "--format", "daikatana");
     EXPECT_STR_CONTAINS(r.stdout_buf, "test");
     proc_result_free(&r);
-    free(pak);
+    t_free(pak);
 }
 
 static void test_real_fixture_cross_validates(void)
@@ -762,8 +762,8 @@ static void test_real_fixture_cross_validates(void)
     char *inputs  = fs_join(g_repo_root, "test/fixtures/dk/inputs");
     if (!fs_is_file(fixture)) {
         fprintf(stderr, "FATAL: expected DK fixture missing at %s\n", fixture);
-        free(fixture);
-        free(inputs);
+        t_free(fixture);
+        t_free(inputs);
         FAIL("DK real fixture missing");
     }
 
@@ -824,27 +824,27 @@ static void test_real_fixture_cross_validates(void)
         if (!want || !got || wn != gn || memcmp(want, got, wn) != 0) {
             fprintf(stderr, "    mismatch on %s vs %s (wn=%zu gn=%zu)\n",
                     want_path, got_path, wn, gn);
-            free(want);
-            free(got);
-            free(want_path);
-            free(got_path);
-            free(realout);
-            free(fixture);
-            free(inputs);
+            t_free(want);
+            t_free(got);
+            t_free(want_path);
+            t_free(got_path);
+            t_free(realout);
+            t_free(fixture);
+            t_free(inputs);
             FAIL("decoded fixture entry differs from source input");
         }
-        free(want);
-        free(got);
-        free(want_path);
-        free(got_path);
+        t_free(want);
+        t_free(got);
+        t_free(want_path);
+        t_free(got_path);
     }
 
     RUN_PAKKA_OK(&r, "--verify", "--deep", fixture, "--format", "daikatana");
     proc_result_free(&r);
 
-    free(realout);
-    free(fixture);
-    free(inputs);
+    t_free(realout);
+    t_free(fixture);
+    t_free(inputs);
 }
 
 int main(void)
@@ -888,7 +888,7 @@ int main(void)
     RUN_TEST(test_hint_daikatana_parses_as_dk);
     RUN_TEST(test_real_fixture_cross_validates);
 
-    free(g_scratch);
+    t_free(g_scratch);
     /* copy_file is unused in dk_test today (kept for parity with other
      * ports) — silence -Wunused-function. */
     (void)copy_file;

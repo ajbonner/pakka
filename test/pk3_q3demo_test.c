@@ -20,7 +20,7 @@ static const char *g_pakka_path;
 static const char *g_q3demo_path;
 static char       *g_scratch;
 
-static char *under_scratch(const char *sub) { return fs_join(g_scratch, sub); }
+static char *under_scratch(const char *sub) { return (char *)t_track(fs_join(g_scratch, sub)); }
 
 #define RUN_PAKKA_OK(out_result, ...) do {                                  \
     const char *_argv[] = { g_pakka_path, __VA_ARGS__, NULL };              \
@@ -102,8 +102,8 @@ static void test_extract_spot_checks_known_assets(void)
     size_t qn  = 0;
     unsigned char *qbuf = fs_read_file(qvm, &qn);
     EXPECT_EQ((long long)qn, 236956);
-    free(qbuf);
-    free(qvm);
+    t_free(qbuf);
+    t_free(qvm);
 
     /* scripts/base.shader: 2247 bytes. */
     char  *shader = fs_join(out, "scripts/base.shader");
@@ -111,10 +111,10 @@ static void test_extract_spot_checks_known_assets(void)
     size_t sn     = 0;
     unsigned char *sbuf = fs_read_file(shader, &sn);
     EXPECT_EQ((long long)sn, 2247);
-    free(sbuf);
-    free(shader);
+    t_free(sbuf);
+    t_free(shader);
 
-    free(out);
+    t_free(out);
 }
 
 int main(void)
@@ -142,6 +142,6 @@ int main(void)
     RUN_TEST(test_deep_verify_succeeds_no_warnings);
     RUN_TEST(test_extract_spot_checks_known_assets);
 
-    free(g_scratch);
+    t_free(g_scratch);
     return t_summary();
 }
