@@ -408,6 +408,15 @@ $(PROC_SELF_TEST): test/proc_self_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -o $@ test/proc_self_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 proc_self_test: $(PROC_SELF_TEST)
 
+# Large-file regression — 32-bit fseek/ftell ceiling. Synthesizes a
+# 2.6 GB sparse pak whose directory sits above LONG_MAX. C peer of
+# test/large_file.bats.
+LARGE_FILE_TEST = $(TEST_DIR)/large_file_test
+$(LARGE_FILE_TEST): test/large_file_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -o $@ test/large_file_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+large_file_test: $(LARGE_FILE_TEST)
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -438,9 +447,11 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
+	@echo "==> large_file_test"
+	@PAKKA=$(abspath $(TARGET)) LARGE_FILE_SCRATCH=$(abspath $(TEST_DIR))/large_file $(LARGE_FILE_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

@@ -54,3 +54,11 @@ target_include_directories(dk_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
 # proc_self_test exercises proc.{h,c} by spawning itself in child mode.
 pakka_add_c_test(proc_self_test proc_self_test.c)
+
+# large_file_test: 32-bit fseek/ftell ceiling regression. C peer of
+# test/large_file.bats. Needs PAKKA env pointing at the pakka binary;
+# the scratch dir is absolute so the 2.6 GB sparse fixture lives in
+# a known location regardless of CWD at test invocation time.
+pakka_add_c_test(large_file_test large_file_test.c
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;LARGE_FILE_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/large_file")

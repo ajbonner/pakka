@@ -63,6 +63,14 @@ int  t_summary(void);
         FAIL("EXPECT_STR_CONTAINS: \"%s\" not in output", _n);              \
 } while (0)
 
+#define EXPECT_STR_STARTS_WITH(s, prefix) do {                              \
+    const char *_s = (s);                                                   \
+    const char *_p = (prefix);                                              \
+    if (strncmp(_s, _p, strlen(_p)) != 0)                                   \
+        FAIL("EXPECT_STR_STARTS_WITH: \"%s\" doesn't start with \"%s\"",    \
+             _s, _p);                                                       \
+} while (0)
+
 #define EXPECT_MEM_EQ(actual, expected, len) do {                           \
     if (memcmp((actual), (expected), (size_t)(len)) != 0)                   \
         FAIL("EXPECT_MEM_EQ: %zu-byte buffers differ", (size_t)(len));      \
