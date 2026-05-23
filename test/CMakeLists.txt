@@ -92,3 +92,14 @@ add_test(NAME dk_test COMMAND dk_test)
 set_tests_properties(dk_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;DK_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/dk;REPO_ROOT=${CMAKE_SOURCE_DIR}")
+
+# pakka_test: Quake PAK format. Partial C peer of test/pakka.bats — the
+# 46 cases that aren't POSIX-symlink / chmod / shell-pipeline specific.
+# Needs PAK0 env pointing at the canonical fixture; the fixture lives
+# under the source tree's build/test/ (downloaded via `make fixture` on
+# Unix; fixtures.ps1 on Windows will land it at the same path).
+pakka_add_test_exe(pakka_test pakka_test.c)
+add_test(NAME pakka_test COMMAND pakka_test)
+set_tests_properties(pakka_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;PAK0=${CMAKE_SOURCE_DIR}/build/test/pak0.pak;PAKKA_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pakka")
