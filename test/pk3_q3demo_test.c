@@ -1,14 +1,13 @@
-/* pk3_q3demo_test — Q3 demo pak0.pk3 fixture. C peer of test/pk3_q3demo.bats.
+/* pk3_q3demo_test — Q3 demo pak0.pk3 fixture.
  *
  * Gated on the Q3DEMO_PAK0_PK3 env var (set by the realpak-test-q3
  * Makefile target / fixtures.ps1 on Windows). If unset, every case
  * SKIPs so this binary is safe to include in `make test` /
- * `ctest`. The pakka_format() c-api case from the bats stays in
- * pk3_q3demo.bats because it needs an inline-cc harness linked
- * against libpakka headers — that flow doesn't translate cleanly
- * to a precompiled C test binary. */
+ * `ctest`. The format-probe case calls pakka_open + pakka_format
+ * in-process via the linked libpakka archive. */
 
 #include "fs.h"
+#include "pakka.h"
 #include "proc.h"
 #include "test_macros.h"
 
@@ -117,6 +116,18 @@ static void test_extract_spot_checks_known_assets(void)
     t_free(out);
 }
 
+static void test_format_returns_pk3(void)
+{
+    if (gated()) SKIP("Q3DEMO_PAK0_PK3 not set or fixture missing");
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    pakka_status_t   s   = pakka_open(g_q3demo_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK);
+    EXPECT_EQ((long long)pakka_entry_count(a), 1274);
+    EXPECT_EQ((int)pakka_format(a), (int)PAKKA_FORMAT_PK3);
+    pakka_close(a, NULL);
+}
+
 int main(void)
 {
     const char *pakka = getenv("PAKKA");
@@ -141,6 +152,7 @@ int main(void)
     RUN_TEST(test_structural_verify_succeeds_no_warnings);
     RUN_TEST(test_deep_verify_succeeds_no_warnings);
     RUN_TEST(test_extract_spot_checks_known_assets);
+    RUN_TEST(test_format_returns_pk3);
 
     t_free(g_scratch);
     return t_summary();

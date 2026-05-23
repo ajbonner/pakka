@@ -367,16 +367,16 @@ servers). The constrained-subset stance is documented in id's
   refusals, symlink rejection, control-byte name rejection,
   directory-marker tolerance, mixed STORED+DEFLATE write, and
   rebuild-after-delete.
-- `test/pk4.bats` — the same suite re-run with `.pk4` extensions
+- `test/pk4_test.c` — the same shape re-run with `.pk4` extensions
   + `--format pk4`, asserting that the bytes are identical to the
   PK3 case and the only observable difference is the label
   returned by `pakka_format()`.
-- `test/pk3_q3demo.bats` — opt-in suite (`make realpak-test-q3`) that
-  downloads the Quake III Arena shareware demo from archive.org,
-  uses pakka to extract the inner `pak0.pk3` (a 47 MiB real-world
-  id-built PK3 with 1,274 entries), and exercises list / extract /
-  verify against it. The hard fixture pin keeps the suite honest
-  against authentic id-emitted bytes.
+- `test/pk3_q3demo_test.c` — opt-in suite (`make realpak-test-q3`)
+  that downloads the Quake III Arena shareware demo from
+  archive.org, uses pakka to extract the inner `pak0.pk3` (a 47 MiB
+  real-world id-built PK3 with 1,274 entries), and exercises list /
+  extract / verify against it. The hard fixture pin keeps the suite
+  honest against authentic id-emitted bytes.
 - `test/c_api_test.c` — public-API round-trip for both PK3 and
   PK4, including the PK3 ↔ PK4 label round-trip through
   `pakka_create` + `pakka_open`.

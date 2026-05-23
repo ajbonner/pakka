@@ -1,13 +1,13 @@
-/* pak_goldsrc_test — GoldSrc PAK parity fixtures. C peer of
- * test/pak_goldsrc.bats.
+/* pak_goldsrc_test — GoldSrc PAK parity fixtures.
  *
  * Two independently-gated fixtures (Half-Life Uplink + Day One). Each
  * case SKIPs when its fixture env var is unset, so this binary is
- * safe to include in default `make test` / `ctest`. The pakka_format()
- * c-api case from the bats stays in pak_goldsrc.bats — needs an
- * inline-cc harness linked against libpakka headers. */
+ * safe to include in default `make test` / `ctest`. The format-probe
+ * case calls pakka_open + pakka_format in-process via the linked
+ * libpakka archive. */
 
 #include "fs.h"
+#include "pakka.h"
 #include "proc.h"
 #include "test_macros.h"
 
@@ -166,6 +166,17 @@ static void test_uplink_full_extract_materializes_asset_families(void)
     t_free(out);
 }
 
+static void test_uplink_format_returns_pak(void)
+{
+    if (uplink_gated()) SKIP("GOLDSRC_UPLINK_PAK0 not set or fixture missing");
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    pakka_status_t   s   = pakka_open(g_uplink_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK);
+    EXPECT_EQ((int)pakka_format(a), (int)PAKKA_FORMAT_PAK);
+    pakka_close(a, NULL);
+}
+
 static void test_uplink_delete_rebuild_drops_only_victim(void)
 {
     if (uplink_gated()) SKIP("GOLDSRC_UPLINK_PAK0 not set or fixture missing");
@@ -311,6 +322,7 @@ int main(void)
     RUN_TEST(test_uplink_tree_renders);
     RUN_TEST(test_uplink_structural_verify_passes);
     RUN_TEST(test_uplink_full_extract_materializes_asset_families);
+    RUN_TEST(test_uplink_format_returns_pak);
     RUN_TEST(test_uplink_delete_rebuild_drops_only_victim);
     RUN_TEST(test_dayone_lists_2598_entries);
     RUN_TEST(test_dayone_format_alias_matches);

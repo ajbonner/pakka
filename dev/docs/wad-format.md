@@ -210,7 +210,7 @@ The reopen step in `op_extract` uses `pakka_open_entry_handle` rather
 than name lookup so duplicate-bearing WADs read coherently entry-by-
 entry.
 
-Testing: `test/wad.bats` covers 19 synthetic-fixture scenarios
+Testing: `test/wad_test.c` covers 20 synthetic-fixture scenarios
 (header byte layout, directory entry byte layout, 8-char name
 acceptance, marker lump loading, duplicate-name handling, extract-by-
 name first-match semantics, extract-all collision refusal, rebuild

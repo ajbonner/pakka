@@ -469,22 +469,24 @@ $(PK3_TEST): test/pk3_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_test.d -o $@ test/pk3_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pk3_test: $(PK3_TEST)
 
-# Q3 demo realpak tests. C peer of test/pk3_q3demo.bats. Gated on
+# Q3 demo realpak tests against id's real Q3 demo pak0.pk3. Gated on
 # Q3DEMO_PAK0_PK3 — every case SKIPs when unset, so this is safe to
-# include in default `make test`.
+# include in default `make test`. Links libpakka because the format-
+# probe case calls pakka_open / pakka_format in-process.
 PK3_Q3DEMO_TEST = $(TEST_DIR)/pk3_q3demo_test
-$(PK3_Q3DEMO_TEST): test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB)
+$(PK3_Q3DEMO_TEST): test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_q3demo_test.d -o $@ test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_q3demo_test.d -o $@ test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA) $(LDLIBS)
 pk3_q3demo_test: $(PK3_Q3DEMO_TEST)
 
-# GoldSrc PAK realpak tests. C peer of test/pak_goldsrc.bats. Each
-# fixture (Uplink / Day One) is independently env-var gated; missing
-# fixtures SKIP rather than fail.
+# GoldSrc PAK realpak tests — Half-Life Uplink + Day One fixtures.
+# Each is independently env-var gated; missing fixtures SKIP rather
+# than fail. Links libpakka because the format-probe case calls
+# pakka_open / pakka_format in-process.
 PAK_GOLDSRC_TEST = $(TEST_DIR)/pak_goldsrc_test
-$(PAK_GOLDSRC_TEST): test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB)
+$(PAK_GOLDSRC_TEST): test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pak_goldsrc_test.d -o $@ test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pak_goldsrc_test.d -o $@ test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LIBPAKKA) $(LDLIBS)
 pak_goldsrc_test: $(PAK_GOLDSRC_TEST)
 
 # Unicode path handling. Exercises the UTF-8 argv flow on Windows
@@ -663,22 +665,16 @@ realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) $(PK3_Q3DEMO_TEST) symbol-audit
 	@echo "==> pk3_q3demo_test"
 	@PAKKA=$(abspath $(TARGET)) Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) \
 	    Q3DEMO_TEST_SCRATCH=$(abspath $(TEST_DIR))/q3demo_scratch $(PK3_Q3DEMO_TEST)
-	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
-	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats test/pk3_q3demo.bats
 
 # GoldSrc parity-confirmation suite. Kept separate from realpak-test-q3
 # because the GoldSrc fixtures are heavier (~138 MiB combined) and add
 # a second archive.org dependency on top of the Q3 demo path. Pulls
 # the Uplink (48 MiB) and Day One (90 MiB) zip wrappers, extracts
-# valve/pak0.pak from each, and runs test/pak_goldsrc.bats against
-# both real Valve-built archives.
+# valve/pak0.pak from each, and runs pak_goldsrc_test against both
+# real Valve-built archives.
 realpak-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) $(PAK_GOLDSRC_TEST) symbol-audit
 	@echo "==> pak_goldsrc_test"
 	@PAKKA=$(abspath $(TARGET)) \
 	    GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
 	    GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \
 	    GOLDSRC_TEST_SCRATCH=$(abspath $(TEST_DIR))/goldsrc_scratch $(PAK_GOLDSRC_TEST)
-	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
-	GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
-	GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \
-	bats test/pak_goldsrc.bats
