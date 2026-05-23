@@ -20,6 +20,19 @@
 #include <stdlib.h>
 #include <string.h>
 
+#ifdef PAKKA_TEST_BUILD
+/* Internal libpakka hook — clears the static fault-inject state so the
+ * test runner can re-arm PAKKA_INJECT_FAULT_AT mid-process. Compiled
+ * only when libpakka was built with -DPAKKA_TEST_BUILD; the make/
+ * cmake test goals set this automatically. */
+extern void pakka_test_fault_reset(void);
+#endif
+
+#ifndef _WIN32
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
+
 static const char *g_pakka_path;
 static char       *g_scratch;
 
@@ -988,8 +1001,628 @@ static void test_capi_open_entry_handle_skips_name_lookup(void)
     t_free(pak);
 }
 
-int main(void)
+/* ---------- group C: deep verify CRC, EOCD comment, directory entry,
+ *           --compress variants, symlink --as, fault injection ---------- */
+
+/* Locate EOCD signature ("PK\005\006") by scanning from the end. The
+ * search range is bounded by the max EOCD comment length (65535) plus
+ * the 22-byte EOCD record. Returns offset on success, -1 if not found. */
+static long find_eocd(const unsigned char *buf, size_t len)
 {
+    if (len < 22) return -1;
+    size_t start = len > (65535 + 22) ? len - (65535 + 22) : 0;
+    for (long i = (long)len - 22; i >= (long)start; i--) {
+        if (buf[i] == 'P' && buf[i + 1] == 'K' &&
+            buf[i + 2] == 0x05 && buf[i + 3] == 0x06) {
+            return i;
+        }
+    }
+    return -1;
+}
+
+static void test_deep_verify_catches_deflate_crc_mismatch(void)
+{
+    /* Build a small PK3 with a single DEFLATE entry via pakka -c
+     * --compress against a repeating payload. Then patch the LFH and
+     * CDR CRC32 fields to a deliberately wrong value (real_crc ^
+     * 0xFFFFFFFF). Structural --verify still passes (CRC isn't a
+     * structural check); --verify --deep must fail. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("crc_mm/src")), 0);
+    char *src = under_scratch("crc_mm/src/p.txt");
+    /* 1 KB of repeating text — comfortably compressible. */
+    char *body = (char *)malloc(1024);
+    EXPECT_NOT_NULL(body);
+    memset(body, 'a', 1024);
+    EXPECT_EQ(fs_write_file(src, body, 1024), 0);
+    free(body);
+
+    char         *pak  = under_scratch("crc_mm/bad.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("crc_mm/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", "--compress", pak, "p.txt");
+    proc_result_free(&r);
+
+    /* Patch LFH CRC (offset 14) and CDR CRC. */
+    size_t         pn   = 0;
+    unsigned char *pbuf = fs_read_file(pak, &pn);
+    EXPECT_NOT_NULL(pbuf);
+    EXPECT_TRUE(pn > 30);
+    /* LFH CRC. */
+    pbuf[14] ^= 0xFF;
+    pbuf[15] ^= 0xFF;
+    pbuf[16] ^= 0xFF;
+    pbuf[17] ^= 0xFF;
+    /* Find CDR (PK\001\002) and flip its CRC at +16. */
+    int cdr = -1;
+    for (size_t i = 0; i + 4 <= pn; i++) {
+        if (pbuf[i] == 'P' && pbuf[i + 1] == 'K' &&
+            pbuf[i + 2] == 0x01 && pbuf[i + 3] == 0x02) {
+            cdr = (int)i;
+            break;
+        }
+    }
+    EXPECT_TRUE(cdr >= 0);
+    pbuf[cdr + 16] ^= 0xFF;
+    pbuf[cdr + 17] ^= 0xFF;
+    pbuf[cdr + 18] ^= 0xFF;
+    pbuf[cdr + 19] ^= 0xFF;
+    EXPECT_EQ(fs_write_file(pak, pbuf, pn), 0);
+    t_free(pbuf);
+
+    /* Structural verify still OK. */
+    RUN_PAKKA_OK(&r, "--verify", pak);
+    proc_result_free(&r);
+
+    /* Deep verify fails with a CRC mismatch diagnostic. */
+    const char   *argv[] = {g_pakka_path, "--verify", "--deep", pak, NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int crc_found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "CRC32 mismatch")) crc_found = 1;
+    }
+    proc_result_free(&r);
+    if (!crc_found) FAIL("expected 'CRC32 mismatch' diagnostic");
+}
+
+/* Append a u16-len EOCD comment to an existing PK3. Updates the
+ * comment-length field at EOCD+20 and appends `comment_len` bytes. */
+static int append_eocd_comment(const char *pak, size_t comment_len)
+{
+    size_t         n   = 0;
+    unsigned char *buf = fs_read_file(pak, &n);
+    if (!buf) return -1;
+    long eocd = find_eocd(buf, n);
+    if (eocd < 0) { t_free(buf); return -1; }
+
+    size_t         new_n = n + comment_len;
+    unsigned char *nbuf  = (unsigned char *)malloc(new_n);
+    if (!nbuf) { t_free(buf); return -1; }
+    memcpy(nbuf, buf, n);
+    /* Comment length is u16 LE at EOCD+20. */
+    nbuf[eocd + 20] = (unsigned char)(comment_len & 0xFF);
+    nbuf[eocd + 21] = (unsigned char)((comment_len >> 8) & 0xFF);
+    memset(nbuf + n, 'X', comment_len);
+    int rc = fs_write_file(pak, nbuf, new_n);
+    free(nbuf);
+    t_free(buf);
+    return rc;
+}
+
+static void test_commit_truncates_stale_eocd_comment(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("eocd_trunc/src")), 0);
+    char *alpha = under_scratch("eocd_trunc/src/alpha.txt");
+    EXPECT_EQ(fs_write_file(alpha, "alpha\n", 6), 0);
+
+    char         *pak  = under_scratch("eocd_trunc/commented.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("eocd_trunc/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt");
+    proc_result_free(&r);
+    EXPECT_EQ(append_eocd_comment(pak, 500), 0);
+
+    size_t         pre_n   = 0;
+    unsigned char *pre_buf = fs_read_file(pak, &pre_n);
+    t_free(pre_buf);
+
+    /* Add a second entry via --as; the add-only commit path must
+     * truncate the file before / when re-writing the EOCD. */
+    char *beta = under_scratch("eocd_trunc/beta.txt");
+    EXPECT_EQ(fs_write_file(beta, "beta\n", 5), 0);
+    RUN_PAKKA_OK(&r, "-a", pak, "--as", "beta.txt", beta);
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "alpha.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "beta.txt");
+    proc_result_free(&r);
+
+    size_t post_n = 0;
+    unsigned char *post_buf = fs_read_file(pak, &post_n);
+    t_free(post_buf);
+    EXPECT_TRUE(post_n < pre_n);
+}
+
+static void test_commit_rebuild_also_drops_eocd_comment(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("eocd_rebuild/src")), 0);
+    char *alpha = under_scratch("eocd_rebuild/src/alpha.txt");
+    char *gamma = under_scratch("eocd_rebuild/src/gamma.txt");
+    EXPECT_EQ(fs_write_file(alpha, "alpha\n", 6), 0);
+    EXPECT_EQ(fs_write_file(gamma, "gamma\n", 6), 0);
+
+    char         *pak  = under_scratch("eocd_rebuild/commented.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("eocd_rebuild/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt", "gamma.txt");
+    proc_result_free(&r);
+    EXPECT_EQ(append_eocd_comment(pak, 500), 0);
+
+    size_t         pre_n   = 0;
+    unsigned char *pre_buf = fs_read_file(pak, &pre_n);
+    t_free(pre_buf);
+
+    /* Delete forces the rebuild commit path. */
+    RUN_PAKKA_OK(&r, "-d", pak, "gamma.txt");
+    proc_result_free(&r);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "alpha.txt");
+    EXPECT_NULL(strstr(r.stdout_buf, "gamma.txt"));
+    proc_result_free(&r);
+
+    size_t post_n = 0;
+    unsigned char *post_buf = fs_read_file(pak, &post_n);
+    t_free(post_buf);
+    EXPECT_TRUE(post_n < pre_n);
+}
+
+/* Inline 2-entry ZIP writer: one regular STORED entry + one
+ * trailing-slash zero-payload "directory" entry. Used to pin pakka's
+ * "silently skip trailing-slash entries" tolerance without needing
+ * /usr/bin/zip -r. */
+static int write_dir_marker_pk3(const char *path)
+{
+    static const char real_name[] = "real.txt";
+    static const char dir_name[]  = "empty_dir/";
+    static const char payload[]   = "real\n";
+    const size_t      rn = sizeof(real_name) - 1;
+    const size_t      dn = sizeof(dir_name) - 1;
+    const size_t      pn = sizeof(payload) - 1;
+    /* CRC32 of "real\n" (precomputed). */
+    const uint32_t real_crc = zip_crc32(payload, pn);
+
+    /* LFH layout: 30 bytes header + name + payload. */
+    unsigned char lfh1[30] = {0};
+    memcpy(lfh1, "PK\x03\x04", 4);
+    put_u16_le(lfh1, 4, 20);            /* version needed */
+    put_u16_le(lfh1, 6, 0);             /* gp flags */
+    put_u16_le(lfh1, 8, 0);             /* method = STORED */
+    put_u32_le(lfh1, 14, real_crc);
+    put_u32_le(lfh1, 18, (uint32_t)pn); /* csize */
+    put_u32_le(lfh1, 22, (uint32_t)pn); /* usize */
+    put_u16_le(lfh1, 26, (uint16_t)rn);
+
+    unsigned char lfh2[30] = {0};
+    memcpy(lfh2, "PK\x03\x04", 4);
+    put_u16_le(lfh2, 4, 20);
+    put_u16_le(lfh2, 26, (uint16_t)dn);
+
+    uint32_t lfh1_off = 0;
+    uint32_t lfh2_off = (uint32_t)(sizeof(lfh1) + rn + pn);
+    uint32_t cdr_off  = lfh2_off + (uint32_t)(sizeof(lfh2) + dn);
+
+    /* CDR layout: 46 bytes header + name. */
+    unsigned char cdr1[46] = {0};
+    memcpy(cdr1, "PK\x01\x02", 4);
+    put_u16_le(cdr1, 4, 20);
+    put_u16_le(cdr1, 6, 20);
+    put_u16_le(cdr1, 10, 0);
+    put_u32_le(cdr1, 16, real_crc);
+    put_u32_le(cdr1, 20, (uint32_t)pn);
+    put_u32_le(cdr1, 24, (uint32_t)pn);
+    put_u16_le(cdr1, 28, (uint16_t)rn);
+    put_u32_le(cdr1, 42, lfh1_off);
+
+    unsigned char cdr2[46] = {0};
+    memcpy(cdr2, "PK\x01\x02", 4);
+    put_u16_le(cdr2, 4, 20);
+    put_u16_le(cdr2, 6, 20);
+    put_u16_le(cdr2, 28, (uint16_t)dn);
+    put_u32_le(cdr2, 42, lfh2_off);
+
+    uint32_t cdr_size = (uint32_t)(sizeof(cdr1) + rn + sizeof(cdr2) + dn);
+
+    /* EOCD: 22 bytes. */
+    unsigned char eocd[22] = {0};
+    memcpy(eocd, "PK\x05\x06", 4);
+    put_u16_le(eocd, 8, 2);             /* this disk entries */
+    put_u16_le(eocd, 10, 2);            /* total entries */
+    put_u32_le(eocd, 12, cdr_size);
+    put_u32_le(eocd, 16, cdr_off);
+
+    FILE *f = fopen(path, "wb");
+    if (!f) return -1;
+    fwrite(lfh1, 1, sizeof(lfh1), f);
+    fwrite(real_name, 1, rn, f);
+    fwrite(payload, 1, pn, f);
+    fwrite(lfh2, 1, sizeof(lfh2), f);
+    fwrite(dir_name, 1, dn, f);
+    fwrite(cdr1, 1, sizeof(cdr1), f);
+    fwrite(real_name, 1, rn, f);
+    fwrite(cdr2, 1, sizeof(cdr2), f);
+    fwrite(dir_name, 1, dn, f);
+    fwrite(eocd, 1, sizeof(eocd), f);
+    return fclose(f) == 0 ? 0 : -1;
+}
+
+static void test_open_silently_skips_trailing_slash_directory_entries(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("dir_skip")), 0);
+    char *pak = under_scratch("dir_skip/dirs.pk3");
+    EXPECT_EQ(write_dir_marker_pk3(pak), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "real.txt");
+    /* Directory marker must NOT appear in the listing. */
+    EXPECT_NULL(strstr(r.stdout_buf, "empty_dir/"));
+    proc_result_free(&r);
+}
+
+static void test_pk4_compress_round_trip_extracts_byte_identical(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("pk4_compress/src")), 0);
+    char *asset = under_scratch("pk4_compress/src/asset.txt");
+    /* 200 reps of a 20-byte string → 4000 bytes, will DEFLATE. */
+    static const char chunk[] = "doom3 asset payload ";
+    const size_t cn = sizeof(chunk) - 1;
+    char *body = (char *)malloc(cn * 200);
+    EXPECT_NOT_NULL(body);
+    for (size_t i = 0; i < 200; i++) memcpy(body + i * cn, chunk, cn);
+    EXPECT_EQ(fs_write_file(asset, body, cn * 200), 0);
+    free(body);
+
+    char         *pak  = under_scratch("pk4_compress/d.pk4");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("pk4_compress/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", "--compress", pak, "asset.txt");
+    proc_result_free(&r);
+
+    /* DEFLATE method (8) in the CDR. */
+    size_t         pn   = 0;
+    unsigned char *pbuf = fs_read_file(pak, &pn);
+    EXPECT_NOT_NULL(pbuf);
+    EXPECT_EQ(zip_first_cdr_method(pbuf, pn), 8);
+    t_free(pbuf);
+
+    char *out = under_scratch("pk4_compress/out");
+    EXPECT_EQ(fs_mkdir_p(out), 0);
+    RUN_PAKKA_OK(&r, "-x", "-C", out, pak);
+    proc_result_free(&r);
+
+    char *got = fs_join(out, "asset.txt");
+    EXPECT_TRUE(fs_is_file(got));
+    size_t         gn  = 0;
+    unsigned char *gbuf = fs_read_file(got, &gn);
+    EXPECT_EQ((long long)gn, (long long)(cn * 200));
+    t_free(gbuf);
+    t_free(got);
+}
+
+static void expect_compress_rejected(const char *extension, const char *sub)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch(sub)), 0);
+    char path[256];
+    snprintf(path, sizeof(path), "%s/x.%s", under_scratch(sub), extension);
+#ifdef _WIN32
+    const char *null_dev = "NUL";
+#else
+    const char *null_dev = "/dev/null";
+#endif
+    const char   *argv[] = {g_pakka_path, "-c", "--compress", path, null_dev, NULL};
+    proc_result_t r;
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+}
+
+static void test_create_compress_rejected_on_sin_target(void)
+{
+    expect_compress_rejected("sin", "compress_sin");
+}
+
+static void test_add_compress_rejected_with_dash_l(void)
+{
+    /* Build a STORED .pk3 first so the file exists; --compress on -l
+     * should fail before the open. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("compress_l/src")), 0);
+    char *s = under_scratch("compress_l/src/s.txt");
+    EXPECT_EQ(fs_write_file(s, "stored\n", 7), 0);
+    char         *pak  = under_scratch("compress_l/list.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("compress_l/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "s.txt");
+    proc_result_free(&r);
+
+    const char *argv[] = {g_pakka_path, "-l", "--compress", pak, NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s2 = 0; s2 < 2; s2++) {
+        if (streams[s2] && strstr(streams[s2], "--compress")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected '--compress' in diagnostic");
+}
+
+/* ---------- group C.1: fault-injection (PAKKA_TEST_BUILD only) ---------- */
+
+#ifdef PAKKA_TEST_BUILD
+
+#ifndef _WIN32
+static int spawn_pakka_with_fault(const char *fault, const char *const *extra_argv,
+                                  proc_result_t *out)
+{
+    /* Build env vector — pass PATH through so child can find any
+     * dynamic libs (pakka.exe on Windows is static, but PATH is
+     * conventional). */
+    const char *path_env = getenv("PATH");
+    char        path_buf[4096];
+    snprintf(path_buf, sizeof(path_buf), "PATH=%s", path_env ? path_env : "");
+    char fault_buf[128];
+    snprintf(fault_buf, sizeof(fault_buf), "PAKKA_INJECT_FAULT_AT=%s", fault);
+    const char *envp[] = {path_buf, fault_buf, NULL};
+
+    /* Count extra_argv. */
+    size_t n = 0;
+    while (extra_argv[n]) n++;
+    const char **argv = (const char **)malloc((n + 2) * sizeof(*argv));
+    argv[0] = g_pakka_path;
+    for (size_t i = 0; i < n; i++) argv[i + 1] = extra_argv[i];
+    argv[n + 1] = NULL;
+
+    proc_opts_t opts = {0};
+    opts.envp        = envp;
+    int rc           = proc_run(argv, &opts, out);
+    free(argv);
+    return rc;
+}
+
+static void test_fault_atomic_add_leaves_original_zip_unchanged(void)
+{
+    /* H2 regression. Atomic-add queues into pending state; a failed
+     * commit must leave the original archive byte-identical. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("fault_atomic/src")), 0);
+    char *alpha = under_scratch("fault_atomic/src/alpha.txt");
+    EXPECT_EQ(fs_write_file(alpha, "alpha-body\n", 11), 0);
+    char         *pak  = under_scratch("fault_atomic/work.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("fault_atomic/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt");
+    proc_result_free(&r);
+
+    size_t         pre_n   = 0;
+    unsigned char *pre_buf = fs_read_file(pak, &pre_n);
+    EXPECT_NOT_NULL(pre_buf);
+
+    char *newf = under_scratch("fault_atomic/new.txt");
+    EXPECT_EQ(fs_write_file(newf, "incoming\n", 9), 0);
+    const char *extra[] = {"-a", pak, "--as", "new.txt", newf, NULL};
+    EXPECT_EQ(spawn_pakka_with_fault("commit_rename:1", extra, &r), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+
+    /* Byte-identical to pre-add state. */
+    size_t         post_n   = 0;
+    unsigned char *post_buf = fs_read_file(pak, &post_n);
+    EXPECT_EQ((long long)post_n, (long long)pre_n);
+    EXPECT_MEM_EQ(post_buf, pre_buf, pre_n);
+    t_free(pre_buf);
+    t_free(post_buf);
+
+    /* And listing shows alpha but not new.txt. */
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "alpha.txt");
+    EXPECT_NULL(strstr(r.stdout_buf, "new.txt"));
+    proc_result_free(&r);
+}
+
+static void test_fault_rebuild_rollback_after_fclose_tmp(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("fault_fclose/src")), 0);
+    EXPECT_EQ(fs_write_file(under_scratch("fault_fclose/src/alpha.txt"), "alpha\n", 6), 0);
+    EXPECT_EQ(fs_write_file(under_scratch("fault_fclose/src/gamma.txt"), "gamma\n", 6), 0);
+    char         *pak  = under_scratch("fault_fclose/work.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("fault_fclose/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt", "gamma.txt");
+    proc_result_free(&r);
+
+    size_t         pre_n   = 0;
+    unsigned char *pre_buf = fs_read_file(pak, &pre_n);
+
+    const char *extra[] = {"-d", pak, "gamma.txt", NULL};
+    EXPECT_EQ(spawn_pakka_with_fault("commit_fclose_tmp:1", extra, &r), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s] && strstr(streams[s], "rebuild temp")) found = 1;
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'rebuild temp' diagnostic");
+
+    size_t         post_n   = 0;
+    unsigned char *post_buf = fs_read_file(pak, &post_n);
+    EXPECT_EQ((long long)post_n, (long long)pre_n);
+    EXPECT_MEM_EQ(post_buf, pre_buf, pre_n);
+    t_free(pre_buf);
+    t_free(post_buf);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "alpha.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "gamma.txt");
+    proc_result_free(&r);
+}
+
+static void test_fault_rebuild_rollback_after_rename(void)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch("fault_rename/src")), 0);
+    EXPECT_EQ(fs_write_file(under_scratch("fault_rename/src/alpha.txt"), "alpha\n", 6), 0);
+    EXPECT_EQ(fs_write_file(under_scratch("fault_rename/src/gamma.txt"), "gamma\n", 6), 0);
+    char         *pak  = under_scratch("fault_rename/work.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("fault_rename/src");
+    proc_result_t r;
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt", "gamma.txt");
+    proc_result_free(&r);
+
+    size_t         pre_n   = 0;
+    unsigned char *pre_buf = fs_read_file(pak, &pre_n);
+
+    const char *extra[] = {"-d", pak, "gamma.txt", NULL};
+    EXPECT_EQ(spawn_pakka_with_fault("commit_rename:1", extra, &r), 0);
+    EXPECT_NE(r.exit_code, 0);
+    proc_result_free(&r);
+
+    size_t         post_n   = 0;
+    unsigned char *post_buf = fs_read_file(pak, &post_n);
+    EXPECT_EQ((long long)post_n, (long long)pre_n);
+    EXPECT_MEM_EQ(post_buf, pre_buf, pre_n);
+    t_free(pre_buf);
+    t_free(post_buf);
+
+    RUN_PAKKA_OK(&r, "-l", pak);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "alpha.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "gamma.txt");
+    proc_result_free(&r);
+}
+
+static void test_capi_rebuild_rollback_preserves_in_memory_offsets(void)
+{
+    /* H3 in-memory regression. Build alpha (1 KB padded) + gamma in a
+     * STORED archive so gamma's pre-commit on-disk offset is well past
+     * its rebuild offset. Open R/W in-process, delete alpha, commit
+     * with commit_rename:1 armed — commit fails, rollback must restore
+     * the pre-commit offsets so pakka_read_entry_alloc("gamma.txt")
+     * returns the correct on-disk bytes. */
+    EXPECT_EQ(fs_mkdir_p(under_scratch("capi_h3/src")), 0);
+    char *alpha = under_scratch("capi_h3/src/alpha.txt");
+    /* 1 KB of "a"s padded to push gamma further along. */
+    char *padded = (char *)malloc(1024);
+    EXPECT_NOT_NULL(padded);
+    memset(padded, 'a', 1024);
+    EXPECT_EQ(fs_write_file(alpha, padded, 1024), 0);
+    free(padded);
+    char *gamma = under_scratch("capi_h3/src/gamma.txt");
+    EXPECT_EQ(fs_write_file(gamma, "gamma-body\n", 11), 0);
+
+    char         *pak  = under_scratch("capi_h3/work.pk3");
+    proc_opts_t   opts = {0};
+    opts.cwd           = under_scratch("capi_h3/src");
+    proc_result_t r;
+    /* No --compress: ensure STORED layout. */
+    RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt", "gamma.txt");
+    proc_result_free(&r);
+
+    /* Arm fault and reset state so this test's first commit_rename
+     * check is the one that fires. */
+    setenv("PAKKA_INJECT_FAULT_AT", "commit_rename:1", 1);
+    pakka_test_fault_reset();
+
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ_WRITE, &a, &err), PAKKA_OK);
+    EXPECT_EQ(pakka_delete(a, "alpha.txt", &err), PAKKA_OK);
+    pakka_status_t s = pakka_commit(a, &err);
+    EXPECT_NE(s, PAKKA_OK);
+
+    /* gamma's bytes via the (still-open) archive — without H3, offsets
+     * would point at the temp's layout and the read would return garbage. */
+    void  *gbuf = NULL;
+    size_t gn   = 0;
+    EXPECT_EQ(pakka_read_entry_alloc(a, "gamma.txt", &gbuf, &gn, &err), PAKKA_OK);
+    EXPECT_EQ((long long)gn, 11);
+    EXPECT_MEM_EQ((const unsigned char *)gbuf, "gamma-body\n", 11);
+    pakka_free(gbuf);
+    pakka_close(a, NULL);
+
+    /* Clear arming for any later tests in this process. */
+    unsetenv("PAKKA_INJECT_FAULT_AT");
+    pakka_test_fault_reset();
+}
+#endif /* !_WIN32 */
+
+#endif /* PAKKA_TEST_BUILD */
+
+/* ---------- group C.2: POSIX symlink --as ---------- */
+
+#ifndef _WIN32
+static void expect_symlink_as_rejected(const char *ext, const char *sub)
+{
+    EXPECT_EQ(fs_mkdir_p(under_scratch(sub)), 0);
+    char *real = fs_join(under_scratch(sub), "real.txt");
+    char *link = fs_join(under_scratch(sub), "link.txt");
+    EXPECT_EQ(fs_write_file(real, "real\n", 5), 0);
+    EXPECT_EQ(symlink(real, link), 0);
+
+    char path[256];
+    snprintf(path, sizeof(path), "%s/work.%s", under_scratch(sub), ext);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-c", path);
+    proc_result_free(&r);
+
+    const char   *argv[] = {g_pakka_path, "-a", path, "--as", "alias.txt", link, NULL};
+    EXPECT_EQ(run_pakka_capture(&r, argv), 0);
+    EXPECT_NE(r.exit_code, 0);
+    int found = 0;
+    const char *streams[2] = {r.stdout_buf, r.stderr_buf};
+    for (int s = 0; s < 2; s++) {
+        if (streams[s]) {
+            for (const char *p = streams[s]; *p; p++) {
+                if ((p[0] == 's' || p[0] == 'S') && strncmp(p + 1, "ymlink", 6) == 0) {
+                    found = 1;
+                    break;
+                }
+            }
+        }
+    }
+    proc_result_free(&r);
+    if (!found) FAIL("expected 'symlink' diagnostic");
+
+    /* Archive still readable + empty. */
+    RUN_PAKKA_OK(&r, "-l", path);
+    EXPECT_NULL(strstr(r.stdout_buf, "alias.txt"));
+    proc_result_free(&r);
+    t_free(real);
+    t_free(link);
+}
+
+static void test_pk3_add_rejects_symlink_via_as(void)
+{
+    expect_symlink_as_rejected("pk3", "sl_pk3");
+}
+
+static void test_pk4_add_rejects_symlink_via_as(void)
+{
+    expect_symlink_as_rejected("pk4", "sl_pk4");
+}
+#endif
+
+int main(int argc, char **argv)
+{
+    (void)argc; (void)argv;
     const char *pakka = getenv("PAKKA");
     if (!pakka || !*pakka) {
         fprintf(stderr, "pk3_test: PAKKA env var not set\n");
@@ -1039,6 +1672,31 @@ int main(void)
     RUN_TEST(test_capi_commit_refuses_grew_pending_source);
     RUN_TEST(test_capi_open_entry_handle_pending_respects_cap);
     RUN_TEST(test_capi_open_entry_handle_skips_name_lookup);
+
+    RUN_TEST(test_deep_verify_catches_deflate_crc_mismatch);
+    RUN_TEST(test_commit_truncates_stale_eocd_comment);
+    RUN_TEST(test_commit_rebuild_also_drops_eocd_comment);
+    RUN_TEST(test_open_silently_skips_trailing_slash_directory_entries);
+    RUN_TEST(test_pk4_compress_round_trip_extracts_byte_identical);
+    RUN_TEST(test_create_compress_rejected_on_sin_target);
+    RUN_TEST(test_add_compress_rejected_with_dash_l);
+
+#ifdef PAKKA_TEST_BUILD
+#ifndef _WIN32
+    RUN_TEST(test_fault_atomic_add_leaves_original_zip_unchanged);
+    RUN_TEST(test_fault_rebuild_rollback_after_fclose_tmp);
+    RUN_TEST(test_fault_rebuild_rollback_after_rename);
+    /* H3 in-memory test runs LAST — it leaves PAKKA_INJECT_FAULT_AT
+     * unset + fault state reset on exit, but other in-process tests
+     * shouldn't depend on its ordering anyway. */
+    RUN_TEST(test_capi_rebuild_rollback_preserves_in_memory_offsets);
+#endif
+#endif
+
+#ifndef _WIN32
+    RUN_TEST(test_pk3_add_rejects_symlink_via_as);
+    RUN_TEST(test_pk4_add_rejects_symlink_via_as);
+#endif
 
     t_free(g_scratch);
     return t_summary();

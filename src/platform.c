@@ -979,32 +979,44 @@ out:
 /* Test-only fault injection. Reads PAKKA_INJECT_FAULT_AT="op:N" once,
  * then returns 1 on the N-th call to pakka_test_should_fault matching
  * op (and 0 otherwise). Single global counter — only one op is armed
- * per process, which is what the bats tests need. Compiled out in
- * production via the macro in platform.h. */
+ * per process at a time. pakka_test_fault_reset clears the parse so
+ * an in-process test runner can re-arm with a different op/N between
+ * subtests; production builds compile both functions out via the
+ * macros in platform.h. */
 #include <stdlib.h>
+static int  s_fault_initialized = 0;
+static char s_fault_target_op[64];
+static int  s_fault_target_n = 0;
+static int  s_fault_counter  = 0;
+
 int pakka_test_should_fault(const char *op) {
-    static int initialized = 0;
-    static char target_op[64];
-    static int target_n = 0;
-    static int counter = 0;
-    if (!initialized) {
+    if (!s_fault_initialized) {
         const char *env = getenv("PAKKA_INJECT_FAULT_AT");
-        target_op[0] = '\0';
+        s_fault_target_op[0] = '\0';
+        s_fault_target_n     = 0;
+        s_fault_counter      = 0;
         if (env != NULL) {
             const char *colon = strchr(env, ':');
             if (colon != NULL && colon != env
-                && (size_t)(colon - env) < sizeof(target_op)) {
-                memcpy(target_op, env, (size_t)(colon - env));
-                target_op[colon - env] = '\0';
-                target_n = atoi(colon + 1);
+                && (size_t)(colon - env) < sizeof(s_fault_target_op)) {
+                memcpy(s_fault_target_op, env, (size_t)(colon - env));
+                s_fault_target_op[colon - env] = '\0';
+                s_fault_target_n               = atoi(colon + 1);
             }
         }
-        initialized = 1;
+        s_fault_initialized = 1;
     }
-    if (target_op[0] == '\0' || strcmp(op, target_op) != 0) {
+    if (s_fault_target_op[0] == '\0' || strcmp(op, s_fault_target_op) != 0) {
         return 0;
     }
-    counter++;
-    return counter == target_n;
+    s_fault_counter++;
+    return s_fault_counter == s_fault_target_n;
+}
+
+void pakka_test_fault_reset(void) {
+    s_fault_initialized  = 0;
+    s_fault_target_op[0] = '\0';
+    s_fault_target_n     = 0;
+    s_fault_counter      = 0;
 }
 #endif

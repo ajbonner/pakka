@@ -577,7 +577,6 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@rm -rf $(TEST_DIR)/c_api_scratch
 	@mkdir -p $(TEST_DIR)/c_api_scratch
 	@$(C_API_TEST) $(PAK0) $(abspath $(TEST_DIR))/c_api_scratch
-	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
 # re-compute SHA256 once at vendor time and pin that here.

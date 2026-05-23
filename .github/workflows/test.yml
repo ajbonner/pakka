@@ -61,7 +61,6 @@ jobs:
         with:
           path: build/test/quakesw.tar.gz
           key: quakesw-${{ hashFiles('Makefile') }}
-      - run: brew install bats-core
       - run: make test
 
   macos-apple-silicon-arm64:
@@ -74,7 +73,6 @@ jobs:
         with:
           path: build/test/quakesw.tar.gz
           key: quakesw-${{ hashFiles('Makefile') }}
-      - run: brew install bats-core
       - run: make test
 
   linux-glibc-x86_64:
@@ -89,7 +87,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl zip python3
+          sudo apt-get install -y build-essential curl openssl
       - run: make test
 
   # Exercises the opt-in zlib DEFLATE backend (PAKKA_DEFLATE_BACKEND=zlib /
@@ -110,7 +108,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl zip python3 zlib1g-dev
+          sudo apt-get install -y build-essential curl openssl zlib1g-dev
       - run: make PAKKA_DEFLATE_BACKEND=zlib test
 
   # Cross-arm lint. Runs clang-tidy against src/cli.c, src/platform.c,
@@ -169,12 +167,11 @@ jobs:
       - name: fuzz open+commit roundtrip (60s)
         run: ./build/fuzz/pakka_fuzz_roundtrip dev/fuzz/corpus_roundtrip -max_total_time=60 -print_final_stats=1
 
-  # Coverage report. Runs the full bats suite under
+  # Coverage report. Runs the C test suite under
   # -fprofile-arcs -ftest-coverage and uploads the lcov HTML tree as
   # an artifact. Useful for spotting under-tested code paths
-  # (deep-verify branches, fault-injected error returns); not a gate
-  # — the bats suite is the gate. Runs only on push to master and
-  # schedule to keep PR builds quick.
+  # (deep-verify branches, fault-injected error returns); not a gate.
+  # Runs only on push to master and schedule to keep PR builds quick.
   coverage:
     runs-on: ubuntu-latest
     if: github.event_name == 'push' || github.event_name == 'schedule' || github.event_name == 'workflow_dispatch'
@@ -188,7 +185,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl zip python3 lcov
+          sudo apt-get install -y build-essential curl openssl lcov
       - run: make coverage
       - uses: actions/upload-artifact@v7
         with:
@@ -198,10 +195,9 @@ jobs:
 
   # ASan + UBSan canary. Linked against libpakka.a + the CLI under
   # -fsanitize=address,undefined with -fno-sanitize-recover=undefined so
-  # any UB during the bats suite is a hard failure. -O1 keeps inlining
+  # any UB during the test suite is a hard failure. -O1 keeps inlining
   # readable in error traces; the assumption is that this job catches
-  # leaks, use-after-free, and signed overflow, NOT logical archive
-  # corruption — fault-injection bats (separate harness) covers that.
+  # leaks, use-after-free, and signed overflow.
   asan-ubsan-x86_64:
     runs-on: ubuntu-latest
     steps:
@@ -214,7 +210,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl zip python3
+          sudo apt-get install -y build-essential curl openssl
       - run: |
           make CFLAGS="-g -O1 -Wall --std=c99 --pedantic \
               -fno-omit-frame-pointer \
@@ -237,7 +233,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl zip python3
+          sudo apt-get install -y build-essential curl openssl
       - run: make test
 
   # Big-endian correctness canary. s390x is the cheapest BE target: a
@@ -267,7 +263,7 @@ jobs:
               set -e
               apt-get update >/dev/null
               apt-get install -y --no-install-recommends \
-                build-essential bats curl openssl ca-certificates zip unzip python3 >/dev/null
+                build-essential curl openssl ca-certificates >/dev/null
               cp -a /src/. /work
               cd /work
               rm -f pakka
@@ -283,7 +279,7 @@ jobs:
     steps:
       # tar + zstd are needed by actions/cache; Alpine's busybox tar can't
       # produce the archive format the cache action expects on save.
-      - run: apk add --no-cache build-base make curl openssl bats bash git tar zstd zip python3
+      - run: apk add --no-cache build-base make curl openssl bash git tar zstd
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
@@ -307,7 +303,7 @@ jobs:
           key: quakesw-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y gcc-multilib build-essential bats curl openssl zip python3
+          sudo apt-get install -y gcc-multilib build-essential curl openssl
       - run: make test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
   # Host cache survives into the VM: vmactions/*-vm rsyncs the workspace
@@ -327,7 +323,7 @@ jobs:
           release: '15.0'
           usesh: true
           sync: rsync
-          prepare: pkg install -y gmake curl bats-core zip unzip python3
+          prepare: pkg install -y gmake curl
           run: gmake test
 
   # 32-bit ABI build on a 64-bit FreeBSD kernel via -m32 + lib32 (ships in base).
@@ -347,7 +343,7 @@ jobs:
           release: '15.0'
           usesh: true
           sync: rsync
-          prepare: pkg install -y gmake curl bats-core zip unzip python3
+          prepare: pkg install -y gmake curl
           run: gmake test CFLAGS="-g -Wall --std=c99 --pedantic -m32"
 
   openbsd-amd64:
@@ -364,18 +360,13 @@ jobs:
         with:
           release: '7.8'
           sync: rsync
-          # OpenBSD pkg_add disambiguation: `unzip--` picks the default
-          # (non-iconv) flavor; `python%3` picks the latest python 3.x.
-          # Plain `unzip` / `python3` fail with "Ambiguous" / "Can't find".
-          prepare: pkg_add -I gmake curl bats zip 'unzip--' 'python%3'
+          prepare: pkg_add -I gmake curl
           run: gmake test
 
   # Native-Windows main test job. CMake/MSVC build + dev/win/fixtures.ps1
-  # for fixture prep + CTest for the C test suite. No MSYS2, no bats, no
-  # bash. The Linux/macOS unix-* jobs still run bats via the Makefile,
-  # so the cases that don't yet have C peers (POSIX-symlink, chmod,
-  # python-zipfile-built ZIPs, inline-cc c-api harnesses — ~50 cases)
-  # remain covered on those platforms during the migration window.
+  # for fixture prep + CTest for the C test suite. POSIX-symlink and
+  # chmod cases gate on #ifndef _WIN32 inside the C test sources and
+  # skip cleanly here.
   windows-msvc-x86_64:
     # windows-latest is being redirected to this label by mid-June 2026
     # per the runner banner; pinning explicitly avoids the noise.
@@ -611,7 +602,7 @@ jobs:
           key: q3demo-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl unzip
+          sudo apt-get install -y build-essential curl openssl unzip
       - run: make realpak-test-q3
 
   realpak-test-goldsrc-linux:
@@ -628,15 +619,13 @@ jobs:
           key: goldsrc-${{ hashFiles('Makefile') }}
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential bats curl openssl unzip
+          sudo apt-get install -y build-essential curl openssl unzip
       - run: make realpak-test-goldsrc
 
   # Native-Windows realpak: no MSYS2 install. Fixture fetch + SHA verify
   # + extract via dev/win/fixtures.ps1 (PowerShell 7+ ships on the runner
   # image); test execution via CTest (pk3_q3demo_test, registered in
-  # test/CMakeLists.txt). The Linux/macOS realpak-test-q3 Makefile
-  # target still runs bats alongside the C tests, so per-job dual
-  # coverage continues during the migration window.
+  # test/CMakeLists.txt).
   realpak-test-q3-windows:
     runs-on: windows-2025-vs2026
     defaults:
@@ -693,7 +682,7 @@ jobs:
           arch: x64
       - name: Configure (CMake / Ninja / MSVC)
         # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
-        # libpakka compiles in the same fault-injection hooks the bats
+        # libpakka compiles in the same fault-injection hooks the C test
         # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
         # isn't set; safe to enable across all CI jobs.
         run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
