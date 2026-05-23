@@ -472,6 +472,24 @@ $(PK3_TEST): test/pk3_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_test.d -o $@ test/pk3_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pk3_test: $(PK3_TEST)
 
+# Q3 demo realpak tests. C peer of test/pk3_q3demo.bats. Gated on
+# Q3DEMO_PAK0_PK3 — every case SKIPs when unset, so this is safe to
+# include in default `make test`.
+PK3_Q3DEMO_TEST = $(TEST_DIR)/pk3_q3demo_test
+$(PK3_Q3DEMO_TEST): test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_q3demo_test.d -o $@ test/pk3_q3demo_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+pk3_q3demo_test: $(PK3_Q3DEMO_TEST)
+
+# GoldSrc PAK realpak tests. C peer of test/pak_goldsrc.bats. Each
+# fixture (Uplink / Day One) is independently env-var gated; missing
+# fixtures SKIP rather than fail.
+PAK_GOLDSRC_TEST = $(TEST_DIR)/pak_goldsrc_test
+$(PAK_GOLDSRC_TEST): test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pak_goldsrc_test.d -o $@ test/pak_goldsrc_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+pak_goldsrc_test: $(PAK_GOLDSRC_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
@@ -484,6 +502,8 @@ pk3_test: $(PK3_TEST)
 -include $(TEST_DIR)/dk_test.d
 -include $(TEST_DIR)/pakka_test.d
 -include $(TEST_DIR)/pk3_test.d
+-include $(TEST_DIR)/pk3_q3demo_test.d
+-include $(TEST_DIR)/pak_goldsrc_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -515,7 +535,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) $(PK3_Q3DEMO_TEST) $(PAK_GOLDSRC_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
@@ -532,6 +552,10 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) PAK0=$(abspath $(PAK0)) PAKKA_TEST_SCRATCH=$(abspath $(TEST_DIR))/pakka $(PAKKA_TEST)
 	@echo "==> pk3_test"
 	@PAKKA=$(abspath $(TARGET)) PK3_TEST_SCRATCH=$(abspath $(TEST_DIR))/pk3 $(PK3_TEST)
+	@echo "==> pk3_q3demo_test"
+	@PAKKA=$(abspath $(TARGET)) Q3DEMO_TEST_SCRATCH=$(abspath $(TEST_DIR))/q3demo_scratch $(PK3_Q3DEMO_TEST)
+	@echo "==> pak_goldsrc_test"
+	@PAKKA=$(abspath $(TARGET)) GOLDSRC_TEST_SCRATCH=$(abspath $(TEST_DIR))/goldsrc_scratch $(PAK_GOLDSRC_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
@@ -619,7 +643,10 @@ realpak-test: realpak-test-q3 realpak-test-goldsrc
 # Full PK3 suite against id's real Q3 demo pak0.pk3. Pulls 93 MiB from
 # archive.org; CI caches the wrapper zip by Makefile hash so reruns
 # skip the download.
-realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
+realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) $(PK3_Q3DEMO_TEST) symbol-audit
+	@echo "==> pk3_q3demo_test"
+	@PAKKA=$(abspath $(TARGET)) Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) \
+	    Q3DEMO_TEST_SCRATCH=$(abspath $(TEST_DIR))/q3demo_scratch $(PK3_Q3DEMO_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats test/pk3_q3demo.bats
 
@@ -629,7 +656,12 @@ realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
 # the Uplink (48 MiB) and Day One (90 MiB) zip wrappers, extracts
 # valve/pak0.pak from each, and runs test/pak_goldsrc.bats against
 # both real Valve-built archives.
-realpak-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) symbol-audit
+realpak-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) $(PAK_GOLDSRC_TEST) symbol-audit
+	@echo "==> pak_goldsrc_test"
+	@PAKKA=$(abspath $(TARGET)) \
+	    GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
+	    GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \
+	    GOLDSRC_TEST_SCRATCH=$(abspath $(TEST_DIR))/goldsrc_scratch $(PAK_GOLDSRC_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
 	GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \

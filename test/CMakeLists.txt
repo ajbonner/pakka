@@ -113,3 +113,20 @@ add_test(NAME pk3_test COMMAND pk3_test)
 set_tests_properties(pk3_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;PK3_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pk3")
+
+# pk3_q3demo_test: realpak suite against the Q3 demo pak0.pk3. Gated
+# on Q3DEMO_PAK0_PK3 — fixture is downloaded via the realpak-test-q3
+# Makefile target / fixtures.ps1 on Windows. Cases SKIP when unset.
+pakka_add_test_exe(pk3_q3demo_test pk3_q3demo_test.c)
+add_test(NAME pk3_q3demo_test COMMAND pk3_q3demo_test)
+set_tests_properties(pk3_q3demo_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;Q3DEMO_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/q3demo")
+
+# pak_goldsrc_test: realpak suite against Half-Life Uplink + Day One
+# PAKs. Each fixture is independently env-var gated.
+pakka_add_test_exe(pak_goldsrc_test pak_goldsrc_test.c)
+add_test(NAME pak_goldsrc_test COMMAND pak_goldsrc_test)
+set_tests_properties(pak_goldsrc_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;GOLDSRC_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/goldsrc")
