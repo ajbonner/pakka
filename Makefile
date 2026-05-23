@@ -463,6 +463,15 @@ $(PAKKA_TEST): test/pakka_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pakka_test.d -o $@ test/pakka_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 pakka_test: $(PAKKA_TEST)
 
+# PK3 (Quake 3 / ZIP) tests. C peer of test/pk3.bats (partial: ~18 of
+# 43 cases; the rest stay in bats because they need /usr/bin/zip, an
+# inline-cc c-api harness, or fault-injection that's bats-only).
+PK3_TEST = $(TEST_DIR)/pk3_test
+$(PK3_TEST): test/pk3_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/pk3_test.d -o $@ test/pk3_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+pk3_test: $(PK3_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
@@ -474,6 +483,7 @@ pakka_test: $(PAKKA_TEST)
 -include $(TEST_DIR)/wad_test.d
 -include $(TEST_DIR)/dk_test.d
 -include $(TEST_DIR)/pakka_test.d
+-include $(TEST_DIR)/pk3_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -505,7 +515,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) $(PAKKA_TEST) $(PK3_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
@@ -520,6 +530,8 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) DK_TEST_SCRATCH=$(abspath $(TEST_DIR))/dk REPO_ROOT=$(abspath .) $(DK_TEST)
 	@echo "==> pakka_test"
 	@PAKKA=$(abspath $(TARGET)) PAK0=$(abspath $(PAK0)) PAKKA_TEST_SCRATCH=$(abspath $(TEST_DIR))/pakka $(PAKKA_TEST)
+	@echo "==> pk3_test"
+	@PAKKA=$(abspath $(TARGET)) PK3_TEST_SCRATCH=$(abspath $(TEST_DIR))/pk3 $(PK3_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

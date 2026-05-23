@@ -103,3 +103,13 @@ add_test(NAME pakka_test COMMAND pakka_test)
 set_tests_properties(pakka_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;PAK0=${CMAKE_SOURCE_DIR}/build/test/pak0.pak;PAKKA_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pakka")
+
+# pk3_test: PK3 (ZIP) container — partial C peer of test/pk3.bats.
+# Inline minimal ZIP writer (CRC32 table + LFH/CDR/EOCD with
+# parametric fields) covers the malformed-ZIP rejection cases without
+# needing /usr/bin/zip or python.
+pakka_add_test_exe(pk3_test pk3_test.c)
+add_test(NAME pk3_test COMMAND pk3_test)
+set_tests_properties(pk3_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;PK3_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pk3")
