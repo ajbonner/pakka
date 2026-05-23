@@ -13,6 +13,7 @@
 #include <string.h>
 
 #ifdef _WIN32
+#include <crtdbg.h>
 #include <direct.h>
 #include <stdlib.h>
 #include <windows.h>
@@ -21,6 +22,26 @@
 #include <time.h>
 #include <unistd.h>
 #endif
+
+/* In test_abort_nonzero_exit the parent spawns a child that calls
+ * abort(). On Windows under MSVCRT, abort() raises the Microsoft
+ * Visual C++ Runtime Library dialog by default, which would hang a
+ * non-interactive CI runner indefinitely. Suppress both the dialog
+ * popup and the JIT-debugger / GP-fault popups at startup for every
+ * proc_self_test invocation (parent and child run the same main).
+ *
+ * _WRITE_ABORT_MSG keeps the abort message on stderr so the test
+ * runner still sees diagnostics; clearing _CALL_REPORTFAULT prevents
+ * the dialog. SetErrorMode suppresses the process-level error dialogs
+ * (GP fault, file-not-found, etc.). */
+static void suppress_windows_error_dialogs(void)
+{
+#ifdef _WIN32
+    _set_abort_behavior(0, _CALL_REPORTFAULT);
+    SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX |
+                 SEM_NOOPENFILEERRORBOX);
+#endif
+}
 
 static const char *g_self_path;
 
@@ -337,6 +358,7 @@ static void test_launch_failure(void)
 
 int main(int argc, char **argv)
 {
+    suppress_windows_error_dialogs();
     if (is_child_mode(argc, argv)) {
         return dispatch_child(argc, argv);
     }

@@ -411,7 +411,9 @@ jobs:
         # the tar.exe that ships with Windows 10+.
         run: pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite quake
       - name: Run C test suite via CTest
-        run: ctest --test-dir build/cmake --output-on-failure
+        # --timeout 120 caps any hanging test at 2 minutes so a runaway
+        # never burns the whole 6h job budget.
+        run: ctest --test-dir build/cmake --output-on-failure --timeout 120
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
   # GNU make 3.79.1 built from source. Catches order-only-prereq
@@ -667,7 +669,7 @@ jobs:
         # pk3_q3demo_test.c flips from SKIP to RUN.
         env:
           Q3DEMO_PAK0_PK3: ${{ github.workspace }}\build\test\q3demo\pak0.pk3
-        run: ctest --test-dir build/cmake -R pk3_q3demo_test --output-on-failure
+        run: ctest --test-dir build/cmake -R pk3_q3demo_test --output-on-failure --timeout 600
 
   # Native-Windows GoldSrc realpak: same model as realpak-test-q3-windows
   # — no MSYS2; PowerShell-only fixture prep + CTest run.
@@ -705,4 +707,4 @@ jobs:
         env:
           GOLDSRC_UPLINK_PAK0: ${{ github.workspace }}\build\test\hl-uplink\valve\pak0.pak
           GOLDSRC_DAYONE_PAK0: ${{ github.workspace }}\build\test\hl-dayone\valve\pak0.pak
-        run: ctest --test-dir build/cmake -R pak_goldsrc_test --output-on-failure
+        run: ctest --test-dir build/cmake -R pak_goldsrc_test --output-on-failure --timeout 600
