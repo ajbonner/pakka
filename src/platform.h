@@ -222,11 +222,6 @@ int pakka_platform_ftruncate(FILE *fp, int64_t length);
  * expands to 0 — zero overhead and no symbol leak. */
 #ifdef PAKKA_TEST_BUILD
 int pakka_test_should_fault(const char *op);
-/* Reset the static fault-injection state so a single in-process test
- * binary can run multiple fault-inject scenarios sequentially. After
- * reset the next pakka_test_should_fault call re-parses
- * PAKKA_INJECT_FAULT_AT from the current environment. */
-void pakka_test_fault_reset(void);
 #define PAKKA_FAULT_CHECK(op) pakka_test_should_fault(op)
 #else
 #define PAKKA_FAULT_CHECK(op) 0

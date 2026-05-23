@@ -20,18 +20,18 @@
 #include <stdlib.h>
 #include <string.h>
 
-#ifdef PAKKA_TEST_BUILD
-/* Internal libpakka hook — clears the static fault-inject state so the
- * test runner can re-arm PAKKA_INJECT_FAULT_AT mid-process. Compiled
- * only when libpakka was built with -DPAKKA_TEST_BUILD; the make/
- * cmake test goals set this automatically. */
-extern void pakka_test_fault_reset(void);
-#endif
-
 #ifndef _WIN32
 #include <sys/stat.h>
 #include <unistd.h>
 #endif
+
+/* Absolute path to this test binary — captured from argv[0] in main()
+ * so the in-process fault-inject test (test_capi_rebuild_rollback_*)
+ * can re-spawn this binary in a child-mode handler with a fresh
+ * PAKKA_INJECT_FAULT_AT environment. pakka_test_should_fault parses
+ * the env once per process, so a separate process is the natural way
+ * to arm a different fault without leaking static state. */
+static const char *g_self_path;
 
 static const char *g_pakka_path;
 static char       *g_scratch;
@@ -1513,13 +1513,15 @@ static void test_capi_rebuild_rollback_preserves_in_memory_offsets(void)
 {
     /* H3 in-memory regression. Build alpha (1 KB padded) + gamma in a
      * STORED archive so gamma's pre-commit on-disk offset is well past
-     * its rebuild offset. Open R/W in-process, delete alpha, commit
-     * with commit_rename:1 armed — commit fails, rollback must restore
-     * the pre-commit offsets so pakka_read_entry_alloc("gamma.txt")
-     * returns the correct on-disk bytes. */
+     * its rebuild offset. Spawn this binary in --internal-h3 mode with
+     * commit_rename:1 armed; the child opens R/W, deletes alpha,
+     * commit fails, rollback must restore the pre-commit offsets so
+     * pakka_read_entry_alloc("gamma.txt") in the same handle returns
+     * the correct on-disk bytes. Subprocess keeps the fault-inject
+     * static state cleanly scoped — no test-only reset hook in
+     * libpakka. */
     EXPECT_EQ(fs_mkdir_p(under_scratch("capi_h3/src")), 0);
     char *alpha = under_scratch("capi_h3/src/alpha.txt");
-    /* 1 KB of "a"s padded to push gamma further along. */
     char *padded = (char *)malloc(1024);
     EXPECT_NOT_NULL(padded);
     memset(padded, 'a', 1024);
@@ -1536,31 +1538,22 @@ static void test_capi_rebuild_rollback_preserves_in_memory_offsets(void)
     RUN_PAKKA_OK_CWD(&r, &opts, "-c", pak, "alpha.txt", "gamma.txt");
     proc_result_free(&r);
 
-    /* Arm fault and reset state so this test's first commit_rename
-     * check is the one that fires. */
-    setenv("PAKKA_INJECT_FAULT_AT", "commit_rename:1", 1);
-    pakka_test_fault_reset();
-
-    pakka_archive_t *a   = NULL;
-    pakka_error_t    err = {0};
-    EXPECT_EQ(pakka_open(pak, PAKKA_OPEN_READ_WRITE, &a, &err), PAKKA_OK);
-    EXPECT_EQ(pakka_delete(a, "alpha.txt", &err), PAKKA_OK);
-    pakka_status_t s = pakka_commit(a, &err);
-    EXPECT_NE(s, PAKKA_OK);
-
-    /* gamma's bytes via the (still-open) archive — without H3, offsets
-     * would point at the temp's layout and the read would return garbage. */
-    void  *gbuf = NULL;
-    size_t gn   = 0;
-    EXPECT_EQ(pakka_read_entry_alloc(a, "gamma.txt", &gbuf, &gn, &err), PAKKA_OK);
-    EXPECT_EQ((long long)gn, 11);
-    EXPECT_MEM_EQ((const unsigned char *)gbuf, "gamma-body\n", 11);
-    pakka_free(gbuf);
-    pakka_close(a, NULL);
-
-    /* Clear arming for any later tests in this process. */
-    unsetenv("PAKKA_INJECT_FAULT_AT");
-    pakka_test_fault_reset();
+    /* Spawn ourselves in child mode with the fault armed in env. */
+    const char *path_env = getenv("PATH");
+    char        path_buf[4096];
+    snprintf(path_buf, sizeof(path_buf), "PATH=%s", path_env ? path_env : "");
+    const char *envp[]  = {path_buf, "PAKKA_INJECT_FAULT_AT=commit_rename:1", NULL};
+    const char *cargv[] = {g_self_path, "--internal-h3", pak, NULL};
+    proc_opts_t copts   = {0};
+    copts.envp          = envp;
+    EXPECT_EQ(proc_run(cargv, &copts, &r), 0);
+    if (r.exit_code != 0) {
+        fprintf(stderr, "    child exit=%d\n    stderr: %s\n",
+                r.exit_code, r.stderr_buf ? r.stderr_buf : "");
+        proc_result_free(&r);
+        FAIL("h3 child reported failure");
+    }
+    proc_result_free(&r);
 }
 #endif /* !_WIN32 */
 
@@ -1620,9 +1613,68 @@ static void test_pk4_add_rejects_symlink_via_as(void)
 }
 #endif
 
+/* Child-mode entry point for the H3 in-memory rollback case (see
+ * test_capi_rebuild_rollback_preserves_in_memory_offsets). main()
+ * dispatches here when argv[1] == "--internal-h3"; the parent will
+ * have set PAKKA_INJECT_FAULT_AT=commit_rename:1 in the env so the
+ * fresh libpakka picks it up on the first pakka_test_should_fault
+ * call. Returns 0 on success, non-zero with a stderr diagnostic on
+ * failure. Compiled unconditionally — pakka_open et al are public API,
+ * so the function links cleanly in non-PAKKA_TEST_BUILD builds even
+ * though the parent test that drives it is gated. */
+static int run_h3_child(const char *pak)
+{
+    pakka_archive_t *a   = NULL;
+    pakka_error_t    err = {0};
+    if (pakka_open(pak, PAKKA_OPEN_READ_WRITE, &a, &err) != PAKKA_OK) {
+        fprintf(stderr, "h3 child: open: %s\n", err.message);
+        return 2;
+    }
+    if (pakka_delete(a, "alpha.txt", &err) != PAKKA_OK) {
+        fprintf(stderr, "h3 child: delete: %s\n", err.message);
+        return 3;
+    }
+    if (pakka_commit(a, &err) == PAKKA_OK) {
+        fprintf(stderr, "h3 child: commit unexpectedly succeeded — fault not armed?\n");
+        return 4;
+    }
+    /* Without the in-memory rollback, gamma's offsets would point at
+     * the (removed) temp file's layout and this read would return
+     * garbage from the still-on-disk original archive. */
+    void  *gbuf = NULL;
+    size_t gn   = 0;
+    if (pakka_read_entry_alloc(a, "gamma.txt", &gbuf, &gn, &err) != PAKKA_OK) {
+        fprintf(stderr, "h3 child: read gamma after rollback: %s\n", err.message);
+        return 5;
+    }
+    if (gn != 11 || memcmp(gbuf, "gamma-body\n", 11) != 0) {
+        fprintf(stderr, "h3 child: gamma bytes wrong: len=%zu\n", gn);
+        pakka_free(gbuf);
+        return 6;
+    }
+    pakka_free(gbuf);
+    pakka_close(a, NULL);
+    return 0;
+}
+
 int main(int argc, char **argv)
 {
-    (void)argc; (void)argv;
+    /* Child dispatch: if invoked with --internal-h3 <pak>, run the
+     * H3 helper and exit. Done before any scratch teardown so the
+     * parent's fixture is left intact. */
+    if (argc >= 3 && strcmp(argv[1], "--internal-h3") == 0) {
+        return run_h3_child(argv[2]);
+    }
+
+    /* Absolute path to argv[0] for the self-respawn pattern; relative
+     * paths break if a future test ever chdir's before spawning. */
+#ifdef _WIN32
+    char *abs = _fullpath(NULL, argv[0], 0);
+#else
+    char *abs = realpath(argv[0], NULL);
+#endif
+    g_self_path = abs ? abs : argv[0];
+
     const char *pakka = getenv("PAKKA");
     if (!pakka || !*pakka) {
         fprintf(stderr, "pk3_test: PAKKA env var not set\n");
