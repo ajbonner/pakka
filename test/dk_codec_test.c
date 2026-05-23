@@ -3,7 +3,7 @@
  * exposes neither). Decoder coverage: every opcode class plus the
  * bounds and termination contracts. Encoder coverage: worst-case
  * bound + round-trip integrity through the decoder. Wrapped by
- * tests/dk_codec_test.bats. */
+ * test/dk_codec_test.bats. */
 
 #include <stdio.h>
 #include <stdlib.h>

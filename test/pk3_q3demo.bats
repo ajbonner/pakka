@@ -7,7 +7,7 @@
 #
 # The fixture path comes in via env var Q3DEMO_PAK0_PK3 (set by the
 # realpak-test-q3 Makefile target). If absent, every test skips so this
-# bats file is safe to include in a directory-wide `bats tests/`.
+# bats file is safe to include in a directory-wide `bats test/`.
 
 PROJECT_ROOT="${BATS_TEST_DIRNAME}/.."
 PAKKA="${PAKKA:-${PROJECT_ROOT}/pakka}"

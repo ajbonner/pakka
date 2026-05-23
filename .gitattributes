@@ -5,5 +5,5 @@
 # bats real-fixture test. The packed `user.pak` is binary regardless;
 # pinning it explicitly defends against any future autocrlf default
 # change.
-tests/fixtures/dk/user.pak binary
-tests/fixtures/dk/inputs/* -text
+test/fixtures/dk/user.pak binary
+test/fixtures/dk/inputs/* -text

@@ -38,7 +38,7 @@ fi
 
 # The whole point of the PAKKA_LEGACY_EXTRACT branch is the fchdir +
 # O_NOFOLLOW descent at runtime. Mirror the symlink fixture from
-# tests/pakka.bats so legacy CI fails loudly if that path stops
+# test/pakka.bats so legacy CI fails loudly if that path stops
 # refusing pre-planted symlinks. Without this, a regression in
 # platform_open_extract_target would slip past CI because the build
 # itself doesn't exercise extract.

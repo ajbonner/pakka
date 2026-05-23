@@ -432,14 +432,14 @@ print(struct.unpack_from('<I', p, 4)[0])" "$pak")"
     # (Daikatana's reference packer in -userpak mode). The staged
     # tree was maps/+textures/+root, so entry names carry those
     # prefixes while the source files in inputs/ are flat. Fixture
-    # provenance + regen steps: tests/fixtures/dk/README.md.
+    # provenance + regen steps: test/fixtures/dk/README.md.
     fixture="$BATS_TEST_DIRNAME/fixtures/dk/user.pak"
     inputs="$BATS_TEST_DIRNAME/fixtures/dk/inputs"
     # Hard fail (not skip) when the committed pak is gone, so CI
     # cannot lose this coverage to an accidental git-rm.
     if [ ! -f "$fixture" ]; then
         echo "FATAL: expected DK fixture missing at $fixture" >&2
-        echo "       see tests/fixtures/dk/README.md for how to regenerate" >&2
+        echo "       see test/fixtures/dk/README.md for how to regenerate" >&2
         false
     fi
 

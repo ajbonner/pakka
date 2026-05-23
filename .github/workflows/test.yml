@@ -444,7 +444,7 @@ jobs:
           export C_API_TEST="$PWD/build/cmake/c_api_test.exe"
           export DK_CODEC_TEST="$PWD/build/cmake/dk_codec_test.exe"
           export PAK0="$PWD/build/test/pak0.pak"
-          bats tests/
+          bats test/
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
   # GNU make 3.79.1 built from source. Catches order-only-prereq

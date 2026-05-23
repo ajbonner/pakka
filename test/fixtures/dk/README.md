@@ -2,7 +2,7 @@
 
 Cross-validates pakka's DK decoder against an external encoder's
 output, complementing the synthetic in-process round-trip tests
-(`tests/dk.bats`, `tests/dk_codec_test.c`) that only exercise pakka
+(`test/dk.bats`, `test/dk_codec_test.c`) that only exercise pakka
 against itself.
 
 ## Layout
@@ -46,14 +46,14 @@ The committed fixture uses the `maps/`+`textures/`+root layout that
 matches dktools_readme.htm's user-pak authoring convention. The bats
 consumer pins these names when comparing extracted payloads to
 `inputs/`; a different staging layout would need matching updates in
-`tests/dk.bats`.
+`test/dk.bats`.
 
 ## Regenerating
 
 If you need to rebuild `user.pak` (e.g. you changed the inputs):
 
 ```sh
-cd tests/fixtures/dk
+cd test/fixtures/dk
 python3 inputs/generate.py             # idempotent; overwrites the four files
 
 # 1. Stage the inputs into whatever directory tree you want preserved
@@ -64,14 +64,14 @@ python3 inputs/generate.py             # idempotent; overwrites the four files
 #       <staging>/notes.txt
 #    Any other layout works — `-userpak` ships the user's tree as-is.
 #    If you change the layout, also update the entry-name patterns in
-#    tests/dk.bats's "dk real fixture" case.
+#    test/dk.bats's "dk real fixture" case.
 #
 # 2. Run `dkpak.exe -userpak` from <staging> (under Wine on macOS /
 #    Linux). With no filename arg, dkpak writes user.pak in the
 #    current directory.
 #
 # 3. Move the result back here:
-#       mv <staging>/user.pak tests/fixtures/dk/user.pak
+#       mv <staging>/user.pak test/fixtures/dk/user.pak
 #
 # inputs/dkpak_output.txt is the captured stdout from a successful
 # regen run, kept as a transcript of the per-entry compression
@@ -84,6 +84,6 @@ the same four routed names is a valid fixture.
 
 ## Fixture required
 
-`tests/dk.bats` hard-fails the `dk real fixture: ...` case when
+`test/dk.bats` hard-fails the `dk real fixture: ...` case when
 `user.pak` is missing — the pak is committed and CI should not
 silently lose this coverage to an accidental deletion.

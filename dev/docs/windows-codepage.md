@@ -370,7 +370,7 @@ of the Unicode work above.
 
 ## 11. Test coverage
 
-`tests/unicode_paths.bats` covers the behavior in this document:
+`test/unicode_paths.bats` covers the behavior in this document:
 
 - PAK round-trip with a Cyrillic UTF-8 filename through `-c`,
   `-l`, and `-x`.

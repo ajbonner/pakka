@@ -2,7 +2,7 @@
  * bats CLI suite can't reach: NULL-argument tolerance, structured
  * error fields, opaque entry accessors, create+close round-trip on an
  * empty archive, add/delete/commit round-trips, verify callback,
- * memory APIs, ZIP-magic rejection. Invoked from tests/c_api_test.bats.
+ * memory APIs, ZIP-magic rejection. Invoked from test/c_api_test.bats.
  *
  * Usage: c_api_test <pak0.pak> <scratch_dir>
  *   pak0.pak     — known-good fixture, must contain at least 1 entry

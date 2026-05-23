@@ -210,13 +210,13 @@ The reopen step in `op_extract` uses `pakka_open_entry_handle` rather
 than name lookup so duplicate-bearing WADs read coherently entry-by-
 entry.
 
-Testing: `tests/wad.bats` covers 19 synthetic-fixture scenarios
+Testing: `test/wad.bats` covers 19 synthetic-fixture scenarios
 (header byte layout, directory entry byte layout, 8-char name
 acceptance, marker lump loading, duplicate-name handling, extract-by-
 name first-match semantics, extract-all collision refusal, rebuild
 round-trip, format hint mismatches, AUTO open without probe ambiguity,
 numlumps overflow, garbage `filepos` bounds check, verify). The C-API
-exerciser in `tests/c_api_test.c` adds an IWAD / PWAD label round-trip
+exerciser in `test/c_api_test.c` adds an IWAD / PWAD label round-trip
 (create with each label, confirm the on-disk magic, reopen and confirm
 `pakka_format()` reports the requested label, exercise the duplicate-
 name allowance via `pakka_add_memory`).

@@ -143,14 +143,14 @@ for the third row.
 
 ## 6. Test coverage
 
-- `tests/sin.bats` — end-to-end CLI tests against synthetic SiN
+- `test/sin.bats` — end-to-end CLI tests against synthetic SiN
   archives. Built by the bats setup with `python3` helpers because
   there is no redistributable retail SiN corpus to ship as a fixture
   (the format is exercised against bytes the test itself writes).
   Covers list, extract, create, add, delete, verify, and the
   name-field-width-specific edge cases (exactly-120-byte names,
   119-byte names + NUL terminator).
-- `tests/c_api_test.c` — `pakka_create` for SiN + `pakka_add_memory`
+- `test/c_api_test.c` — `pakka_create` for SiN + `pakka_add_memory`
   + `pakka_close` + `pakka_open` + `pakka_read_entry_alloc` + memcmp,
   parallel to the PAK / DK / PK3 / PK4 cases in the same exerciser.
 - `linux-glibc-s390x-be` CI job — the same byte-order coverage that

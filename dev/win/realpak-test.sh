@@ -51,7 +51,7 @@ run_q3() {
         echo "==> Q3 demo pak0.pk3 ready: $pk3"
     fi
 
-    Q3DEMO_PAK0_PK3="$pk3" bats tests/pk3_q3demo.bats
+    Q3DEMO_PAK0_PK3="$pk3" bats test/pk3_q3demo.bats
 }
 
 run_goldsrc() {
@@ -78,7 +78,7 @@ run_goldsrc() {
 
     GOLDSRC_UPLINK_PAK0="$up_pak" \
     GOLDSRC_DAYONE_PAK0="$do_pak" \
-    bats tests/pak_goldsrc.bats
+    bats test/pak_goldsrc.bats
 }
 
 case "${1:-all}" in

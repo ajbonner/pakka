@@ -128,8 +128,8 @@ foreach(_t pakka pakka_exe)
 endforeach()
 
 # C-API test executable. Links the public include/ surface against the
-# static library, no internals. Invoked from tests/c_api_test.bats.
-add_executable(c_api_test tests/c_api_test.c)
+# static library, no internals. Invoked from test/c_api_test.bats.
+add_executable(c_api_test test/c_api_test.c)
 target_link_libraries(c_api_test PRIVATE pakka)
 if(MSVC)
     target_compile_options(c_api_test PRIVATE /W4 /WX)
@@ -143,8 +143,8 @@ endif()
 
 # DK codec internals test (Makefile peer of dk_codec_test). Reaches
 # pakka_dk_inflate / pakka_dk_deflate through src/common.h; the
-# tests/dk_codec_test.bats wrapper finds the binary via DK_CODEC_TEST.
-add_executable(dk_codec_test tests/dk_codec_test.c)
+# test/dk_codec_test.bats wrapper finds the binary via DK_CODEC_TEST.
+add_executable(dk_codec_test test/dk_codec_test.c)
 target_link_libraries(dk_codec_test PRIVATE pakka)
 target_include_directories(dk_codec_test PRIVATE src)
 if(MSVC)

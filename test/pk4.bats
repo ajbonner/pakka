@@ -82,7 +82,7 @@ setup_file() {
 }
 
 @test "pk4 delete + close: rebuild path produces a valid PK4" {
-    # Mirrors tests/pk3.bats:343. Exercises the pakka_commit ZIP
+    # Mirrors test/pk3.bats:343. Exercises the pakka_commit ZIP
     # dispatch arm under a PK4 label — the one bats-only coverage gap
     # flagged in the plan review.
     rm -rf "$BATS_TEST_TMPDIR/del_src" "$BATS_TEST_TMPDIR/del_out"

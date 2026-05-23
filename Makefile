@@ -125,7 +125,7 @@ Q3DEMO_PAK0_PK3=$(TEST_DIR)/q3demo/pak0.pk3
 # parity-confirmation fixtures against real Valve writer output, not a
 # separate code path. Driven by `realpak-test-goldsrc` (separate from
 # the Q3 demo's `realpak-test-q3`); default `make test` leaves them
-# untouched and tests/pak_goldsrc.bats skips when the env vars are unset.
+# untouched and test/pak_goldsrc.bats skips when the env vars are unset.
 #
 # Both wrappers are plain ZIPs from archive.org; we unzip then copy
 # the inner pak0 out to a canonical path under build/test/. unzip is
@@ -369,9 +369,9 @@ $(LIBPAKKA): $(LIB_OBJECTS)
 # the verify report callback — none of which the bats CLI suite can
 # reach.
 C_API_TEST = $(TEST_DIR)/c_api_test
-$(C_API_TEST): tests/c_api_test.c $(LIBPAKKA)
+$(C_API_TEST): test/c_api_test.c $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -o $@ tests/c_api_test.c $(LIBPAKKA) $(LDLIBS)
+	$(CC) $(CFLAGS) -o $@ test/c_api_test.c $(LIBPAKKA) $(LDLIBS)
 c_api_test: $(C_API_TEST)
 
 # DK-codec exerciser. Unlike c_api_test (which is public-surface only),
@@ -379,9 +379,9 @@ c_api_test: $(C_API_TEST)
 # codec lives behind the library symbol audit (pakka_dk_inflate), so
 # linking against $(LIBPAKKA) is enough — no separate object compile.
 DK_CODEC_TEST = $(TEST_DIR)/dk_codec_test
-$(DK_CODEC_TEST): tests/dk_codec_test.c $(LIBPAKKA)
+$(DK_CODEC_TEST): test/dk_codec_test.c $(LIBPAKKA)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ tests/dk_codec_test.c $(LIBPAKKA) $(LDLIBS)
+	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ test/dk_codec_test.c $(LIBPAKKA) $(LDLIBS)
 dk_codec_test: $(DK_CODEC_TEST)
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
@@ -415,7 +415,7 @@ $(PAK0): verify-tarball
 fixture: $(PAK0)
 
 test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
-	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats tests/
+	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
 # re-compute SHA256 once at vendor time and pin that here.
@@ -504,16 +504,16 @@ realpak-test: realpak-test-q3 realpak-test-goldsrc
 # skip the download.
 realpak-test-q3: $(TARGET) $(Q3DEMO_PAK0_PK3) symbol-audit
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
-	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats tests/pk3_q3demo.bats
+	Q3DEMO_PAK0_PK3=$(abspath $(Q3DEMO_PAK0_PK3)) bats test/pk3_q3demo.bats
 
 # GoldSrc parity-confirmation suite. Kept separate from realpak-test-q3
 # because the GoldSrc fixtures are heavier (~138 MiB combined) and add
 # a second archive.org dependency on top of the Q3 demo path. Pulls
 # the Uplink (48 MiB) and Day One (90 MiB) zip wrappers, extracts
-# valve/pak0.pak from each, and runs tests/pak_goldsrc.bats against
+# valve/pak0.pak from each, and runs test/pak_goldsrc.bats against
 # both real Valve-built archives.
 realpak-test-goldsrc: $(TARGET) $(GOLDSRC_UPLINK_PAK0) $(GOLDSRC_DAYONE_PAK0) symbol-audit
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' \
 	GOLDSRC_UPLINK_PAK0=$(abspath $(GOLDSRC_UPLINK_PAK0)) \
 	GOLDSRC_DAYONE_PAK0=$(abspath $(GOLDSRC_DAYONE_PAK0)) \
-	bats tests/pak_goldsrc.bats
+	bats test/pak_goldsrc.bats

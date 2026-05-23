@@ -198,7 +198,7 @@ streams — a PK3 written with one backend reads cleanly with the
 other, and with any third-party tool (info-zip, Windows Explorer,
 Quake III / Doom 3 engines).
 
-`tests/c_api_test.c` exercises every one of those functions against
+`test/c_api_test.c` exercises every one of those functions against
 `libpakka.a` only (no internal headers) and is the canonical example
 of call patterns.
 
@@ -271,7 +271,7 @@ extract-specific, add, delete (including the head, the tail, and every entry),
 * `make symbol-audit` — runs `nm -g build/lib/libpakka.a` and fails the
   build if any defined global lacks the `pakka_` prefix. Keeps the
   library namespace-clean.
-* `tests/c_api_test.c` — a 900-line C-API exerciser linked only
+* `test/c_api_test.c` — a 900-line C-API exerciser linked only
   against `libpakka.a` (no internal headers). Covers NULL tolerance,
   round-trips, structured-error population, and the
   `pakka_open_entry` / `pakka_reader_read` streaming surface that the
@@ -290,7 +290,7 @@ shell, `cd` to the repo, and run:
 
     $ make fixture                                   # download + SHA-verify pak0.pak
     $ export PAKKA="$PWD/build/cmake/pakka.exe"      # must be a fully-qualified path
-    $ bats tests/
+    $ bats test/
 
 **Gotcha:** `PAKKA` has to be **absolute**, not relative. `bats` may `chdir`
 into a temp directory inside `setup_file` before invoking pakka, so a

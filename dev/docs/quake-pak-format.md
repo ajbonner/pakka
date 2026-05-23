@@ -286,14 +286,14 @@ code path.
 
 ## 7. Test coverage
 
-- `tests/pakka.bats` — end-to-end CLI tests against id's shareware
+- `test/pakka.bats` — end-to-end CLI tests against id's shareware
   `pak0.pak` (downloaded + SHA-verified by `make test`). Covers
   list, extract, create, add, delete, verify, and the
   out-of-order / orphan-byte cases id's archive exhibits.
-- `tests/c_api_test.c` — public API round-trip: `pakka_create` for
+- `test/c_api_test.c` — public API round-trip: `pakka_create` for
   PAK + `pakka_add_memory` + `pakka_close` + `pakka_open` +
   `pakka_read_entry_alloc` + memcmp.
-- `tests/large_file.bats` — exercises a 2.42 GiB sparse pak to
+- `test/large_file.bats` — exercises a 2.42 GiB sparse pak to
   catch 32-bit-`long` truncation bugs in the seek/tell path.
 - `linux-glibc-s390x-be` CI job — runs the full bats suite under
   QEMU-emulated big-endian s390x to catch byte-order regressions
@@ -302,4 +302,4 @@ code path.
 The Quake / Q2 / GoldSrc row is the most heavily exercised format in
 the suite; SiN and Daikatana share most of the same code paths via
 the geometry table but have their own targeted tests
-(`tests/sin.bats`, `tests/dk.bats`).
+(`test/sin.bats`, `test/dk.bats`).

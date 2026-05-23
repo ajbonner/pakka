@@ -12,7 +12,7 @@
 #   GOLDSRC_DAYONE_PAK0   — Half-Life: Day One (1998 OEM demo)  valve/pak0.pak
 #
 # Both are set by the realpak-test-goldsrc Makefile target; if absent,
-# the corresponding tests skip so `bats tests/` remains safe to run.
+# the corresponding tests skip so `bats test/` remains safe to run.
 #
 # Pinned entry counts and asset sizes are tied to the SHA-pinned
 # wrappers in the Makefile. If you re-pin the wrapper SHAs (e.g. a

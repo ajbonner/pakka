@@ -8,7 +8,7 @@ setup_file() {
     # The pak0 fixture is downloaded by `make $(PAK0)`; the c_api_test
     # binary is built by `make c_api_test`. The Makefile's `test`
     # target already depends on both; this skip-guard lets you run
-    # `bats tests/` manually without building first.
+    # `bats test/` manually without building first.
     [ -f "$PAK0" ] || skip "pak0 fixture missing at $PAK0 — run 'make $(basename $PAK0)' first"
     [ -x "$C_API_TEST" ] || skip "c_api_test binary missing at $C_API_TEST — run 'make c_api_test' first"
 

@@ -1521,7 +1521,7 @@ static pakka_status_t pak_add_preflight(Pak_t *archive,
      * full-width names (LINEDEFS, COLORMAP, TEXTURE1, SSECTORS,
      * BLOCKMAP) must be accepted. Every other format relies on the
      * loader's terminating NUL at index name_field_len and therefore
-     * keeps the historical strict-less-than rule — tests/sin.bats:113
+     * keeps the historical strict-less-than rule — test/sin.bats:113
      * deliberately pins it. */
     int too_long = wad ? (name_len > name_cap) : (name_len >= name_cap);
     if (too_long) {
