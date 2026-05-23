@@ -91,13 +91,22 @@ jobs:
       - run: make test
       # Pakka binary + realpak C-test exes get reused by the downstream
       # realpak-test-{q3,goldsrc}-linux jobs so they don't rebuild from
-      # scratch. libpakka.a comes along for the realpak symbol-audit step.
+      # scratch. We have to ship the full transitive set make would
+      # touch: .o files in build/obj-test/ + build/test/support/ as well
+      # as the linked outputs, because make resolves $(PK3_Q3DEMO_TEST)
+      # back through $(TEST_SUPPORT_LIB) and $(LIBPAKKA) into the per-
+      # mode object directories. `make test` (and any realpak goal) sets
+      # PAKKA_BUILD_MODE=test, so libs land under build/{obj,lib}-test/,
+      # not the lib-prod/ a release `make` produces.
       - uses: actions/upload-artifact@v7
         with:
           name: linux-x86_64-binaries
           path: |
             pakka
-            build/lib-prod/libpakka.a
+            build/obj-test
+            build/lib-test
+            build/test/libtest_support.a
+            build/test/support
             build/test/pk3_q3demo_test
             build/test/pak_goldsrc_test
           retention-days: 1
@@ -628,14 +637,18 @@ jobs:
         with:
           path: build/test/q3demo.zip
           key: q3demo-${{ hashFiles('Makefile') }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-binaries
       - run: |
           chmod +x pakka build/test/pk3_q3demo_test
-          # Touch so make's mtime check sees the downloaded binaries
-          # as fresh against the (just-checked-out) source files.
-          touch pakka build/lib-prod/libpakka.a build/test/pk3_q3demo_test
+          # Refresh mtimes on every downloaded file so make's dependency
+          # cascade (test binary → libtest_support.a → support/*.o,
+          # libpakka.a → obj-test/*.o) sees everything as fresher than
+          # the just-checked-out .c/.h sources. Without this, make
+          # tries to re-link against newer sources.
+          find pakka build/obj-test build/lib-test build/test \
+              -type f -exec touch {} +
       - run: |
           sudo apt-get update
           sudo apt-get install -y make curl openssl unzip
@@ -654,12 +667,13 @@ jobs:
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
           key: goldsrc-${{ hashFiles('Makefile') }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: linux-x86_64-binaries
       - run: |
           chmod +x pakka build/test/pak_goldsrc_test
-          touch pakka build/lib-prod/libpakka.a build/test/pak_goldsrc_test
+          find pakka build/obj-test build/lib-test build/test \
+              -type f -exec touch {} +
       - run: |
           sudo apt-get update
           sudo apt-get install -y make curl openssl unzip
@@ -683,7 +697,7 @@ jobs:
         with:
           path: build/test/q3demo.zip
           key: q3demo-${{ hashFiles('dev/win/fixtures.ps1') }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: windows-msvc-x86_64-build
           path: build/cmake
@@ -715,7 +729,7 @@ jobs:
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
           key: goldsrc-${{ hashFiles('dev/win/fixtures.ps1') }}
-      - uses: actions/download-artifact@v5
+      - uses: actions/download-artifact@v8
         with:
           name: windows-msvc-x86_64-build
           path: build/cmake
