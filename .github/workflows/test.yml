@@ -89,6 +89,19 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y build-essential curl openssl
       - run: make test
+      # Pakka binary + realpak C-test exes get reused by the downstream
+      # realpak-test-{q3,goldsrc}-linux jobs so they don't rebuild from
+      # scratch. libpakka.a comes along for the realpak symbol-audit step.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: linux-x86_64-binaries
+          path: |
+            pakka
+            build/lib-prod/libpakka.a
+            build/test/pk3_q3demo_test
+            build/test/pak_goldsrc_test
+          retention-days: 1
+          if-no-files-found: error
 
   # Exercises the opt-in zlib DEFLATE backend (PAKKA_DEFLATE_BACKEND=zlib /
   # -DPAKKA_USE_ZLIB=ON) end-to-end. The vendored sdefl + sinfl codecs
@@ -405,6 +418,16 @@ jobs:
         # --timeout 120 caps any hanging test at 2 minutes so a runaway
         # never burns the whole 6h job budget.
         run: ctest --test-dir build/cmake --output-on-failure --timeout 120
+      # Realpak Windows jobs reuse this build instead of running cmake +
+      # ninja again. CMakeCache + the .ninja_log are needed so the
+      # realpak jobs can also drive ctest against the downloaded tree.
+      - name: Upload build/cmake for realpak reuse
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-msvc-x86_64-build
+          path: build/cmake
+          retention-days: 1
+          if-no-files-found: error
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
   # GNU make 3.79.1 built from source. Catches order-only-prereq
@@ -583,15 +606,20 @@ jobs:
   # archives downloaded from archive.org (id's Q3 demo PK3, Valve's
   # Half-Life Uplink + Day One PAKs) — bigger fixtures + more entries
   # than the synthetic Quake 1 shareware pak that the default `test`
-  # target uses. The bats suites themselves run in seconds; the 93
+  # target uses. The C-test suites themselves run in seconds; the 93
   # MiB Q3 demo + 48 MiB Uplink + 90 MiB Day One downloads are the
   # only meaningful wall-clock cost, and they're cached on a
   # hashFiles('Makefile') key (URLs + SHA256s live there) so the zip
   # is fetched once and reused across reruns and across the
   # Linux/Windows pair for each suite. Q3 and GoldSrc are split into
-  # separate jobs so failures attribute cleanly.
+  # separate jobs so failures attribute cleanly. Each realpak job
+  # consumes the artifact published by its platform's main test job
+  # (linux-glibc-x86_64 / windows-msvc-x86_64) so pakka + the test
+  # binaries aren't rebuilt — make's mtime check sees the downloaded
+  # binaries as up-to-date and skips the link.
   realpak-test-q3-linux:
     runs-on: ubuntu-latest
+    needs: [linux-glibc-x86_64]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -600,13 +628,22 @@ jobs:
         with:
           path: build/test/q3demo.zip
           key: q3demo-${{ hashFiles('Makefile') }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux-x86_64-binaries
+      - run: |
+          chmod +x pakka build/test/pk3_q3demo_test
+          # Touch so make's mtime check sees the downloaded binaries
+          # as fresh against the (just-checked-out) source files.
+          touch pakka build/lib-prod/libpakka.a build/test/pk3_q3demo_test
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl openssl unzip
+          sudo apt-get install -y make curl openssl unzip
       - run: make realpak-test-q3
 
   realpak-test-goldsrc-linux:
     runs-on: ubuntu-latest
+    needs: [linux-glibc-x86_64]
     steps:
       - uses: actions/checkout@v6
         with:
@@ -617,9 +654,15 @@ jobs:
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
           key: goldsrc-${{ hashFiles('Makefile') }}
+      - uses: actions/download-artifact@v5
+        with:
+          name: linux-x86_64-binaries
+      - run: |
+          chmod +x pakka build/test/pak_goldsrc_test
+          touch pakka build/lib-prod/libpakka.a build/test/pak_goldsrc_test
       - run: |
           sudo apt-get update
-          sudo apt-get install -y build-essential curl openssl unzip
+          sudo apt-get install -y make curl openssl unzip
       - run: make realpak-test-goldsrc
 
   # Native-Windows realpak: no MSYS2 install. Fixture fetch + SHA verify
@@ -628,6 +671,7 @@ jobs:
   # test/CMakeLists.txt).
   realpak-test-q3-windows:
     runs-on: windows-2025-vs2026
+    needs: [windows-msvc-x86_64]
     defaults:
       run:
         shell: pwsh
@@ -639,17 +683,10 @@ jobs:
         with:
           path: build/test/q3demo.zip
           key: q3demo-${{ hashFiles('dev/win/fixtures.ps1') }}
-      - uses: TheMrMilchmann/setup-msvc-dev@v4
+      - uses: actions/download-artifact@v5
         with:
-          arch: x64
-      - name: Configure (CMake / Ninja / MSVC)
-        # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
-        # libpakka compiles in the same fault-injection hooks the test
-        # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
-        # isn't set; safe to enable across all CI jobs.
-        run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
-      - name: Build
-        run: cmake --build build/cmake
+          name: windows-msvc-x86_64-build
+          path: build/cmake
       - name: Fetch + verify Q3 demo fixture
         run: pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite q3
       - name: Run Q3 realpak C test against pakka.exe
@@ -664,6 +701,7 @@ jobs:
   # — no MSYS2; PowerShell-only fixture prep + CTest run.
   realpak-test-goldsrc-windows:
     runs-on: windows-2025-vs2026
+    needs: [windows-msvc-x86_64]
     defaults:
       run:
         shell: pwsh
@@ -677,17 +715,10 @@ jobs:
             build/test/hl-uplink.zip
             build/test/hl-dayone.zip
           key: goldsrc-${{ hashFiles('dev/win/fixtures.ps1') }}
-      - uses: TheMrMilchmann/setup-msvc-dev@v4
+      - uses: actions/download-artifact@v5
         with:
-          arch: x64
-      - name: Configure (CMake / Ninja / MSVC)
-        # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
-        # libpakka compiles in the same fault-injection hooks the C test
-        # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
-        # isn't set; safe to enable across all CI jobs.
-        run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
-      - name: Build
-        run: cmake --build build/cmake
+          name: windows-msvc-x86_64-build
+          path: build/cmake
       - name: Fetch + verify Uplink + Day One fixtures
         run: |
           pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite goldsrc-uplink
