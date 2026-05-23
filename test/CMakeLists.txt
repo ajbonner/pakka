@@ -15,14 +15,14 @@ else()
     target_compile_options(test_support PRIVATE -Wall -pedantic)
 endif()
 
-# Helper: declare a test executable + CTest entry with uniform warning
-# flags. Optional ARGS pass through to add_test's COMMAND; if omitted
-# the binary runs with no arguments. ENVIRONMENT may be passed as a
-# semicolon-separated list of NAME=VALUE strings.
-function(pakka_add_c_test name source)
-    cmake_parse_arguments(PT "" "" "ARGS;ENVIRONMENT" ${ARGN})
-
+# Build a test executable + apply uniform warning flags. Output goes to
+# CMAKE_BINARY_DIR (not the test/ subdir) so Windows CI's existing
+# `test -x build/cmake/<name>.exe` checks keep working through the
+# migration window.
+function(pakka_add_test_exe name source)
     add_executable(${name} ${source})
+    set_target_properties(${name} PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR})
     target_link_libraries(${name} PRIVATE pakka test_support)
     if(MSVC)
         target_compile_options(${name} PRIVATE /W4 /WX)
@@ -33,32 +33,28 @@ function(pakka_add_c_test name source)
     else()
         target_compile_options(${name} PRIVATE -Wall -pedantic)
     endif()
-
-    add_test(NAME ${name} COMMAND ${name} ${PT_ARGS})
-    if(PT_ENVIRONMENT)
-        set_tests_properties(${name} PROPERTIES ENVIRONMENT "${PT_ENVIRONMENT}")
-    endif()
 endfunction()
 
-# c_api_test: takes <pak0.pak> <scratch_dir>. Fixture must be present
-# at run time (fetch via `make fixture` on Unix or fixtures.ps1 on
-# Windows). The argv positions are set so `ctest` runs the same way
-# the Makefile-driven path does.
-pakka_add_c_test(c_api_test c_api_test.c
-    ARGS ${CMAKE_BINARY_DIR}/test/pak0.pak
-         ${CMAKE_BINARY_DIR}/test/scratch)
-
-# dk_codec_test reaches private headers under src/.
-pakka_add_c_test(dk_codec_test dk_codec_test.c)
+# c_api_test and dk_codec_test continue to be invoked via their .bats
+# wrappers — the wrappers set up PAK0 / scratch dirs the binaries need.
+# Build them here so Windows CI finds build/cmake/<name>.exe; don't
+# register them with CTest yet (the fixture wiring lands with the
+# fixtures.ps1 work in a later phase).
+pakka_add_test_exe(c_api_test c_api_test.c)
+pakka_add_test_exe(dk_codec_test dk_codec_test.c)
 target_include_directories(dk_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
 
-# proc_self_test exercises proc.{h,c} by spawning itself in child mode.
-pakka_add_c_test(proc_self_test proc_self_test.c)
+# proc_self_test: standalone, no args/env needed. Registered with CTest
+# directly — exercises proc.{h,c} by spawning itself in child mode.
+pakka_add_test_exe(proc_self_test proc_self_test.c)
+add_test(NAME proc_self_test COMMAND proc_self_test)
 
 # large_file_test: 32-bit fseek/ftell ceiling regression. C peer of
 # test/large_file.bats. Needs PAKKA env pointing at the pakka binary;
-# the scratch dir is absolute so the 2.6 GB sparse fixture lives in
-# a known location regardless of CWD at test invocation time.
-pakka_add_c_test(large_file_test large_file_test.c
+# the scratch dir is absolute so the 2.6 GB sparse fixture lives in a
+# known location regardless of CWD at test invocation time.
+pakka_add_test_exe(large_file_test large_file_test.c)
+add_test(NAME large_file_test COMMAND large_file_test)
+set_tests_properties(large_file_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;LARGE_FILE_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/large_file")

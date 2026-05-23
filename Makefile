@@ -394,7 +394,7 @@ TEST_SUPPORT_LIB := $(TEST_DIR)/libtest_support.a
 
 $(TEST_DIR)/support/%.o: test/support/%.c
 	@mkdir -p $(@D)
-	$(CC) $(CFLAGS) -Itest/support -c $< -o $@
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -c $< -o $@
 
 $(TEST_SUPPORT_LIB): $(TEST_SUPPORT_OBJ)
 	$(AR) rcs $@ $(TEST_SUPPORT_OBJ)
@@ -405,7 +405,7 @@ $(TEST_SUPPORT_LIB): $(TEST_SUPPORT_OBJ)
 PROC_SELF_TEST = $(TEST_DIR)/proc_self_test
 $(PROC_SELF_TEST): test/proc_self_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Itest/support -o $@ test/proc_self_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/proc_self_test.d -o $@ test/proc_self_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 proc_self_test: $(PROC_SELF_TEST)
 
 # Large-file regression — 32-bit fseek/ftell ceiling. Synthesizes a
@@ -414,8 +414,15 @@ proc_self_test: $(PROC_SELF_TEST)
 LARGE_FILE_TEST = $(TEST_DIR)/large_file_test
 $(LARGE_FILE_TEST): test/large_file_test.c $(TEST_SUPPORT_LIB)
 	@mkdir -p $(TEST_DIR)
-	$(CC) $(CFLAGS) -Itest/support -o $@ test/large_file_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/large_file_test.d -o $@ test/large_file_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 large_file_test: $(LARGE_FILE_TEST)
+
+# Header-dependency files emitted by -MMD. The leading minus silences
+# the "no rule to make .d" complaint on a fresh tree (the .d files only
+# exist after the corresponding .o or test binary is built once).
+-include $(TEST_SUPPORT_OBJ:.o=.d)
+-include $(TEST_DIR)/proc_self_test.d
+-include $(TEST_DIR)/large_file_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)

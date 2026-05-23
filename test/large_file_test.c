@@ -15,6 +15,8 @@
 
 #ifdef _WIN32
 #include <io.h>
+#include <windows.h>
+#include <winioctl.h>
 #endif
 
 /* Both offsets above LONG_MAX (2,147,483,647) so the wide-seek path
@@ -50,6 +52,23 @@ static int make_large_pak(const char *path)
     if (!f) {
         return -1;
     }
+
+#ifdef _WIN32
+    /* NTFS does not auto-sparse fwrite-past-EOF; the gap between
+     * offset 12 and LARGE_DIR_OFFSET would otherwise be physically
+     * zero-filled (≈2.5 GB of writes per run). FSCTL_SET_SPARSE marks
+     * the file before any writes so the holes stay sparse. Best-effort
+     * — the test still works if FSCTL_SET_SPARSE fails (e.g. on FAT),
+     * it just burns disk. */
+    {
+        HANDLE h = (HANDLE)_get_osfhandle(_fileno(f));
+        if (h != INVALID_HANDLE_VALUE) {
+            DWORD ignored;
+            DeviceIoControl(h, FSCTL_SET_SPARSE, NULL, 0, NULL, 0,
+                            &ignored, NULL);
+        }
+    }
+#endif
 
     /* Header at offset 0: "PACK" + diroffset LE u32 + dirlength LE u32.
      * 2,500,000,000 = 0x95'02'F9'00 → LE bytes 00 F9 02 95.

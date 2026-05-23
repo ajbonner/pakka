@@ -198,9 +198,11 @@ int proc_run(const char *const argv[], const proc_opts_t *opts, proc_result_t *o
                 if (buf_append(buf, tmp, (size_t)r) < 0) {
                     should_close = 1;
                 }
-            } else if (r == 0) {
-                should_close = 1;
-            } else if (errno != EAGAIN && errno != EWOULDBLOCK && errno != EINTR) {
+            } else if (r == 0 || (errno != EAGAIN && errno != EWOULDBLOCK &&
+                                  errno != EINTR)) {
+                /* r == 0: EOF.
+                 * r <  0: fatal error (anything besides the transient
+                 *         EAGAIN / EWOULDBLOCK / EINTR triad). */
                 should_close = 1;
             }
             if (should_close) {
@@ -334,7 +336,14 @@ static char *build_cmdline(const char *const argv[])
 
 static char *build_env_block(const char *const *envp)
 {
-    size_t total = 1; /* terminating NUL */
+    /* Layout: "K1=V1\0K2=V2\0...\0Kn=Vn\0\0" — entries separated by a
+     * NUL, block ended by a second NUL. For an empty envp the block
+     * is just "\0\0" (two NULs). CreateProcessA docs are explicit
+     * about the double-NUL terminator. Allocating +2 covers both
+     * cases — non-empty entries already end with a NUL from memcpy,
+     * but the explicit double-write is safer than reasoning about
+     * exactly which trailing NUL is the terminator. */
+    size_t total = 2;
     for (size_t i = 0; envp[i]; i++) {
         total += strlen(envp[i]) + 1;
     }
@@ -348,7 +357,8 @@ static char *build_env_block(const char *const *envp)
         memcpy(block + pos, envp[i], len);
         pos += len;
     }
-    block[pos] = '\0';
+    block[pos]     = '\0';
+    block[pos + 1] = '\0';
     return block;
 }
 
@@ -433,6 +443,24 @@ int proc_run(const char *const argv[], const proc_opts_t *opts, proc_result_t *o
     HANDLE       t2   = NULL;
     if (!o.merge_stderr) {
         t2 = (HANDLE)_beginthreadex(NULL, 0, reader_thread, &r2, 0, NULL);
+    }
+
+    /* Without a stdout reader, the child can fill its pipe buffer and
+     * block on write while we wait on the process — classic deadlock.
+     * Treat reader-thread creation failure as launch failure: terminate,
+     * drain handles, return -1. */
+    if (!t1 || (!o.merge_stderr && !t2)) {
+        TerminateProcess(pi.hProcess, 1);
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        if (t1) { WaitForSingleObject(t1, INFINITE); CloseHandle(t1); }
+        if (t2) { WaitForSingleObject(t2, INFINITE); CloseHandle(t2); }
+        CloseHandle(stdout_r);
+        if (stderr_r) CloseHandle(stderr_r);
+        CloseHandle(pi.hProcess);
+        CloseHandle(pi.hThread);
+        free(sb.data);
+        free(eb.data);
+        return -1;
     }
 
     DWORD wait_ms  = o.timeout_ms > 0 ? (DWORD)o.timeout_ms : INFINITE;

@@ -42,15 +42,30 @@ int fs_mkdir_p(const char *path)
     if (!copy) {
         return -1;
     }
-    /* Walk forward, creating each prefix in turn. */
-    for (char *p = copy + 1; *p; p++) {
-        if (*p == '/') {
-            *p = '\0';
+
+    /* Walk the path forward, creating each prefix in turn. Handles both
+     * '/' and '\\' separators (Windows). The walk starts past the drive-
+     * letter prefix ("C:") and past the leading separator so we never
+     * try to mkdir("C:") or mkdir("") as a parent component. */
+    char *p = copy;
+#ifdef _WIN32
+    if (copy[0] && copy[1] == ':') {
+        p = copy + 2;
+    }
+#endif
+    if (*p == '/' || *p == '\\') {
+        p++;
+    }
+
+    for (; *p; p++) {
+        if (*p == '/' || *p == '\\') {
+            char saved = *p;
+            *p         = '\0';
             if (MKDIR(copy) != 0 && errno != EEXIST) {
                 free(copy);
                 return -1;
             }
-            *p = '/';
+            *p = saved;
         }
     }
     if (MKDIR(copy) != 0 && errno != EEXIST) {

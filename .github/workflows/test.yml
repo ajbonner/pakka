@@ -423,7 +423,11 @@ jobs:
       # has both MSVC and the runner PATH set up.
       - name: Configure (CMake / Ninja / MSVC)
         shell: pwsh
-        run: cmake -B build/cmake -G Ninja .
+        # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
+        # libpakka compiles in the same fault-injection hooks the bats
+        # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
+        # isn't set; safe to enable across all CI jobs.
+        run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
         shell: pwsh
         run: cmake --build build/cmake
@@ -445,6 +449,14 @@ jobs:
           export DK_CODEC_TEST="$PWD/build/cmake/dk_codec_test.exe"
           export PAK0="$PWD/build/test/pak0.pak"
           bats test/
+      # CTest runs the native C tests (proc_self_test, large_file_test)
+      # alongside bats. Both must stay green during the migration window
+      # (Phase E gate) until the bats files are deleted. pwsh shell
+      # because ctest is a native Windows binary that expects Windows-
+      # shape paths.
+      - name: Run ctest (native C test suite)
+        shell: pwsh
+        run: ctest --test-dir build/cmake --output-on-failure
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
   # GNU make 3.79.1 built from source. Catches order-only-prereq
@@ -699,7 +711,11 @@ jobs:
           /tmp/bats-core/install.sh /usr/local
       - name: Configure (CMake / Ninja / MSVC)
         shell: pwsh
-        run: cmake -B build/cmake -G Ninja .
+        # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
+        # libpakka compiles in the same fault-injection hooks the bats
+        # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
+        # isn't set; safe to enable across all CI jobs.
+        run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
         shell: pwsh
         run: cmake --build build/cmake
@@ -745,7 +761,11 @@ jobs:
           /tmp/bats-core/install.sh /usr/local
       - name: Configure (CMake / Ninja / MSVC)
         shell: pwsh
-        run: cmake -B build/cmake -G Ninja .
+        # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
+        # libpakka compiles in the same fault-injection hooks the bats
+        # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
+        # isn't set; safe to enable across all CI jobs.
+        run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
         shell: pwsh
         run: cmake --build build/cmake
