@@ -66,3 +66,12 @@ add_test(NAME pk4_test COMMAND pk4_test)
 set_tests_properties(pk4_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;PK4_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/pk4")
+
+# sin_test: SiN (Ritual, 1998) pak format. C peer of test/sin.bats —
+# all 10 cases ported, with an inline binary writer for the SPAK
+# synthesis cases.
+pakka_add_test_exe(sin_test sin_test.c)
+add_test(NAME sin_test COMMAND sin_test)
+set_tests_properties(sin_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;SIN_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/sin")
