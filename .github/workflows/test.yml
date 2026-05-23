@@ -76,6 +76,23 @@ jobs:
           path: build/test/quakesw.tar.gz
           key: quakesw-${{ hashFiles('dev/fixtures.mk') }}
       - run: make test
+      # macOS arm64 realpak jobs (Q3 + GoldSrc) reuse this build —
+      # same shape as the linux-glibc-x86_64 / windows-msvc-x86_64
+      # pattern. Artifact is platform-scoped so we ship a distinct
+      # name; the path list is otherwise identical.
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-arm64-binaries
+          path: |
+            pakka
+            build/obj-test
+            build/lib-test
+            build/test/libtest_support.a
+            build/test/support
+            build/test/pk3_q3demo_test
+            build/test/pak_goldsrc_test
+          retention-days: 1
+          if-no-files-found: error
 
   linux-glibc-x86_64:
     runs-on: ubuntu-latest
@@ -679,6 +696,53 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y make curl openssl unzip
+      - run: make realpak-test-goldsrc
+
+  # macOS arm64 realpak. Mirrors the linux pair: needs the main
+  # macos-apple-silicon-arm64 job for the built pakka + test binaries,
+  # then downloads the artifact, refreshes mtimes, and runs the same
+  # make target. macOS runners ship bash + curl + openssl + make + unzip
+  # in the base image, so no install step.
+  realpak-test-q3-macos:
+    runs-on: macos-26
+    needs: [macos-apple-silicon-arm64]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: build/test/q3demo.zip
+          key: q3demo-${{ hashFiles('dev/fixtures.mk') }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-arm64-binaries
+      - run: |
+          chmod +x pakka build/test/pk3_q3demo_test
+          find pakka build/obj-test build/lib-test build/test \
+              -type f -exec touch {} +
+      - run: make realpak-test-q3
+
+  realpak-test-goldsrc-macos:
+    runs-on: macos-26
+    needs: [macos-apple-silicon-arm64]
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/cache@v5
+        with:
+          path: |
+            build/test/hl-uplink.zip
+            build/test/hl-dayone.zip
+          key: goldsrc-${{ hashFiles('dev/fixtures.mk') }}
+      - uses: actions/download-artifact@v8
+        with:
+          name: macos-arm64-binaries
+      - run: |
+          chmod +x pakka build/test/pak_goldsrc_test
+          find pakka build/obj-test build/lib-test build/test \
+              -type f -exec touch {} +
       - run: make realpak-test-goldsrc
 
   # Native-Windows realpak: no MSYS2 install. Fixture fetch + SHA verify
