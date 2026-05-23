@@ -569,6 +569,12 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) GOLDSRC_TEST_SCRATCH=$(abspath $(TEST_DIR))/goldsrc_scratch $(PAK_GOLDSRC_TEST)
 	@echo "==> unicode_paths_test"
 	@PAKKA=$(abspath $(TARGET)) UNICODE_TEST_SCRATCH=$(abspath $(TEST_DIR))/unicode $(UNICODE_PATHS_TEST)
+	@echo "==> dk_codec_test"
+	@$(DK_CODEC_TEST)
+	@echo "==> c_api_test"
+	@rm -rf $(TEST_DIR)/c_api_scratch
+	@mkdir -p $(TEST_DIR)/c_api_scratch
+	@$(C_API_TEST) $(PAK0) $(abspath $(TEST_DIR))/c_api_scratch
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
