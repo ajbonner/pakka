@@ -35,14 +35,30 @@ function(pakka_add_test_exe name source)
     endif()
 endfunction()
 
-# c_api_test and dk_codec_test continue to be invoked via their .bats
-# wrappers — the wrappers set up PAK0 / scratch dirs the binaries need.
-# Build them here so Windows CI finds build/cmake/<name>.exe; don't
-# register them with CTest yet (the fixture wiring lands with the
-# fixtures.ps1 work in a later phase).
+# c_api_test (NULL tolerance, round-trips, accessors, verify, memory APIs)
+# and dk_codec_test (opcode boundaries / overlap / bounds / termination)
+# build the binaries that the bats wrappers c_api_test.bats and
+# dk_codec_test.bats invoke. Now also registered with CTest so they run
+# in the native test path alongside their bats peers.
+#
+# c_api_test takes two positional args: <pak0.pak> <scratch_dir>. The
+# fixture lives at ${CMAKE_SOURCE_DIR}/build/test/pak0.pak (downloaded
+# via `make fixture` on Unix; fixtures.ps1 on Windows will land it at
+# the same path). The scratch dir is per-test under the binary tree
+# so concurrent CI runs don't collide.
 pakka_add_test_exe(c_api_test c_api_test.c)
+add_test(NAME c_api_test
+    COMMAND c_api_test
+            ${CMAKE_SOURCE_DIR}/build/test/pak0.pak
+            ${CMAKE_BINARY_DIR}/test_scratch/c_api)
+
+# Pre-create the c_api_test scratch dir at configure time; the binary
+# expects it to exist (it doesn't mkdir -p its argv[2]).
+file(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/test_scratch/c_api)
+
 pakka_add_test_exe(dk_codec_test dk_codec_test.c)
 target_include_directories(dk_codec_test PRIVATE ${CMAKE_SOURCE_DIR}/src)
+add_test(NAME dk_codec_test COMMAND dk_codec_test)
 
 # proc_self_test: standalone, no args/env needed. Registered with CTest
 # directly — exercises proc.{h,c} by spawning itself in child mode.
