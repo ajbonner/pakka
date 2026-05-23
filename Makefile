@@ -384,6 +384,30 @@ $(DK_CODEC_TEST): test/dk_codec_test.c $(LIBPAKKA)
 	$(CC) $(CFLAGS) -Iinclude -Isrc -o $@ test/dk_codec_test.c $(LIBPAKKA) $(LDLIBS)
 dk_codec_test: $(DK_CODEC_TEST)
 
+# Shared test-support library (test/support/*.c). Compiled once into a
+# static archive linked by every C test binary. Provides assertion
+# macros (test_macros.h), cross-platform process spawn (proc.{h,c}),
+# and filesystem / text helpers.
+TEST_SUPPORT_SRC := $(wildcard test/support/*.c)
+TEST_SUPPORT_OBJ := $(patsubst test/support/%.c, $(TEST_DIR)/support/%.o, $(TEST_SUPPORT_SRC))
+TEST_SUPPORT_LIB := $(TEST_DIR)/libtest_support.a
+
+$(TEST_DIR)/support/%.o: test/support/%.c
+	@mkdir -p $(@D)
+	$(CC) $(CFLAGS) -Itest/support -c $< -o $@
+
+$(TEST_SUPPORT_LIB): $(TEST_SUPPORT_OBJ)
+	$(AR) rcs $@ $(TEST_SUPPORT_OBJ)
+
+# Self-test for the proc helper: spawns itself in "child mode" to
+# exercise stdout / stderr capture, large-output deadlock avoidance,
+# cwd and env override, timeout, and argv quoting.
+PROC_SELF_TEST = $(TEST_DIR)/proc_self_test
+$(PROC_SELF_TEST): test/proc_self_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -o $@ test/proc_self_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+proc_self_test: $(PROC_SELF_TEST)
+
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
 	$(CC) $(CFLAGS) -c $< -o $@
@@ -414,7 +438,9 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) symbol-audit
+	@echo "==> proc_self_test"
+	@$(PROC_SELF_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we

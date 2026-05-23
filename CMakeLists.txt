@@ -127,32 +127,17 @@ foreach(_t pakka pakka_exe)
     endif()
 endforeach()
 
-# C-API test executable. Links the public include/ surface against the
-# static library, no internals. Invoked from test/c_api_test.bats.
-add_executable(c_api_test test/c_api_test.c)
-target_link_libraries(c_api_test PRIVATE pakka)
-if(MSVC)
-    target_compile_options(c_api_test PRIVATE /W4 /WX)
-    target_compile_definitions(c_api_test PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        _CRT_NONSTDC_NO_WARNINGS
-    )
-else()
-    target_compile_options(c_api_test PRIVATE -Wall -pedantic)
+# Test-build mode mirrors the Makefile's `make test` flag: defines
+# PAKKA_TEST_BUILD so src/platform.c's fault-injection hooks compile in.
+# Default OFF — release builds and the standalone `cmake --build` flow
+# never touch the hooks. Windows CI sets it ON in the test workflow.
+option(PAKKA_TEST_BUILD "Enable fault-injection hooks in libpakka" OFF)
+if(PAKKA_TEST_BUILD)
+    target_compile_definitions(pakka PRIVATE PAKKA_TEST_BUILD=1)
 endif()
 
-# DK codec internals test (Makefile peer of dk_codec_test). Reaches
-# pakka_dk_inflate / pakka_dk_deflate through src/common.h; the
-# test/dk_codec_test.bats wrapper finds the binary via DK_CODEC_TEST.
-add_executable(dk_codec_test test/dk_codec_test.c)
-target_link_libraries(dk_codec_test PRIVATE pakka)
-target_include_directories(dk_codec_test PRIVATE src)
-if(MSVC)
-    target_compile_options(dk_codec_test PRIVATE /W4 /WX)
-    target_compile_definitions(dk_codec_test PRIVATE
-        _CRT_SECURE_NO_WARNINGS
-        _CRT_NONSTDC_NO_WARNINGS
-    )
-else()
-    target_compile_options(dk_codec_test PRIVATE -Wall -pedantic)
-endif()
+# Test binaries and their CTest registrations live under test/. The
+# top-level build still produces them under the build dir (Windows CI
+# relies on build/cmake/c_api_test.exe etc.).
+enable_testing()
+add_subdirectory(test)
