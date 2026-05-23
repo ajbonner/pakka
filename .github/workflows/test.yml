@@ -370,16 +370,19 @@ jobs:
           prepare: pkg_add -I gmake curl bats zip 'unzip--' 'python%3'
           run: gmake test
 
-  # Windows / MSVC build. Uses CMake to drive cl.exe (the Unix Makefile
-  # doesn't apply here) and MSYS2 to provide bash + bats for running
-  # the existing test suite against the resulting pakka.exe.
+  # Native-Windows main test job. CMake/MSVC build + dev/win/fixtures.ps1
+  # for fixture prep + CTest for the C test suite. No MSYS2, no bats, no
+  # bash. The Linux/macOS unix-* jobs still run bats via the Makefile,
+  # so the cases that don't yet have C peers (POSIX-symlink, chmod,
+  # python-zipfile-built ZIPs, inline-cc c-api harnesses — ~50 cases)
+  # remain covered on those platforms during the migration window.
   windows-msvc-x86_64:
     # windows-latest is being redirected to this label by mid-June 2026
     # per the runner banner; pinning explicitly avoids the noise.
     runs-on: windows-2025-vs2026
     defaults:
       run:
-        shell: msys2 {0}
+        shell: pwsh
     steps:
       - uses: actions/checkout@v6
         with:
@@ -387,75 +390,27 @@ jobs:
       - uses: actions/cache@v5
         with:
           path: build/test/quakesw.tar.gz
-          key: quakesw-${{ hashFiles('Makefile') }}
+          key: quakesw-${{ hashFiles('dev/win/fixtures.ps1') }}
       # Fork of ilammy/msvc-dev-cmd that's actively maintained and
       # runs on Node 24 (ilammy's v1.13.0 is still on Node 20).
       - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: x64
-      - uses: msys2/setup-msys2@v2
-        with:
-          # setup-msys2 caches its install dir by default (keyed on the
-          # install list). `update: false` keeps `pacman -Syu` from
-          # firing on every run — the windows-latest MSYS2 base already
-          # ships current versions of everything we need.
-          update: false
-          install: >-
-            bash
-            coreutils
-            curl
-            diffutils
-            git
-            openssl
-            tar
-            make
-            zip
-            unzip
-            python3
-      # MSYS2 has no bats package; install from upstream. /usr/local/bin
-      # is on the default MSYS2 PATH so no extra wiring needed.
-      - name: Install bats-core
-        run: |
-          git clone --depth 1 --branch v1.13.0 https://github.com/bats-core/bats-core.git /tmp/bats-core
-          /tmp/bats-core/install.sh /usr/local
-      # CMake/Ninja are preinstalled on the windows-latest image but live
-      # outside the MSYS2 environment; expose them via a cmd shell that
-      # has both MSVC and the runner PATH set up.
       - name: Configure (CMake / Ninja / MSVC)
-        shell: pwsh
         # PAKKA_TEST_BUILD=ON mirrors the Makefile's `make test` flag so
-        # libpakka compiles in the same fault-injection hooks the bats
+        # libpakka compiles in the same fault-injection hooks the test
         # suite relies on. NOP at runtime when PAKKA_INJECT_FAULT_AT
         # isn't set; safe to enable across all CI jobs.
         run: cmake -B build/cmake -G Ninja -DPAKKA_TEST_BUILD=ON .
       - name: Build
-        shell: pwsh
         run: cmake --build build/cmake
-      - name: Fetch + verify Quake fixture
-        run: make fixture
-      - name: Run bats tests against pakka.exe
-        # Resolve PAKKA to an MSYS2-style absolute path: relative paths
-        # can break inside bats's setup_file (bats may chdir into a temp
-        # dir before invoking it), and $GITHUB_WORKSPACE is Windows-shape
-        # which trips MSYS2 bash path resolution. $PWD inside this step
-        # is already the MSYS2 form of the workspace.
-        run: |
-          ls -la build/cmake/ || true
-          test -x build/cmake/pakka.exe
-          test -x build/cmake/c_api_test.exe
-          test -x build/cmake/dk_codec_test.exe
-          export PAKKA="$PWD/build/cmake/pakka.exe"
-          export C_API_TEST="$PWD/build/cmake/c_api_test.exe"
-          export DK_CODEC_TEST="$PWD/build/cmake/dk_codec_test.exe"
-          export PAK0="$PWD/build/test/pak0.pak"
-          bats test/
-      # CTest runs the native C tests (proc_self_test, large_file_test)
-      # alongside bats. Both must stay green during the migration window
-      # (Phase E gate) until the bats files are deleted. pwsh shell
-      # because ctest is a native Windows binary that expects Windows-
-      # shape paths.
-      - name: Run ctest (native C test suite)
-        shell: pwsh
+      - name: Fetch + verify Quake shareware fixture
+        # Pulls quakesw-1.0.6.tar.gz, SHA-256 verifies it, untars to
+        # build/test/, and copies id1/pak0.pak to the canonical location
+        # tests expect (build/test/pak0.pak). PowerShell-native; uses
+        # the tar.exe that ships with Windows 10+.
+        run: pwsh -NoLogo -File dev/win/fixtures.ps1 -Suite quake
+      - name: Run C test suite via CTest
         run: ctest --test-dir build/cmake --output-on-failure
 
   # Legacy floor: Sarge-derived userland (glibc 2.3.2, gcc 3.3) plus
