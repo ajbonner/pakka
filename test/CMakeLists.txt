@@ -83,3 +83,12 @@ add_test(NAME wad_test COMMAND wad_test)
 set_tests_properties(wad_test PROPERTIES
     ENVIRONMENT
         "PAKKA=$<TARGET_FILE:pakka_exe>;WAD_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/wad")
+
+# dk_test: Daikatana pak format. C peer of test/dk.bats — all 18 cases
+# ported, including the real-fixture cross-validation against
+# test/fixtures/dk/user.pak (REPO_ROOT env points at the source tree).
+pakka_add_test_exe(dk_test dk_test.c)
+add_test(NAME dk_test COMMAND dk_test)
+set_tests_properties(dk_test PROPERTIES
+    ENVIRONMENT
+        "PAKKA=$<TARGET_FILE:pakka_exe>;DK_TEST_SCRATCH=${CMAKE_BINARY_DIR}/test_scratch/dk;REPO_ROOT=${CMAKE_SOURCE_DIR}")

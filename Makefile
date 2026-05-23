@@ -444,6 +444,16 @@ $(WAD_TEST): test/wad_test.c $(TEST_SUPPORT_LIB)
 	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/wad_test.d -o $@ test/wad_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
 wad_test: $(WAD_TEST)
 
+# Daikatana pak format tests. C peer of test/dk.bats. Inline DK binary
+# writer (72-byte entries, literal-run opcode encoder) + directory
+# probe; covers all 19 bats cases including the real-fixture cross-
+# validation against test/fixtures/dk/user.pak.
+DK_TEST = $(TEST_DIR)/dk_test
+$(DK_TEST): test/dk_test.c $(TEST_SUPPORT_LIB)
+	@mkdir -p $(TEST_DIR)
+	$(CC) $(CFLAGS) -Itest/support -MMD -MP -MF $(TEST_DIR)/dk_test.d -o $@ test/dk_test.c $(TEST_SUPPORT_LIB) $(LDLIBS)
+dk_test: $(DK_TEST)
+
 # Header-dependency files emitted by -MMD. The leading minus silences
 # the "no rule to make .d" complaint on a fresh tree (the .d files only
 # exist after the corresponding .o or test binary is built once).
@@ -453,6 +463,7 @@ wad_test: $(WAD_TEST)
 -include $(TEST_DIR)/pk4_test.d
 -include $(TEST_DIR)/sin_test.d
 -include $(TEST_DIR)/wad_test.d
+-include $(TEST_DIR)/dk_test.d
 
 $(OBJ_DIR)/%.o: $(SRC_DIR)/%.c
 	@mkdir -p $(@D)
@@ -484,7 +495,7 @@ $(PAK0): verify-tarball
 # still want to drive the bats suite against the canonical fixture.
 fixture: $(PAK0)
 
-test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) symbol-audit
+test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_TEST) $(LARGE_FILE_TEST) $(PK4_TEST) $(SIN_TEST) $(WAD_TEST) $(DK_TEST) symbol-audit
 	@echo "==> proc_self_test"
 	@$(PROC_SELF_TEST)
 	@echo "==> large_file_test"
@@ -495,6 +506,8 @@ test: force-relink $(TARGET) $(PAK0) $(C_API_TEST) $(DK_CODEC_TEST) $(PROC_SELF_
 	@PAKKA=$(abspath $(TARGET)) SIN_TEST_SCRATCH=$(abspath $(TEST_DIR))/sin $(SIN_TEST)
 	@echo "==> wad_test"
 	@PAKKA=$(abspath $(TARGET)) WAD_TEST_SCRATCH=$(abspath $(TEST_DIR))/wad $(WAD_TEST)
+	@echo "==> dk_test"
+	@PAKKA=$(abspath $(TARGET)) DK_TEST_SCRATCH=$(abspath $(TEST_DIR))/dk REPO_ROOT=$(abspath .) $(DK_TEST)
 	CFLAGS='$(CFLAGS)' LIBPAKKA='$(LIBPAKKA)' LDLIBS='$(LDLIBS)' bats test/
 
 # Q3 demo wrapper download + SHA verify. archive.org gives SHA1; we
