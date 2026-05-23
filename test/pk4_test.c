@@ -21,6 +21,12 @@
 static const char *g_pakka_path;
 static char       *g_scratch;
 
+/* Built once in main() by build_deflate_pk4_fixture; reused by the
+ * three deflate-fixture-backed tests. NULL if the build failed; tests
+ * EXPECT_NOT_NULL it before proceeding. */
+static char       *g_deflate_pk4;
+static char       *g_deflate_src; /* source tree, kept for fs_diff_tree */
+
 static char *under_scratch(const char *sub)
 {
     return fs_join(g_scratch, sub);
@@ -185,6 +191,90 @@ static void test_delete_rebuild_produces_valid_pk4(void)
     free(out_remove);
 }
 
+/* Build a multi-entry DEFLATE PK4 via pakka -c --compress so the
+ * round-trip tests have a fixture without needing /usr/bin/zip. The
+ * resulting archive's DEFLATE-encoded entries exercise the same reader
+ * path the bats tests cover. Returns absolute path to the built pak,
+ * or NULL on any setup failure; the caller frees the path. */
+static char *build_deflate_pk4_fixture(void)
+{
+    char *src    = under_scratch("deflate_fixture/src");
+    char *src_d  = fs_join(src, "sub");
+    if (fs_mkdir_p(src_d) != 0) return NULL;
+    char *hello  = fs_join(src, "hello.txt");
+    char *nested = fs_join(src_d, "nested.txt");
+    if (write_text(hello, "hello pk4") != 0) return NULL;
+    if (write_text(nested, "nested\n") != 0) return NULL;
+
+    /* Compressible payload large enough that pakka picks DEFLATE — the
+     * defining trait of a real-world Doom 3 PK4 vs a fresh-made PK3. */
+    char   line[] = "The quick brown fox jumps over the lazy dog. ";
+    size_t ln     = sizeof(line) - 1;
+    size_t total  = ln * 250;
+    char  *lorem_data = (char *)malloc(total);
+    if (!lorem_data) return NULL;
+    for (size_t i = 0; i < 250; i++) memcpy(lorem_data + i * ln, line, ln);
+    char *lorem = fs_join(src, "lorem.txt");
+    int   rc    = fs_write_file(lorem, lorem_data, total);
+    free(lorem_data);
+    if (rc != 0) return NULL;
+
+    char *pak = under_scratch("deflate_fixture/mixed.pk4");
+
+    proc_result_t r;
+    proc_opts_t   opts = {0};
+    opts.cwd           = src;
+    const char *argv[] = {g_pakka_path, "-c", "--compress", pak,
+                          "hello.txt", "sub", "lorem.txt", NULL};
+    if (proc_run(argv, &opts, &r) != 0) return NULL;
+    int exit_code = r.exit_code;
+    proc_result_free(&r);
+    if (exit_code != 0) return NULL;
+
+    free(src_d);
+    free(hello);
+    free(nested);
+    free(lorem);
+
+    /* Stash src for the diff_tree-based round-trip test; pak path is
+     * the function's return value. Caller frees both. */
+    g_deflate_src = src;
+    return pak;
+}
+
+static void test_list_enumerates_deflate_pk4_entries(void)
+{
+    EXPECT_NOT_NULL(g_deflate_pk4);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-l", g_deflate_pk4);
+    EXPECT_STR_CONTAINS(r.stdout_buf, "hello.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "sub/nested.txt");
+    EXPECT_STR_CONTAINS(r.stdout_buf, "lorem.txt");
+    proc_result_free(&r);
+}
+
+static void test_extract_deflate_round_trips(void)
+{
+    EXPECT_NOT_NULL(g_deflate_pk4);
+    char *out_dir = under_scratch("deflate_fixture/out");
+    EXPECT_EQ(fs_mkdir_p(out_dir), 0);
+
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "-x", "-C", out_dir, g_deflate_pk4);
+    proc_result_free(&r);
+
+    EXPECT_EQ(fs_diff_tree(g_deflate_src, out_dir), 0);
+    free(out_dir);
+}
+
+static void test_verify_synthetic_pk4_passes_deep_checks(void)
+{
+    EXPECT_NOT_NULL(g_deflate_pk4);
+    proc_result_t r;
+    RUN_PAKKA_OK(&r, "--verify", "--deep", g_deflate_pk4);
+    proc_result_free(&r);
+}
+
 static void test_pack_magic_in_pk4_opens_as_pak(void)
 {
     /* Mirrors pk4.bats "pk4 open: PACK magic in a .pk4 file opens as
@@ -241,9 +331,16 @@ int main(void)
     }
     g_scratch = strdup(scratch);
 
+    /* Build the DEFLATE fixture once — the three round-trip tests
+     * share it (mirroring the bats setup_file pattern). */
+    g_deflate_pk4 = build_deflate_pk4_fixture();
+
     RUN_TEST(test_create_builds_valid_zip);
     RUN_TEST(test_create_uppercase_pk4_extension);
     RUN_TEST(test_delete_rebuild_produces_valid_pk4);
+    RUN_TEST(test_list_enumerates_deflate_pk4_entries);
+    RUN_TEST(test_extract_deflate_round_trips);
+    RUN_TEST(test_verify_synthetic_pk4_passes_deep_checks);
     RUN_TEST(test_pack_magic_in_pk4_opens_as_pak);
 
     free(g_scratch);
