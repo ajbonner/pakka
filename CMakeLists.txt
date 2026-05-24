@@ -141,3 +141,33 @@ endif()
 # relies on build/cmake/c_api_test.exe etc.).
 enable_testing()
 add_subdirectory(test)
+
+# Install layout mirrors the Unix Makefile install target:
+#   bin/pakka(.exe)              — CLI binary
+#   lib/pakka.lib (libpakka.a)   — static library
+#   include/pakka.h              — public header
+#   share/man/man1/pakka.1       — manpage
+#   share/doc/pakka/{README,LICENSE} — docs
+# GNUInstallDirs picks platform-appropriate destinations; CPack ZIP
+# consumes the same install() rules to produce the Windows release zip.
+include(GNUInstallDirs)
+
+install(TARGETS pakka_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+install(TARGETS pakka     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(FILES include/pakka.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+install(FILES man/pakka.1     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
+install(FILES man/pakka.3     DESTINATION ${CMAKE_INSTALL_MANDIR}/man3)
+install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
+
+# CPack ZIP generator — `cpack -G ZIP` (from the build dir) writes
+# pakka-${PROJECT_VERSION}-windows-x64.zip with the layout above.
+# Used by the Windows release workflow; safe to invoke on any host.
+set(CPACK_GENERATOR "ZIP")
+set(CPACK_PACKAGE_NAME "pakka")
+set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
+set(CPACK_PACKAGE_FILE_NAME "pakka-${PROJECT_VERSION}-windows-x64")
+set(CPACK_PACKAGE_VENDOR "Aaron Bonner")
+set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
+    "CLI utility for game-engine archive formats (PAK, PK3, PK4, SiN, WAD)")
+set(CPACK_RESOURCE_FILE_LICENSE "${CMAKE_SOURCE_DIR}/LICENSE")
+include(CPack)

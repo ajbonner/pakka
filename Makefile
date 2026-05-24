@@ -157,12 +157,37 @@ GOLDSRC_DAYONE_PAK0=$(TEST_DIR)/hl-dayone/valve/pak0.pak
 CLANG_TIDY ?= clang-tidy
 NM ?= nm
 
+# Install paths. PREFIX defaults to /usr/local to match the autoconf
+# convention; on most systems that requires root to write to, so plain
+# `make install` will fail with permission denied unless run with sudo.
+# Override PREFIX (and/or DESTDIR for packager staging) per invocation:
+#   sudo make install                       # system-wide /usr/local
+#   make install PREFIX=$$HOME/.local       # user-only, no root
+#   make install DESTDIR=/tmp/stage         # packager staging
+# `make uninstall` reverses any of these — use the same overrides.
+# install -d (create parents) + install -m work on both BSD install
+# (macOS / *BSD) and GNU install (Linux); we avoid GNU-only -D.
+PREFIX     ?= /usr/local
+BINDIR     ?= $(PREFIX)/bin
+LIBDIR     ?= $(PREFIX)/lib
+INCLUDEDIR ?= $(PREFIX)/include
+MANDIR     ?= $(PREFIX)/share/man
+DOCDIR     ?= $(PREFIX)/share/doc/pakka
+INSTALL    ?= install
+
+# Source-distribution tarball name (no `v` prefix, matches the GitHub
+# release artifact CPack writes on the Windows side). `make dist`
+# produces $(DIST_NAME).tar.gz plus a SHA-256 sidecar via `git archive
+# HEAD` — release.yml guarantees HEAD == tagged version when this runs
+# in CI.
+DIST_NAME = pakka-$(MAJOR).$(MINOR).$(PATCH)
+
 # Public header. Linted explicitly via lint-header so transitive-include
 # regressions in include/pakka.h surface even when every internal TU
 # happens to pull in the missing dependency for unrelated reasons.
 PUBLIC_HEADERS = $(INCLUDE_DIR)/pakka.h
 
-.PHONY: all clean test test-clean distclean lint lint-header lint-advisory lint-win32 coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture realpak-test realpak-test-q3 realpak-test-goldsrc
+.PHONY: all clean test test-clean distclean install uninstall dist lint lint-header lint-advisory lint-win32 coverage fuzz fuzz-open fuzz-dk fuzz-roundtrip symbol-audit c_api_test dk_codec_test verify-tarball verify-q3demo verify-goldsrc-uplink verify-goldsrc-dayone fixture realpak-test realpak-test-q3 realpak-test-goldsrc
 
 # Force serial execution. force-relink (below) deletes $(TARGET) and
 # $(LIBPAKKA) as a sibling prereq of `all` / `test`; under `make -j`
@@ -192,6 +217,55 @@ test-clean:
 
 distclean:
 	rm -rf $(BUILD_DIR) $(TARGET)
+	rm -f pakka-*.tar.gz pakka-*.tar.gz.sha256
+
+# Install layout mirrors the autoconf / GNU install conventions:
+#   $(PREFIX)/bin/pakka                        — CLI binary
+#   $(PREFIX)/lib/libpakka.a                   — static library
+#   $(PREFIX)/include/pakka.h                  — public C99 header
+#   $(PREFIX)/share/man/man1/pakka.1           — CLI manpage
+#   $(PREFIX)/share/man/man3/pakka.3           — libpakka manpage
+#   $(PREFIX)/share/doc/pakka/{README.md,LICENSE} — docs
+# DESTDIR is honored for staged installs (packagers).
+#
+# force-relink is a prereq so a prior `make test` (which compiles in the
+# PAKKA_TEST_BUILD fault-injection hooks) can never leave a stale test-
+# flavored ./pakka in place that the next `make install` would copy to
+# $(BINDIR). Same guard `all` and `test` already use — install honors it
+# for the prod side.
+install: force-relink $(TARGET) $(LIBPAKKA)
+	$(INSTALL) -d $(DESTDIR)$(BINDIR) $(DESTDIR)$(LIBDIR) \
+	            $(DESTDIR)$(INCLUDEDIR) \
+	            $(DESTDIR)$(MANDIR)/man1 $(DESTDIR)$(MANDIR)/man3 \
+	            $(DESTDIR)$(DOCDIR)
+	$(INSTALL) -m 0755 $(TARGET)              $(DESTDIR)$(BINDIR)/pakka
+	$(INSTALL) -m 0644 $(LIBPAKKA)            $(DESTDIR)$(LIBDIR)/libpakka.a
+	$(INSTALL) -m 0644 $(INCLUDE_DIR)/pakka.h $(DESTDIR)$(INCLUDEDIR)/pakka.h
+	$(INSTALL) -m 0644 man/pakka.1            $(DESTDIR)$(MANDIR)/man1/pakka.1
+	$(INSTALL) -m 0644 man/pakka.3            $(DESTDIR)$(MANDIR)/man3/pakka.3
+	$(INSTALL) -m 0644 README.md LICENSE      $(DESTDIR)$(DOCDIR)/
+
+uninstall:
+	rm -f $(DESTDIR)$(BINDIR)/pakka
+	rm -f $(DESTDIR)$(LIBDIR)/libpakka.a
+	rm -f $(DESTDIR)$(INCLUDEDIR)/pakka.h
+	rm -f $(DESTDIR)$(MANDIR)/man1/pakka.1
+	rm -f $(DESTDIR)$(MANDIR)/man3/pakka.3
+	rm -rf $(DESTDIR)$(DOCDIR)
+
+# Source tarball for distribution. `git archive HEAD` snapshots the
+# committed tree (so uncommitted edits never leak into a release), and
+# the --prefix= shape gives extractors a versioned top-level directory.
+# The SHA-256 sidecar uses the same `openssl dgst -sha256` form the
+# fixture-verify targets already rely on (portable across macOS,
+# Linux, OpenBSD, FreeBSD).
+dist:
+	git archive --format=tar.gz --prefix=$(DIST_NAME)/ \
+	    -o $(DIST_NAME).tar.gz HEAD
+	@actual=`openssl dgst -sha256 $(DIST_NAME).tar.gz | awk '{print $$NF}'`; \
+	echo "$$actual  $(DIST_NAME).tar.gz" > $(DIST_NAME).tar.gz.sha256
+	@echo "==> $(DIST_NAME).tar.gz"
+	@echo "==> $(DIST_NAME).tar.gz.sha256"
 
 # Verify the public header parses as standalone C with the same warning
 # flags the rest of the codebase uses. Catches regressions where the

@@ -1,0 +1,501 @@
+.\" man page for libpakka — section 3 (C library reference)
+.TH PAKKA 3 2026-05-24 "" "Pakka Library Manual"
+.SH NAME
+libpakka \- C library for reading and writing game-engine archives
+.SH SYNOPSIS
+.nf
+.B #include <pakka.h>
+.PP
+.B cc
+.RI [ flags ]
+.IR file ...
+.B \-lpakka
+.fi
+.SH DESCRIPTION
+.B libpakka
+exposes the same archive surface as
+.BR pakka (1)
+as a C99 library. All exported symbols are prefixed
+.B pakka_
+and the static archive
+.RB ( libpakka.a )
+contains no other defined globals \(em
+.B make symbol-audit
+fails the build if anything else leaks.
+.PP
+Library functions never call
+.BR exit (3)
+and never write to
+.BR stdout (3)
+or
+.BR stderr (3).
+Every operation that can fail returns a
+.B pakka_status_t
+and optionally populates a caller-provided
+.B pakka_error_t
+with structured detail (errno or Win32
+.BR GetLastError ,
+operation name, entry index, file offset, message).
+.SH TYPES
+.TP
+.B pakka_archive_t
+Opaque handle to an open archive. Created by
+.BR pakka_open / pakka_create ,
+released by
+.BR pakka_close .
+.TP
+.B pakka_entry_t
+Opaque handle to one directory entry inside an archive. Returned from
+.BR pakka_entry_at / pakka_find_entry .
+Valid until the owning archive is closed; invalidated by
+.BR pakka_delete / pakka_commit .
+.TP
+.B pakka_reader_t
+Stateful cursor into one entry's payload. Returned from
+.BR pakka_open_entry / pakka_open_entry_handle .
+Multiple readers may be open on the same archive simultaneously.
+.TP
+.B pakka_error_t
+Out-parameter struct populated on failure: status, OS error domain and
+code, operation name, entry index, file offset, and a human-readable
+message. Always optional \(em pass
+.B NULL
+to ignore the structured detail.
+.TP
+.B pakka_status_t
+Return enum.
+.B PAKKA_OK
+is zero; non-zero values are
+.BR PAKKA_ERR_IO ,
+.BR PAKKA_ERR_FORMAT ,
+.BR PAKKA_ERR_UNSUPPORTED ,
+.BR PAKKA_ERR_UNSAFE_NAME ,
+.BR PAKKA_ERR_DUPLICATE ,
+.BR PAKKA_ERR_NOT_FOUND ,
+.BR PAKKA_ERR_EXISTS ,
+.BR PAKKA_ERR_NOMEM ,
+.BR PAKKA_ERR_LIMIT ,
+.BR PAKKA_ERR_INVALID_ARGUMENT .
+.TP
+.B pakka_format_t
+Archive format enum.
+.B PAKKA_FORMAT_AUTO
+means "probe the on-disk magic and decide"; other values pin the format
+explicitly. Supported formats:
+.BR PAKKA_FORMAT_PAK
+(Quake 1 / 2, GoldSrc \(em Half-Life 1, CS 1.6, TFC \(em bit-identical
+PACK layout),
+.BR PAKKA_FORMAT_SIN
+(Ritual 1998, SPAK + 120-byte names),
+.BR PAKKA_FORMAT_DAIKATANA
+(Ion Storm 2000, PACK + 72-byte entries),
+.BR PAKKA_FORMAT_IWAD / PAKKA_FORMAT_PWAD
+(Doom WAD; 8-byte lump names, duplicates allowed),
+.BR PAKKA_FORMAT_PK3
+(Quake 3 / ZIP),
+.BR PAKKA_FORMAT_PK4
+(Doom 3 / ZIP).
+.SH VERSION
+.TP
+.B const char *pakka_version(void);
+Returns the linked library's version string (e.g. \(dq1.5.0\(dq). Static
+storage, never
+.BR NULL .
+Useful for runtime feature gating in language bindings or for embedding
+the linked library version in a host application's diagnostics.
+.SH ARCHIVE LIFECYCLE
+.TP
+.B pakka_status_t pakka_open(const char *path, pakka_open_mode_t mode, pakka_archive_t **out, pakka_error_t *err);
+Open an existing archive.
+.B mode
+is
+.B PAKKA_OPEN_READ
+or
+.BR PAKKA_OPEN_READ_WRITE .
+Format is auto-detected from the on-disk magic.
+.TP
+.B pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode, pakka_format_t format_hint, pakka_archive_t **out, pakka_error_t *err);
+Same as
+.B pakka_open
+but lets the caller pin the format.
+.B PAKKA_FORMAT_AUTO
+preserves the default probe; other values skip auto-detection and assert
+that the on-disk magic is compatible with the hint. Useful for the
+PACK ambiguity between Quake and Daikatana.
+.TP
+.B pakka_status_t pakka_create(const char *path, pakka_format_t format, unsigned flags, pakka_archive_t **out, pakka_error_t *err);
+Create a new archive. The file is not finalized on disk until the first
+successful
+.BR pakka_commit ,
+which means a failed create leaves no partial archive at
+.IR path .
+.B flags
+must be
+.B PAKKA_CREATE_DEFAULT
+(0) in this release; non-zero values are reserved and return
+.BR PAKKA_ERR_INVALID_ARGUMENT .
+.TP
+.B pakka_status_t pakka_close(pakka_archive_t *archive, pakka_error_t *err);
+Release the archive. If the handle has uncommitted changes,
+.B pakka_close
+implicitly calls
+.B pakka_commit
+first \(em equivalent to a manual commit followed by close. A failed
+implicit commit is sticky: the handle is still freed, but
+.B pakka_close
+returns the commit error and, for a
+.BR pakka_create -style
+handle, skips the final rename so a broken create isn't published.
+Always
+.B pakka_close
+every archive returned by
+.B pakka_open
+or
+.BR pakka_create ,
+including on error paths.
+.SH READ INTROSPECTION
+.TP
+.B pakka_format_t pakka_format(const pakka_archive_t *archive);
+Returns the format detected (or pinned) at open time.
+.TP
+.B size_t pakka_entry_count(const pakka_archive_t *archive);
+Total entry count.
+.TP
+.B pakka_status_t pakka_entry_at(const pakka_archive_t *archive, size_t index, const pakka_entry_t **out);
+Fetch the entry handle at
+.IR index .
+Returns
+.B PAKKA_ERR_NOT_FOUND
+if
+.I index
+is out of range.
+.TP
+.B pakka_status_t pakka_find_entry(const pakka_archive_t *archive, const char *entry_name, const pakka_entry_t **out);
+O(n) name lookup. Returns
+.B PAKKA_ERR_NOT_FOUND
+if the name is not present.
+.SH ENTRY ACCESSORS
+Entry handles are opaque; the accessors below return data owned by the
+archive.
+.TP
+.B const char *pakka_entry_name(const pakka_entry_t *entry);
+NUL-terminated entry name. Valid until the archive is closed.
+.TP
+.B uint64_t pakka_entry_size(const pakka_entry_t *entry);
+Uncompressed payload size, in bytes.
+.TP
+.B uint64_t pakka_entry_offset(const pakka_entry_t *entry);
+Offset of the entry's payload inside the archive file.
+.TP
+.B uint64_t pakka_entry_compressed_size(const pakka_entry_t *entry);
+On-disk (compressed) payload size. Equals
+.B pakka_entry_size
+for STORED entries. For DEFLATE PK3 / PK4 entries it is the compressed
+stream length between the local file header and the next entry; for
+compressed Daikatana entries it is the on-disk codec-stream length.
+.SH STREAMING READS
+A
+.B pakka_reader_t
+is a stateful cursor into one entry. Multiple readers may be open on the
+same archive simultaneously:
+.B pakka_reader_read
+re-seeks the archive's file handle before every read so interleaved
+readers stay coherent. A reader becomes invalid the moment its archive
+is closed; callers must
+.B pakka_reader_close
+every reader before
+.BR pakka_close .
+.TP
+.B pakka_status_t pakka_open_entry(pakka_archive_t *archive, const char *entry_name, pakka_reader_t **out, pakka_error_t *err);
+Open a streaming reader by entry name. O(n) lookup.
+.TP
+.B pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive, const pakka_entry_t *entry, pakka_reader_t **out, pakka_error_t *err);
+Open a streaming reader from a handle obtained via
+.BR pakka_entry_at .
+Skips the O(n) name lookup. The entry must come from the same archive;
+passing a stale pointer after
+.BR pakka_delete / pakka_commit
+is undefined behavior.
+.TP
+.B pakka_status_t pakka_reader_read(pakka_reader_t *reader, void *buf, size_t len, size_t *nread, pakka_error_t *err);
+Read up to
+.I len
+bytes into
+.IR buf .
+.I *nread
+is set to the bytes returned this call (0 at EOF).
+.TP
+.B void pakka_reader_close(pakka_reader_t *reader);
+Release the reader. The archive owns the underlying
+.BR FILE *;
+.B pakka_reader_close
+only frees the reader handle.
+.SH WHOLE-ENTRY CONVENIENCE
+.TP
+.B pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive, const char *entry_name, void **data, size_t *len, pakka_error_t *err);
+Read an entry's full payload into a freshly-allocated buffer. On
+success,
+.B *data
+and
+.B *len
+are populated; the caller MUST release the buffer with
+.B pakka_free
+\(em not
+.BR free (3).
+On Windows the library may be linked to a different C runtime than the
+caller, so
+.BR free (3)
+across the boundary is undefined. Zero-byte entries return
+.BR *data
+==
+.BR NULL ,
+.BR *len
+== 0,
+.BR PAKKA_OK .
+.TP
+.B void pakka_free(void *ptr);
+Release a buffer returned by
+.BR pakka_read_entry_alloc .
+.B NULL
+is a no-op.
+.SH MUTATION
+A handle opened with
+.B PAKKA_OPEN_READ_WRITE
+(or created via
+.BR pakka_create )
+accepts adds and deletes. Changes accumulate in memory until
+.BR pakka_commit ;
+.B pakka_close
+implicitly commits.
+.TP
+.B pakka_status_t pakka_add_file(pakka_archive_t *archive, const char *source_path, const char *entry_name, pakka_error_t *err);
+Add a file from disk under
+.IR entry_name .
+Validation: entry-name length, unsafe-name rules, duplicate name
+(IWAD / PWAD allow duplicates), source symlink / regular-file checks,
+and the u32 size cap. The timing of the source read is format-specific:
+.RS
+.IP \(bu 2
+.B PAK / SiN:
+source bytes are read and written into the archive immediately. After
+return, source_path can be freely modified or deleted.
+.IP \(bu 2
+.B PK3 / PK4 STORED (default):
+the CRC32 + size are recorded and the source path is stashed; the bytes
+are re-read at commit time. The caller MUST keep
+.I source_path
+readable and unchanged until
+.BR pakka_commit / pakka_close
+returns. A modified-since-add source causes commit to refuse with
+.BR PAKKA_ERR_FORMAT .
+.IP \(bu 2
+.B PK3 / PK4 DEFLATE
+(after
+.BR pakka_set_compression ):
+the source is read fully into memory at add time, compressed (or kept
+STORED if DEFLATE didn't win), and the resulting bytes are stashed in
+an in-memory buffer. The CRC32 is recomputed over the captured bytes.
+After return, source_path can be freely modified or deleted.
+.IP \(bu 2
+.B Daikatana:
+source bytes are read fully into memory and encoded through
+.B pakka_dk_deflate
+when the entry name ends in
+.IR .tga / .bmp / .wal / .pcx / .bsp ;
+everything else is STORED. After return, source_path can be freely
+modified or deleted.
+.RE
+.TP
+.B pakka_status_t pakka_add_memory(pakka_archive_t *archive, const char *entry_name, const void *data, size_t len, pakka_error_t *err);
+Add an entry whose payload comes from an in-memory buffer. Same
+validation as
+.BR pakka_add_file .
+The buffer is copied synchronously, so the caller can free
+.B data
+as soon as this function returns.
+.B len
+== 0 produces a zero-byte entry.
+.TP
+.B pakka_status_t pakka_delete(pakka_archive_t *archive, const char *entry_name, pakka_error_t *err);
+Mark an entry for deletion. The on-disk archive is not modified until
+.BR pakka_commit / pakka_close .
+.TP
+.B pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err);
+Flush all pending adds and deletes to disk. PAK / SiN / Daikatana
+rewrite the directory and tail in place; PK3 / PK4 write to a temp file
+and rename atomically on success.
+.SH VERIFICATION
+.TP
+.B pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags, pakka_report_fn report, void *userdata, pakka_error_t *err);
+Walk every entry and report integrity findings. The same name-safety
+check used at extract time runs against each entry; each payload is
+streamed to confirm the directory's offset / length point at readable
+bytes; and entries that would collide after portable-union normalization
+(case fold, slash / backslash, trailing dot / space) are flagged.
+.B flags
+accepts
+.BR PAKKA_VERIFY_DEEP ,
+which adds per-entry decompression and CRC32 checks on PK3 / PK4
+(no effect on PAK, which has no per-entry checksum).
+.B report
+(optional, may be
+.BR NULL )
+is called once per finding with severity, status, entry name (NULL for
+archive-wide findings), and a human-readable message. Returns
+.B PAKKA_OK
+if every finding was
+.BR INFO / WARNING ;
+otherwise returns the first
+.BR ERROR -level
+status.
+.PP
+The callback signature:
+.PP
+.RS 4
+.nf
+typedef void (*pakka_report_fn)(void *userdata,
+                                pakka_report_severity_t severity,
+                                pakka_status_t status,
+                                const char *entry_name,
+                                const char *message);
+.fi
+.RE
+.PP
+Severities are
+.BR PAKKA_REPORT_INFO ,
+.BR PAKKA_REPORT_WARNING ,
+.BR PAKKA_REPORT_ERROR .
+.SH TUNING
+.TP
+.B pakka_status_t pakka_set_max_decompressed_size(pakka_archive_t *archive, uint64_t max_bytes, pakka_error_t *err);
+Cap the maximum payload size that
+.BR pakka_open_entry / pakka_read_entry_alloc
+will accept. Set to 0 to disable the cap. Default is 64 MiB. For
+PK3 / PK4 and compressed Daikatana entries, this caps both the
+declared uncompressed size and the on-disk compressed size, so peak
+resident bytes during inflate are bounded by 2x the cap per open
+reader. Mitigates zip-bomb-style high-ratio entries before they hit
+RAM.
+.TP
+.B pakka_status_t pakka_set_compression(pakka_archive_t *archive, pakka_compression_t method, pakka_error_t *err);
+Set the compression method applied to subsequent
+.BR pakka_add_file / pakka_add_memory
+calls. Sticky on the archive handle until changed; default at
+.BR pakka_open / pakka_create
+time is
+.BR PAKKA_COMPRESSION_STORE .
+.B PAKKA_COMPRESSION_DEFLATE
+is accepted only on writable PK3 / PK4 archives; other formats return
+.BR PAKKA_ERR_INVALID_ARGUMENT .
+When DEFLATE is set, each add still falls back to STORED for that entry
+if the compressed payload is not smaller than the source.
+.SH ERROR HANDLING
+Every fallible function returns a
+.B pakka_status_t
+and optionally populates a caller-provided
+.B pakka_error_t
+out-parameter. The
+.B pakka_error_t
+struct carries:
+.IP \(bu 2
+.B status
+\(em a copy of the return value.
+.IP \(bu 2
+.B domain
+\(em one of
+.BR PAKKA_ERR_DOMAIN_NONE ", " PAKKA_ERR_DOMAIN_ERRNO ", " PAKKA_ERR_DOMAIN_WIN32 .
+.IP \(bu 2
+.B system_code
+\(em the
+.BR errno (3)
+value (POSIX) or
+.BR GetLastError ()
+value (Windows) at the time of the failure.
+.IP \(bu 2
+.BR operation ", " entry_name ", " entry_index ", " offset ", " length
+\(em populated when the failure has a specific locus.
+.IP \(bu 2
+.B message
+\(em a NUL-terminated human-readable description. Truncation is signalled
+by the
+.B message_truncated
+flag.
+.PP
+Pass
+.B NULL
+to ignore the structured detail \(em the return value alone is enough
+to drive control flow.
+.SH THREAD SAFETY
+libpakka has no global mutable state. Different threads may operate on
+different
+.B pakka_archive_t
+handles concurrently. Concurrent calls against the same archive
+.B pakka_archive_t
+\(em including
+.B pakka_reader_t
+operations whose archive is shared \(em are not internally synchronised
+and must be serialised by the caller.
+.SH ALLOCATION OWNERSHIP
+.B pakka_archive_t ,
+.B pakka_entry_t ,
+and
+.B pakka_reader_t
+handles are owned by the library and must be released via their
+matching
+.B pakka_close
+/
+.B pakka_reader_close
+calls.
+.B pakka_entry_t
+pointers are non-owning views into the archive's directory and are
+invalidated by
+.BR pakka_delete / pakka_commit / pakka_close .
+Buffers returned by
+.B pakka_read_entry_alloc
+must be released via
+.B pakka_free
+\(em not the host
+.BR free (3).
+.SH EXAMPLE
+.nf
+#include <pakka.h>
+#include <stdio.h>
+
+static void report_cb(void *ud, pakka_report_severity_t sev,
+                      pakka_status_t st, const char *name,
+                      const char *msg) {
+    (void)ud; (void)st;
+    fprintf(stderr, "[%d] %s: %s\\n", (int)sev,
+            name ? name : "<archive>", msg);
+}
+
+int main(int argc, char **argv) {
+    if (argc < 2) return 2;
+    pakka_archive_t *a;
+    pakka_error_t err;
+    if (pakka_open(argv[1], PAKKA_OPEN_READ, &a, &err) != PAKKA_OK) {
+        fprintf(stderr, "pakka_open: %s\\n", err.message);
+        return 1;
+    }
+    for (size_t i = 0; i < pakka_entry_count(a); i++) {
+        const pakka_entry_t *e;
+        pakka_entry_at(a, i, &e);
+        printf("%s (%llu bytes)\\n",
+               pakka_entry_name(e),
+               (unsigned long long)pakka_entry_size(e));
+    }
+    pakka_verify(a, PAKKA_VERIFY_DEEP, report_cb, NULL, &err);
+    pakka_close(a, &err);
+    return 0;
+}
+.fi
+.PP
+.B test/c_api_test.c
+in the source tree exercises every public function and is the canonical
+example of call patterns.
+.SH SEE ALSO
+.BR pakka (1)
+.SH AUTHOR
+Aaron Bonner
+.SH LICENSE
+MIT. See the LICENSE file shipped with this distribution.

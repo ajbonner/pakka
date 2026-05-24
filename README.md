@@ -15,20 +15,80 @@ very brave and do choose to use this software and find a problem, please let
 me know!
 
 ## Installation
-    $ git clone https://github.com/ajbonner/pakka.git
+
+### From the source tarball (Unix)
+
+Each tagged release attaches a `pakka-X.Y.Z.tar.gz` source tarball and a
+SHA-256 sidecar to the [GitHub release](https://github.com/ajbonner/pakka/releases).
+Grab them, verify the checksum, build, and install:
+
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.5.0/pakka-1.5.0.tar.gz
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.5.0/pakka-1.5.0.tar.gz.sha256
+    $ shasum -a 256 -c pakka-1.5.0.tar.gz.sha256
+    $ tar xzf pakka-1.5.0.tar.gz
+    $ cd pakka-1.5.0
     $ make
 
-Requires GNU make. On BSD systems, install `gmake` and use `gmake` in place of
-`make`.
+Then pick one install flavor:
+
+    $ sudo make install                    # system-wide to /usr/local
+    $ make install PREFIX=$HOME/.local     # user-only, no root
+    $ make install DESTDIR=/tmp/stage      # packager staging (.deb / .rpm / pkg)
+
+`PREFIX` defaults to `/usr/local`, which is root-owned on most systems —
+plain `make install` will fail with "permission denied" without `sudo` or
+a user-writable `PREFIX`. `make uninstall` reverses any of the above
+(pass the same `PREFIX` / `DESTDIR` you installed with).
+
+Installed layout (Unix conventions, via the GNU install dirs):
+
+| File | Path |
+|---|---|
+| `pakka` (CLI) | `$(PREFIX)/bin/pakka` |
+| `libpakka.a` (static lib) | `$(PREFIX)/lib/libpakka.a` |
+| `pakka.h` (public header) | `$(PREFIX)/include/pakka.h` |
+| `pakka(1)` (manpage) | `$(PREFIX)/share/man/man1/pakka.1` |
+| README + LICENSE | `$(PREFIX)/share/doc/pakka/` |
+
+Requires GNU make and a C99 compiler. On BSD systems install `gmake` and
+use `gmake` in place of `make`. The build is dependency-free at runtime —
+the DEFLATE codec is bundled. `PAKKA_DEFLATE_BACKEND=zlib` opts into the
+system `libz` instead, for integrators who already link it.
+
+### From the Windows zip
+
+Releases also ship `pakka-X.Y.Z-windows-x64.zip`. Unzip it anywhere; add
+the extracted `bin\` directory to your `PATH`, or copy `bin\pakka.exe`
+into a directory already on `PATH`. The zip layout matches the Unix
+install:
+
+    pakka-1.5.0-windows-x64\
+      bin\pakka.exe
+      lib\pakka.lib          # static lib for integrators
+      include\pakka.h        # public C header
+      share\man\man1\pakka.1
+      share\doc\pakka\README.md
+      share\doc\pakka\LICENSE
+
+### From source (git clone)
+
+For contributors:
+
+    $ git clone https://github.com/ajbonner/pakka.git
+    $ cd pakka
+    $ make
 
 `make` produces two artifacts:
 
 * `./pakka` — the command-line binary documented below.
-* `build/lib/libpakka.a` — a static library exposing pakka's archive
-  operations as a C99 API. The public header is at `include/pakka.h`;
-  every exported symbol is prefixed `pakka_` and `make symbol-audit`
-  fails the build if anything else leaks out. See the C library section
-  below.
+* `build/lib-prod/libpakka.a` — a static library exposing pakka's
+  archive operations as a C99 API. The public header is at
+  `include/pakka.h`; every exported symbol is prefixed `pakka_` and
+  `make symbol-audit` fails the build if anything else leaks out. See
+  the C library section below.
+
+`make dist` produces the release tarball locally (`pakka-X.Y.Z.tar.gz` +
+SHA-256 sidecar) via `git archive HEAD`.
 
 ### Building on Windows (MSVC)
 
@@ -129,6 +189,9 @@ other than STORED (0) and DEFLATE (8). Each refusal returns
 `PAKKA_ERR_UNSUPPORTED` with a clear message.
 
 ### Using libpakka from C
+
+See `pakka(3)` (installed at `${MANDIR}/man3/pakka.3` by `make install`,
+or `man/pakka.3` in this tree) for the full API reference.
 
 `include/pakka.h` exposes 24 functions for opening, inspecting,
 extracting from, and mutating pak archives:

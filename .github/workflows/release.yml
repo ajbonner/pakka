@@ -14,8 +14,16 @@ permissions:
   contents: write
 
 jobs:
-  release:
+  # First job: gatekeeper. Validates the tag shape, confirms the
+  # Makefile and CMakeLists.txt versions match, and exports both `tag`
+  # (v1.5.0 — used in release title / git refs) and `version` (1.5.0 —
+  # used in artifact filenames; matches CPack's CPACK_PACKAGE_FILE_NAME)
+  # to downstream jobs.
+  verify:
     runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
     steps:
       - uses: actions/checkout@v6
         with:
@@ -43,13 +51,15 @@ jobs:
               echo "tag '$tag' is not strictly vX.Y.Z" >&2
               exit 1
           fi
+          version="${tag#v}"
           echo "tag=$tag" >> "$GITHUB_OUTPUT"
+          echo "version=$version" >> "$GITHUB_OUTPUT"
       - name: Verify Makefile and CMakeLists.txt versions match the tag
         env:
+          VERSION: ${{ steps.tag.outputs.version }}
           TAG: ${{ steps.tag.outputs.tag }}
         run: |
           set -euo pipefail
-          version="${TAG#v}"
           make_version=$(awk -F= '
               /^MAJOR=/{ maj=$2 }
               /^MINOR=/{ min=$2 }
@@ -61,28 +71,112 @@ jobs:
                   for (i=1; i<=NF; i++) if ($i == "VERSION") { print $(i+1); exit }
               }
           ' CMakeLists.txt)
-          if [ "$make_version" != "$version" ]; then
-              echo "Makefile version is $make_version, tag is $version" >&2
+          if [ "$make_version" != "$VERSION" ]; then
+              echo "Makefile version is $make_version, tag is $VERSION" >&2
               exit 1
           fi
-          if [ "$cmake_version" != "$version" ]; then
-              echo "CMakeLists.txt version is $cmake_version, tag is $version" >&2
+          if [ "$cmake_version" != "$VERSION" ]; then
+              echo "CMakeLists.txt version is $cmake_version, tag is $VERSION" >&2
               exit 1
           fi
-          echo "Makefile and CMakeLists.txt both at $version — matches $TAG"
+          echo "Makefile and CMakeLists.txt both at $VERSION — matches $TAG"
+
+  # Source tarball — `make dist` invokes `git archive HEAD` to produce
+  # pakka-X.Y.Z.tar.gz + a SHA-256 sidecar. The fetch-depth: 0 above
+  # leaves the tag in the work tree at HEAD, which is what git archive
+  # snapshots.
+  linux-tarball:
+    needs: verify
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ needs.verify.outputs.tag }}
+      - name: Build source tarball
+        run: make dist
+      - uses: actions/upload-artifact@v7
+        with:
+          name: source-tarball
+          path: |
+            pakka-*.tar.gz
+            pakka-*.tar.gz.sha256
+          if-no-files-found: error
+
+  # Windows ZIP — CMake + Ninja build, then `cpack -G ZIP` produces
+  # pakka-X.Y.Z-windows-x64.zip under build/cmake/. Compute SHA-256
+  # sidecar alongside it. Note: PowerShell uses backtick (`) for line
+  # continuation, not `\`; and the zip is in build/cmake/, not the
+  # workspace root.
+  windows-zip:
+    needs: verify
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.tag }}
+      - name: Build pakka.exe and package ZIP
+        shell: pwsh
+        run: |
+          cmake -B build/cmake -G Ninja .
+          cmake --build build/cmake
+          Push-Location build/cmake
+          cpack -G ZIP
+          Pop-Location
+      - name: Compute SHA-256 sidecar
+        shell: pwsh
+        run: |
+          $version = "${{ needs.verify.outputs.version }}"
+          $zipName = "pakka-$version-windows-x64.zip"
+          $zipPath = "build/cmake/$zipName"
+          if (-not (Test-Path $zipPath)) {
+              throw "expected $zipPath after cpack — not found"
+          }
+          $hash = (Get-FileHash $zipPath -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $zipName" | Out-File "$zipPath.sha256" -Encoding ascii
+      - uses: actions/upload-artifact@v7
+        with:
+          name: windows-zip
+          path: |
+            build/cmake/pakka-*-windows-x64.zip
+            build/cmake/pakka-*-windows-x64.zip.sha256
+          if-no-files-found: error
+
+  # Final job: download both build-job artifacts and attach them to a
+  # fresh GitHub release. --generate-notes derives the changelog from
+  # commits since the previous release tag; --verify-tag protects
+  # against a typo'd workflow_dispatch input. We still check out the
+  # tagged source so `gh release create` has repo context without
+  # relying on env vars.
+  release:
+    needs: [verify, linux-tarball, windows-zip]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          ref: ${{ needs.verify.outputs.tag }}
+      - uses: actions/download-artifact@v8
+        with:
+          path: dist
+          merge-multiple: true
       - name: Create release
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ steps.tag.outputs.tag }}
+          TAG: ${{ needs.verify.outputs.tag }}
         run: |
-          # GitHub auto-attaches Source code (zip) and Source code (tar.gz)
-          # archives to every release; they are produced by `git archive`
-          # against the tag and live at /archive/refs/tags/$TAG.{zip,tar.gz}.
-          # --generate-notes derives a changelog from commits since the
-          # previous release tag. --verify-tag ensures the tag actually
-          # exists in the repo (fails fast if release.yml was triggered
-          # by a workflow_dispatch with a non-existent tag).
+          # GitHub auto-attaches "Source code (zip)" and "Source code
+          # (tar.gz)" archives via /archive/refs/tags/$TAG; the explicit
+          # `dist/*` we add here are the curated, SHA-pinned artifacts
+          # (pakka-X.Y.Z.tar.gz, pakka-X.Y.Z-windows-x64.zip, and their
+          # .sha256 sidecars). --generate-notes derives a changelog from
+          # commits since the previous release tag; --verify-tag fails
+          # fast if release.yml was triggered by a workflow_dispatch
+          # with a non-existent tag.
           gh release create "$TAG" \
               --title "Pakka $TAG" \
               --generate-notes \
-              --verify-tag
+              --verify-tag \
+              dist/*

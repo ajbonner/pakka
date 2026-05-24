@@ -1,0 +1,284 @@
+.\" man page for pakka(1)
+.TH PAKKA 1 2026-05-23 "" "Pakka Manual"
+.SH NAME
+pakka \- list, extract, create, and modify game-engine archives
+.SH SYNOPSIS
+.B pakka
+.B \-l
+.RI [ --tree ]
+.RI [ --format \ name ]
+.IR archive
+.br
+.B pakka
+.B \-x
+.RI [ -C \ destination ]
+.RI [ --format \ name ]
+.IR archive
+.RI [ path... ]
+.br
+.B pakka
+.B \-c
+.RI [ --compress ]
+.RI [ --format \ name ]
+.IR archive
+.RI [ path... ]
+.RI [ "--as " entry " " source ]...
+.br
+.B pakka
+.B \-a
+.RI [ --compress ]
+.RI [ --format \ name ]
+.IR archive
+.RI [ path... ]
+.RI [ "--as " entry " " source ]...
+.br
+.B pakka
+.B \-d
+.IR archive " " path...
+.br
+.B pakka
+.B \-\-verify
+.RI [ --deep ]
+.IR archive
+.br
+.B pakka
+.BR \-h | \-\-help
+.br
+.B pakka
+.BR \-V | \-\-version
+.SH DESCRIPTION
+.B pakka
+is a command-line utility for reading and writing archive formats used by
+classic and modern id Tech / GoldSrc / Daikatana / SiN game engines:
+.IP \(bu 2
+Quake 1 / 2 PAK and GoldSrc PAK (Half-Life 1, Counter-Strike 1.6, TFC,
+Sven Co-op \(em bit-identical to the Quake PAK layout)
+.IP \(bu 2
+SiN
+.RB ( SPAK ", "
+120-byte names)
+.IP \(bu 2
+Daikatana PAK (PACK magic, 72-byte directory entries, custom byte codec)
+.IP \(bu 2
+Doom 1 / 2 IWAD and PWAD (8-byte lump names, duplicates allowed)
+.IP \(bu 2
+Quake 3 PK3 and Doom 3 PK4 (ZIP containers, STORED and DEFLATE)
+.PP
+The archive path is the first positional argument; any further positionals
+are entry names (for
+.BR \-x " / " \-d )
+or source files (for
+.BR \-a " / " \-c ).
+All option flags (including
+.BR \-C )
+must come before the archive \(em pakka's getopt is POSIX-strict and stops
+scanning at the first positional.
+.PP
+On
+.BR \-c " or " \-a
+the destination format is picked from the archive's extension
+(case-insensitive):
+.B .pk3
+\(rA PK3,
+.B .pk4
+\(rA PK4,
+.B .sin
+\(rA SiN,
+.B .wad
+\(rA PWAD, anything else \(rA PAK.
+.B \-\-format
+overrides the sniffer.
+.SH OPERATION MODES
+Exactly one of the operation flags below must be given.
+.TP
+.B \-l
+List archive contents. Each entry is printed one per line. With
+.B \-\-tree
+the listing is rendered as a UTF-8 box-drawing directory tree.
+.TP
+.B \-x
+Extract entries from the archive. With no path arguments every entry is
+extracted; with one or more path arguments only those entries are
+extracted (pakka errors if a requested path is not in the archive).
+.B \-C
+selects a destination directory (defaults to the current working
+directory).
+.TP
+.B \-c
+Create a new archive. Each positional path is added; directories are
+walked recursively.
+.B \-\-as
+adds a single file under an explicit entry name (the source path on disk
+and the name stored in the archive can differ) and is repeatable.
+.TP
+.B \-a
+Add entries to an existing archive. Same path / \-\-as semantics as
+.BR \-c .
+.TP
+.B \-d
+Delete entries from an archive. Requires at least one path argument.
+.TP
+.B \-\-verify
+Walk every entry; run the same name-safety check used at extract time;
+stream each payload to confirm the directory's offset / length point at
+readable bytes; flag entries that would collide after portable-union
+normalization (case fold, slash / backslash, trailing dot / space).
+Exits non-zero on any error-level finding.
+.B \-\-deep
+adds per-entry CRC32 (PK3 / PK4) and full decompression (Daikatana) on top
+of the structural walk.
+.TP
+.BR \-h ", " \-\-help
+Print a usage summary and exit.
+.TP
+.BR \-V ", " \-\-version
+Print the linked libpakka version, build date, and supported-format
+matrix; exit 0.
+.SH OPTIONS
+.TP
+.BI \-C " destination"
+Destination directory for
+.BR \-x .
+Pakka refuses to follow symlinks or reparse points when descending into
+this directory.
+.TP
+.B \-\-tree
+With
+.BR \-l ,
+render the listing as a directory tree instead of one entry per line.
+.TP
+.BI \-\-format " name"
+Pin the archive format. Accepted names:
+.BR pak ,
+.B goldsrc
+and
+.B hl
+(aliases for
+.BR pak ),
+.BR sin ,
+.BR daikatana ,
+.BR iwad ,
+.BR pwad ,
+.BR pk3 ,
+.BR pk4 .
+On open, skips auto-detection; on create, overrides the extension
+sniffer. Required when opening an archive whose PACK magic is ambiguous
+between Quake and Daikatana.
+.TP
+.BI \-\-as " entry source"
+Add a single file from
+.I source
+under entry name
+.IR entry .
+Only valid with
+.BR \-c " or " \-a .
+Repeatable; may be mixed with plain path arguments.
+.TP
+.B \-\-deep
+With
+.BR \-\-verify ,
+adds per-entry CRC32 (PK3 / PK4) and full decompression (Daikatana) on
+top of the structural walk.
+.TP
+.B \-\-compress
+With
+.BR \-c " or " \-a
+on a PK3 or PK4 archive, DEFLATE-encode added entries instead of STORED.
+Per-entry auto-fallback to STORED when DEFLATE would not beat STORED for
+that input. Rejected on non-ZIP archives.
+.SH EXIT STATUS
+.TP
+.B 0
+Success.
+.TP
+.B 1
+Usage error, I/O failure, verify integrity failure, or other runtime
+error. The message is written to standard error.
+.TP
+.B 2
+Internal setup error (e.g. out-of-memory while converting the command
+line).
+.SH EXAMPLES
+List the contents of a Quake PAK:
+.PP
+.RS 4
+.nf
+pakka -l pak0.pak
+.fi
+.RE
+.PP
+Render the same listing as a directory tree:
+.PP
+.RS 4
+.nf
+pakka -l --tree pak0.pak
+.fi
+.RE
+.PP
+Verify every entry's name safety and payload readability:
+.PP
+.RS 4
+.nf
+pakka --verify pak0.pak
+.fi
+.RE
+.PP
+Add a single file under an explicit entry name:
+.PP
+.RS 4
+.nf
+pakka -a pak0.pak --as maps/foo.bsp /tmp/foo.bsp
+.fi
+.RE
+.PP
+Extract one specific entry into a destination directory:
+.PP
+.RS 4
+.nf
+pakka -x -C /tmp/out pak0.pak models/weapons/g_blast/base.pcx
+.fi
+.RE
+.PP
+Create a DEFLATE-compressed PK3 from a tree:
+.PP
+.RS 4
+.nf
+pakka -c --compress pak0.pk3 maps/ scripts/ textures/
+.fi
+.RE
+.SH SECURITY
+Pak entry names are attacker-controlled. Pakka validates every entry name
+before any
+.BR mkdir ,
+.BR fopen ,
+or
+.B fread
+call. Rejected names include absolute paths, drive-letter and UNC
+prefixes,
+.B ..
+path components, names containing a colon, names ending in
+.RB \(dq . \(dq
+or space, control bytes, and the Windows reserved device names
+.RB ( CON ", " PRN ", " AUX ", " NUL ", " COM1 \- COM9 ", " LPT1 \- LPT9 ).
+Both POSIX and Windows traversal forms are checked regardless of host OS.
+The same rules apply to the entry-name side of
+.B \-a
+and
+.BR \-\-as ,
+so a pak built with pakka can be re-extracted with pakka without
+surprises. See README.md for the complete validator policy.
+.SH FILES
+.TP
+.I archive
+The archive on which pakka operates. PK3 and PK4 are ZIP containers; PAK
+and SiN are id-style "PACK" / "SPAK" with fixed-width directory entries
+at the file tail. Daikatana shares Quake's "PACK" magic with a
+72-byte entry layout.
+.SH SEE ALSO
+.BR tar (1),
+.BR unzip (1),
+.BR zip (1)
+.SH AUTHOR
+Aaron Bonner
+.SH LICENSE
+MIT. See the LICENSE file shipped with this distribution.
