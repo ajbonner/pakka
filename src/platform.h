@@ -63,7 +63,7 @@
  * library callers passing CP1252/CP1251/etc. bytes will get the wrong
  * file. On POSIX the helpers are one-line wrappers and the host's
  * narrow encoding (UTF-8 in practice on every supported libc) is
- * passed through. See dev/docs/windows-codepage.md. */
+ * passed through. See docs/formats/windows-codepage.md. */
 
 char *pakka_platform_realpath(const char *path, char *resolved);
 char *pakka_platform_getcwd(char *buf, size_t size);

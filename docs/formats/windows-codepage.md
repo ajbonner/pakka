@@ -153,8 +153,8 @@ reaches the writer from a CLI invocation is already UTF-8.
 `write_pak_entry` in `src/pakfile.c` handles all four formats off
 the same geometry table; it copies the entry-name bytes verbatim
 into the fixed-size name field — 8 bytes for WAD, 56 bytes for
-PAK / Daikatana, 120 bytes for SiN. See the per-format docs under
-`dev/docs/` for the full directory-entry layouts. None of these
+PAK / Daikatana, 120 bytes for SiN. See the per-format docs in this
+directory for the full directory-entry layouts. None of these
 formats carry encoding metadata. The convention pakka writes — and
 reads on a round-trip — is UTF-8.
 

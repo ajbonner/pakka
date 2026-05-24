@@ -79,8 +79,8 @@ directory layouts at open time; `--format daikatana` pins the decision
 when the on-disk geometry is ambiguous.
 
 The compression codec is documented opcode-by-opcode in
-[`../dev/docs/daikatana-pak-format.md`](../dev/docs/daikatana-pak-format.md)
-and [`../src/dk_codec.c`](../src/dk_codec.c). Reference decoder:
+[`formats/daikatana-pak-format.md`](formats/daikatana-pak-format.md)
+and in `src/dk_codec.c` in the repo. Reference decoder:
 yquake2/pakextract.
 
 ## Doom IWAD / PWAD specifics
@@ -102,7 +102,7 @@ matter:
 
 `.wad` defaults to PWAD on create; pass `--format iwad` for the base
 flavour. Full on-disk layout in
-[`../dev/docs/wad-format.md`](../dev/docs/wad-format.md).
+[`formats/wad-format.md`](formats/wad-format.md).
 
 ## PK3 / PK4 ZIP features
 
@@ -126,19 +126,18 @@ named in the message.
 ## On-disk format references
 
 For format internals — directory geometry, header layout, byte
-ordering, codec opcode tables — see the per-format references in
-[`../dev/docs/`](../dev/docs/):
+ordering, codec opcode tables — see the per-format references:
 
-* [`quake-pak-format.md`](../dev/docs/quake-pak-format.md) — Quake 1 /
+* [Quake PAK](formats/quake-pak-format.md) — Quake 1 /
   Quake 2 / GoldSrc (`"PACK"`, 56-byte names, 64-byte entries)
-* [`sin-pak-format.md`](../dev/docs/sin-pak-format.md) — SiN (`"SPAK"`,
+* [SiN](formats/sin-pak-format.md) — SiN (`"SPAK"`,
   120-byte names, 128-byte entries)
-* [`daikatana-pak-format.md`](../dev/docs/daikatana-pak-format.md) —
+* [Daikatana](formats/daikatana-pak-format.md) —
   Daikatana (72-byte entries, custom byte-codec opcode table)
-* [`pk3-pk4-format.md`](../dev/docs/pk3-pk4-format.md) — PK3 / PK4 ZIP
+* [PK3 / PK4](formats/pk3-pk4-format.md) — PK3 / PK4 ZIP
   container subset
-* [`wad-format.md`](../dev/docs/wad-format.md) — Doom IWAD / PWAD
+* [Doom WAD](formats/wad-format.md) — Doom IWAD / PWAD
   (12-byte header, 16-byte entries, 8-byte lump names, duplicates
   allowed)
-* [`windows-codepage.md`](../dev/docs/windows-codepage.md) — PK3 / PK4
-  filename encoding policy
+* [Windows codepage](formats/windows-codepage.md) — PK3 / PK4
+  filename encoding policy on Windows

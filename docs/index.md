@@ -32,13 +32,22 @@ supporting reference.
 - [Testing](testing.md) — Windows CTest path, realpak opt-in
   suites, `make lint`.
 
-## Source-level format references
+## On-disk format references
 
-For on-disk format internals — directory geometry, codec opcode
-tables, byte ordering — see the
-[`dev/docs/`](https://github.com/ajbonner/pakka/tree/master/dev/docs)
-references in the repo. Those are aimed at contributors working on
-pakka itself.
+For format internals — directory geometry, header layout, byte
+ordering, codec opcode tables — see the per-format pages:
+
+- [Quake PAK](formats/quake-pak-format.md) — `"PACK"`, 56-byte names,
+  64-byte directory entries.
+- [SiN](formats/sin-pak-format.md) — `"SPAK"`, 120-byte names,
+  128-byte directory entries.
+- [Daikatana](formats/daikatana-pak-format.md) — 72-byte entries,
+  custom byte-codec opcode table.
+- [PK3 / PK4](formats/pk3-pk4-format.md) — ZIP container subset.
+- [Doom WAD](formats/wad-format.md) — IWAD / PWAD, 16-byte entries,
+  8-byte lump names, duplicates allowed.
+- [Windows codepage](formats/windows-codepage.md) — PK3 / PK4
+  filename encoding policy on Windows.
 
 ## Releases
 

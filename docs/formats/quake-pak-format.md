@@ -126,8 +126,8 @@ only metadata is name + offset + length.
 This makes the format trivially mmap-friendly (the engine maps the
 whole archive once and serves entries as `(base + file_pos,
 file_length)` ranges) at the cost of zero compression-ratio savings.
-Quake 3 moved to ZIP (PK3) precisely for that — see `dev/docs/`
-sibling docs when they exist.
+Quake 3 moved to ZIP (PK3) precisely for that — see the
+[PK3 / PK4 reference](pk3-pk4-format.md).
 
 ### 2.5 No directory ordering invariant
 
@@ -274,7 +274,7 @@ Daikatana           "PACK"            56               72            yes
 - **Daikatana** (Ion Storm, 2000) extends each entry with two
   trailing u32s (`compressed_length` + `is_compressed`) and a
   custom LZSS-style byte-codec. The full reference is at
-  `dev/docs/daikatana-pak-format.md`. Because DK shares Quake's
+  [`daikatana-pak-format.md`](daikatana-pak-format.md). Because DK shares Quake's
   `"PACK"` magic, the open-time layout probe in `src/pakfile.c`
   disambiguates 64- vs 72-byte entries by validating every entry's
   on-disk extent against the file size under each candidate row.

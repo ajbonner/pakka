@@ -46,7 +46,7 @@
 /* half (0x80–0xFF) maps to Unicode codepoints in the BMP; the low    */
 /* half is identical to ASCII and passes through.                     */
 /*                                                                    */
-/* Policy (see dev/docs/windows-codepage.md §4): on read, try UTF-8   */
+/* Policy (see docs/formats/windows-codepage.md §4): on read, try UTF-8   */
 /* first regardless of bit 11. Only fall back to CP437 if the byte    */
 /* sequence isn't valid UTF-8. This loses CP1251/etc. names that      */
 /* happen to be valid UTF-8 by accident — documented as inherent to   */
@@ -105,7 +105,7 @@ static int pk3_utf8_encode_bmp(uint16_t cp, char *dst, size_t cap) {
  * room for the trailing NUL). gp_flags is the GP flag field from the
  * CDR; bit 11 (0x0800) signals UTF-8 per APPNOTE 6.3.x §4.4.4.
  *
- * Policy (see dev/docs/windows-codepage.md §4):
+ * Policy (see docs/formats/windows-codepage.md §4):
  *   - bit 11 set: bytes are claimed UTF-8 — validate; reject the
  *     archive if they aren't, because silently falling back to CP437
  *     would mask a crafted-or-corrupt archive that lies about its
