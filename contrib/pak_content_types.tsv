@@ -1,0 +1,58 @@
+extension	description	kind
+bsp	BSP map (binary space partition)	map
+lit	Colored lightmap data	map
+map	Map source script	document
+aas	Area awareness system (bot nav)	map
+proc	Doom 3 BSP (.proc)	map
+cm	Doom 3 collision model	map
+nav	Bot navigation mesh	map
+mdl	Quake alias model	model
+md2	Quake 2 model	model
+dkm	Daikatana model (extended md2)	model
+md3	Quake 3 model	model
+md5mesh	Doom 3 mesh	model
+md5anim	Doom 3 animation	model
+lwo	Lightwave object (Doom 3)	model
+ase	3ds Max ASCII scene export	model
+tik	TIKI model script (Sin / Heavy Metal)	model
+spr	Quake sprite	sprite
+sp2	Quake 2 sprite (also Sin)	sprite
+tga	Targa texture	texture
+jpg	JPEG image	texture
+bmp	Windows bitmap (Daikatana texture)	texture
+pcx	PCX image (Quake 2 palette / texture)	texture
+wal	Quake 2 wall texture	texture
+lmp	Quake lump (8-bit paletted graphic, w/h header)	texture
+wad	WAD lump bundle (Quake WAD2 or Doom IWAD/PWAD)	archive
+pk4	Doom 3 PK4 archive (zip)	archive
+dds	DirectDraw Surface texture	texture
+ftx	Doom 3 indirect texture stub	texture
+pal	Color palette	palette
+wav	WAV audio	sound
+ogg	Ogg Vorbis audio	sound
+mp3	MP3 audio	music
+cfg	Console config script	script
+config	Config script	script
+rc	Startup script	script
+shader	Quake 3 shader script	script
+mtr	Doom 3 material script	script
+skin	Model skin definition	script
+def	Entity / model definition (Sin / Doom 3)	script
+qc	QuakeC source	code
+script	Doom 3 / engine script	script
+gui	Doom 3 GUI script	script
+arena	Quake 3 arena definition	script
+menu	Quake 3 menu script	script
+bot	Quake 3 bot config	script
+afi	Quake 3 ammo / fx definition	script
+dat	QuakeC compiled (progs.dat)	code
+bin	Generic binary blob	data
+lst	Resource list	document
+dem	Demo recording	demo
+dm_66	Quake 2 demo recording	demo
+dm3	Quake 3 demo recording	demo
+roq	RoQ video (id cinematics)	video
+cin	Quake 3 cinematic video	video
+txt	Plain text	document
+doc	Document	document
+log	Log file	document
