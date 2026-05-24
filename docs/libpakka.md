@@ -24,7 +24,7 @@ offset, message. Callers that don't need structured errors can pass
 ### Version
 
 * `pakka_version` — returns the linked libpakka version string (e.g.
-  `"1.6.0"`). Useful for bindings that want to feature-gate on the
+  `"1.7.0"`). Useful for bindings that want to feature-gate on the
   loaded library.
 
 ### Archive lifecycle
