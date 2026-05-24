@@ -408,21 +408,15 @@ static void fail_from_err(const pakka_error_t *err) {
 }
 
 static void op_list(pakka_archive_t *pak) {
-    size_t count = pakka_entry_count(pak);
-    size_t i;
     const pakka_entry_t *entry;
-    pakka_status_t s;
 
-    if (count == 0) {
+    if (pakka_entry_count(pak) == 0) {
         printf("Pak is empty\n");
         return;
     }
 
-    for (i = 0; i < count; i++) {
-        s = pakka_entry_at(pak, i, &entry);
-        if (s != PAKKA_OK) {
-            pakka_die_e(0, "Cannot read entry %zu", i);
-        }
+    for (entry = pakka_entry_first(pak); entry != NULL;
+         entry = pakka_entry_next(entry)) {
         pakka_fprint_sanitized(stdout, pakka_entry_name(entry));
         printf(" (%" PRIu64 " bytes)\n", pakka_entry_size(entry));
     }
@@ -430,20 +424,15 @@ static void op_list(pakka_archive_t *pak) {
 
 static void op_list_tree(pakka_archive_t *pak) {
     size_t count = pakka_entry_count(pak);
-    size_t i;
     const pakka_entry_t *entry;
-    pakka_status_t s;
     treenode_t *root = create_tree_node(PAK_TREE_ROOT, 1);
     uint32_t dir_count = 0;
     uint32_t file_count = 0;
 
     printf("%s\n", PAK_TREE_ROOT);
 
-    for (i = 0; i < count; i++) {
-        s = pakka_entry_at(pak, i, &entry);
-        if (s != PAKKA_OK) {
-            pakka_die_e(0, "Cannot read entry %zu", i);
-        }
+    for (entry = pakka_entry_first(pak); entry != NULL;
+         entry = pakka_entry_next(entry)) {
         insert_tree_path(root, pakka_entry_name(entry),
                          &dir_count, &file_count);
     }
@@ -665,14 +654,11 @@ static void op_extract(pakka_archive_t *pak, char *destination,
     }
 
     /* Pass 1a + 1b: path-match + unsafe-name reject. */
-    for (idx = 0; idx < count; idx++) {
+    idx = 0;
+    for (entry = pakka_entry_first(pak); entry != NULL;
+         entry = pakka_entry_next(entry), idx++) {
         int matched;
-        const char *name;
-        s = pakka_entry_at(pak, idx, &entry);
-        if (s != PAKKA_OK) {
-            pakka_die_e(0, "Cannot read entry %zu", idx);
-        }
-        name = pakka_entry_name(entry);
+        const char *name = pakka_entry_name(entry);
 
         if (path_count == 0) {
             matched = 1;
@@ -686,8 +672,8 @@ static void op_extract(pakka_archive_t *pak, char *destination,
                      * etc.). Extract-by-name selects only the first
                      * match per path argument — extracting all matches
                      * would collide on disk. C API consumers iterate
-                     * with pakka_entry_at + pakka_open_entry_handle for
-                     * index-based access. */
+                     * with pakka_entry_first / pakka_entry_next +
+                     * pakka_open_entry_handle. */
                     if (wad && path_matched[i]) {
                         continue;
                     }
@@ -731,31 +717,30 @@ static void op_extract(pakka_archive_t *pak, char *destination,
             pakka_die("Cannot allocate collision-check buffer");
         }
         k = 0;
-        for (idx = 0; idx < count; idx++) {
-            if (should_extract[idx]) {
-                const char *raw_name;
-                char sanitized[PAKKA_ENTRY_NAME_SIZE * 4 + 1];
-                const char *cmp_name;
-                size_t cmp_len;
-                s = pakka_entry_at(pak, idx, &entry);
-                if (s != PAKKA_OK) {
-                    pakka_die_e(0, "Cannot read entry %zu", idx);
-                }
-                raw_name = pakka_entry_name(entry);
-                if (pakka_utf8_substitute_invalid(raw_name, sanitized,
-                                                  sizeof(sanitized), '_')) {
-                    cmp_name = sanitized;
-                } else {
-                    cmp_name = raw_name;
-                }
-                cmp_len = strlen(cmp_name);
-                norms[k] = malloc(cmp_len + 1);
-                if (norms[k] == NULL) {
-                    pakka_die("Cannot allocate normalized name buffer");
-                }
-                pakka_normalize_entry_name(cmp_name, norms[k], cmp_len + 1);
-                k++;
+        idx = 0;
+        for (entry = pakka_entry_first(pak); entry != NULL;
+             entry = pakka_entry_next(entry), idx++) {
+            const char *raw_name;
+            char sanitized[PAKKA_ENTRY_NAME_SIZE * 4 + 1];
+            const char *cmp_name;
+            size_t cmp_len;
+            if (!should_extract[idx]) {
+                continue;
             }
+            raw_name = pakka_entry_name(entry);
+            if (pakka_utf8_substitute_invalid(raw_name, sanitized,
+                                              sizeof(sanitized), '_')) {
+                cmp_name = sanitized;
+            } else {
+                cmp_name = raw_name;
+            }
+            cmp_len = strlen(cmp_name);
+            norms[k] = malloc(cmp_len + 1);
+            if (norms[k] == NULL) {
+                pakka_die("Cannot allocate normalized name buffer");
+            }
+            pakka_normalize_entry_name(cmp_name, norms[k], cmp_len + 1);
+            k++;
         }
         qsort(norms, selected, sizeof(char *), name_ptr_cmp_main);
         for (k = 1; k < selected; k++) {
@@ -774,7 +759,9 @@ static void op_extract(pakka_archive_t *pak, char *destination,
     }
 
     /* Pass 2: write. */
-    for (idx = 0; idx < count; idx++) {
+    idx = 0;
+    for (entry = pakka_entry_first(pak); entry != NULL;
+         entry = pakka_entry_next(entry), idx++) {
         pakka_reader_t *reader;
         FILE *tfd;
         unsigned char buf[PAKFILE_COPY_CHUNK];
@@ -785,10 +772,6 @@ static void op_extract(pakka_archive_t *pak, char *destination,
 
         if (!should_extract[idx]) continue;
 
-        s = pakka_entry_at(pak, idx, &entry);
-        if (s != PAKKA_OK) {
-            pakka_die_e(0, "Cannot read entry %zu", idx);
-        }
         name = pakka_entry_name(entry);
         size = pakka_entry_size(entry);
 

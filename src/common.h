@@ -162,6 +162,24 @@ struct pakka_archive {
     uint32_t num_entries;
     uint64_t file_size;
     Pakfileentry_t *head;
+    /* Cached last node of the singly-linked entry list. Invariant:
+     * tail == NULL iff head == NULL. Every list mutation (add, delete,
+     * commit/rebuild, load_directory) must preserve it. Lets append-class
+     * code paths skip the historical O(n) tail walk. Write-side mutation
+     * only — read APIs do not touch tail. */
+    Pakfileentry_t *tail;
+    /* Cached upper bound on max(offset + on-disk extent) across live
+     * entries — i.e. the byte one past the last live payload byte.
+     * Used by PAK-class adds to position new payload bytes and by
+     * write_pak_directory to place the trailing directory. Initialized
+     * to PAKFILE_HEADER_SIZE for empty archives so the first add lands
+     * after the header. Maintained as an upper bound, not an exact
+     * maximum: incremented on add, left stale on delete (still a valid
+     * upper bound; subsequent adds just append further out than they
+     * strictly need to), and restored exactly by the PAK rebuild path
+     * before write_pak_directory runs. Meaningful for PAK-class
+     * formats (PAK/SiN/DK/WAD); ZIP-class archives ignore it. */
+    uint64_t payload_end;
 
     /* close fp before every rename — Windows CRT fopen omits
      * FILE_SHARE_DELETE, so a live handle blocks MoveFileEx. */

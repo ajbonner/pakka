@@ -131,6 +131,30 @@ pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
                                 const char *entry_name,
                                 const pakka_entry_t **out);
 
+/* Forward iteration in archive directory order. O(1) per step, the
+ * idiomatic way to walk every entry:
+ *
+ *     const pakka_entry_t *e;
+ *     for (e = pakka_entry_first(pak); e != NULL; e = pakka_entry_next(e)) {
+ *         ...consume e...
+ *     }
+ *
+ * Returned pointers remain valid until the owning archive is closed or
+ * the entry list is mutated by pakka_add_file / pakka_add_memory /
+ * pakka_delete / pakka_commit (including the implicit commit performed
+ * by pakka_close). Any iterator mid-walk MUST be discarded across a
+ * mutation. pakka_entry_first returns NULL on an empty archive or a
+ * NULL argument; pakka_entry_next returns NULL at end-of-list or on a
+ * NULL argument. The archive must be live — pakka_close frees the
+ * handle, so calling either function after close (or with a stale
+ * pointer) is undefined behavior, same as every other accessor here.
+ *
+ * Concurrency rules match pakka_entry_at / pakka_find_entry: multiple
+ * threads may iterate the same archive concurrently as long as no other
+ * thread is mutating it. */
+const pakka_entry_t *pakka_entry_first(const pakka_archive_t *archive);
+const pakka_entry_t *pakka_entry_next(const pakka_entry_t *entry);
+
 /* Accessors for the opaque entry handle. Names are NUL-terminated and
  * remain valid until the owning pakka_archive_t is closed. Offsets and
  * sizes are uint64_t so the API can grow into ZIP64-sized archives in

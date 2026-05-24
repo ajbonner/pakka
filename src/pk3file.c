@@ -863,6 +863,7 @@ static pakka_status_t pk3_load_cdr(Pak_t *pak,
             tail->next = entry;
         }
         tail = entry;
+        pak->tail = entry;
 
         pos += PK3_CDR_SIZE + rec.name_len + rec.extra_len
              + rec.comment_len;
@@ -1584,6 +1585,7 @@ pakka_status_t pakka_pk3_create_impl(Pak_t *pak, pakka_error_t *err) {
     pak->pk3_cdr_offset = 0;
     pak->num_entries = 0;
     pak->head = NULL;
+    pak->tail = NULL;
 
     pk3_build_eocd(eocd, 0, 0, 0);
     if (fwrite(eocd, 1, PK3_EOCD_SIZE, pak->fp) != PK3_EOCD_SIZE) {
@@ -1653,13 +1655,12 @@ static pakka_status_t pk3_alloc_pending_entry(Pak_t *pak,
  * to preserve add order in the committed CDR), then mark the archive
  * dirty + needing rebuild. */
 static void pk3_link_pending_entry(Pak_t *pak, Pakfileentry_t *entry) {
-    Pakfileentry_t *tail;
-    if (pak->head == NULL) {
+    if (pak->tail == NULL) {
         pak->head = entry;
     } else {
-        for (tail = pak->head; tail->next != NULL; tail = tail->next) { }
-        tail->next = entry;
+        pak->tail->next = entry;
     }
+    pak->tail = entry;
     pak->num_entries++;
     pak->dirty = 1;
     pak->needs_rebuild = 1;

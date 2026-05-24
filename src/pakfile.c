@@ -96,8 +96,6 @@ static void err_set_entry(pakka_error_t *err,
 
 static pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err);
 static pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err);
-static uint64_t compute_payload_end(Pak_t *pak);
-static Pakfileentry_t *find_tail(Pak_t *pak);
 static void init_pak_header(Pak_t *pak);
 static pakka_status_t write_pak_header(Pak_t *pak, const char *op_name,
                                        pakka_error_t *err);
@@ -865,12 +863,15 @@ pakka_status_t load_pakfile(Pak_t *pak, pakka_error_t *err) {
 
 pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *current = NULL;
-    Pakfileentry_t *last = NULL;
     uint32_t i;
     uint64_t entry_pos;
     int saved_errno;
     const pakka_pak_geometry_t *geom;
     uint64_t extent;
+
+    /* Initialize even on the empty-archive fast path so first-add
+     * positioning falls after the header rather than at offset 0. */
+    pak->payload_end = PAKFILE_HEADER_SIZE;
 
     if (pak->num_entries == 0) {
         return PAKKA_OK;
@@ -884,22 +885,20 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
                         (int)pak->format);
     }
 
+    /* Forward sequential scan of the on-disk directory. One seek to
+     * diroffset, then num_entries adjacent fixed-size records — every
+     * subsequent read advances the cursor naturally so no per-entry
+     * fseek is needed. Append onto pak->tail in O(1). */
+    entry_pos = (uint64_t)pak->diroffset;
+    if (pakka_platform_fseek(pak->fp, (int64_t)entry_pos, SEEK_SET) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "open",
+                        "Cannot seek to pak directory at offset %" PRIu64,
+                        entry_pos);
+    }
+
     for (i = 1; i <= pak->num_entries; i++) {
-        /* Compute in 64-bit to avoid u32 wrap. load_pakfile has already
-         * validated diroffset+dirlength <= file_size and num_entries
-         * against the dirlength, so the subtraction can't underflow. */
-        entry_pos = (uint64_t)pak->diroffset + (uint64_t)pak->dirlength
-                    - (uint64_t)i * geom->dir_entry_size;
-
-        if (pakka_platform_fseek(pak->fp, (int64_t)entry_pos, SEEK_SET) != 0) {
-            saved_errno = errno;
-            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                     (uint32_t)saved_errno, "open",
-                     "Cannot seek to pak directory entry %" PRIu32, i);
-            err_set_entry(err, NULL, (size_t)i - 1, entry_pos, 0);
-            return PAKKA_ERR_IO;
-        }
-
         current = calloc(1, sizeof(Pakfileentry_t));
         if (current == NULL) {
             err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -991,17 +990,22 @@ pakka_status_t load_directory(Pak_t *pak, pakka_error_t *err) {
                 pakka_entry_free(current);
                 return PAKKA_ERR_FORMAT;
             }
+            if ((uint64_t)current->offset + extent > pak->payload_end) {
+                pak->payload_end = (uint64_t)current->offset + extent;
+            }
         }
 
-        if (last != NULL) {
-            current->next = last;
+        /* Append at tail. Publish the partial chain on every iteration so
+         * destroy_pak() can free it if a later entry fails — without this
+         * a mid-load failure leaks every entry parsed so far. */
+        if (pak->tail == NULL) {
+            pak->head = current;
+        } else {
+            pak->tail->next = current;
         }
+        pak->tail = current;
 
-        last = current;
-        /* Publish the partial chain on every iteration so destroy_pak()
-         * can free it if a later entry fails. Without this, destroy_pak
-         * walks pak->head (still NULL) and leaks the prefix. */
-        pak->head = last;
+        entry_pos += geom->dir_entry_size;
     }
 
     return PAKKA_OK;
@@ -1095,6 +1099,20 @@ pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
     }
 
     return PAKKA_ERR_NOT_FOUND;
+}
+
+const pakka_entry_t *pakka_entry_first(const pakka_archive_t *archive) {
+    if (archive == NULL) {
+        return NULL;
+    }
+    return archive->head;
+}
+
+const pakka_entry_t *pakka_entry_next(const pakka_entry_t *entry) {
+    if (entry == NULL) {
+        return NULL;
+    }
+    return entry->next;
 }
 
 const char *pakka_entry_name(const pakka_entry_t *entry) {
@@ -1591,7 +1609,6 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     FILE *src_fp = NULL;
     int64_t src_size;
     uint64_t append_offset;
-    Pakfileentry_t *tail;
     Pakfileentry_t *entry = NULL;
     char *bytes = NULL;
     size_t name_len;
@@ -1711,14 +1728,13 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     physical_size = use_encoded ? (uint32_t)enc_len
                                 : (uint32_t)src_size;
 
-    /* Append at the highest byte-offset across all existing entries, not
-     * the directory-order tail. Quake's pak0.pak has out-of-order
-     * payloads and an orphan blob past the directory; the directory
-     * tail's offset+length would overwrite live data. */
-    tail = find_tail(archive);
-    append_offset = (tail == NULL)
-                  ? (uint64_t)PAKFILE_HEADER_SIZE
-                  : compute_payload_end(archive);
+    /* Append at the cached payload_end across all existing entries (max
+     * offset+length seen). Quake's pak0.pak has out-of-order payloads and
+     * an orphan blob past the directory; the directory-tail's offset+
+     * length would overwrite live data, so we must use the highest seen
+     * extent, not just the tail's. payload_end is seeded with
+     * PAKFILE_HEADER_SIZE on create/open, then maintained incrementally. */
+    append_offset = archive->payload_end;
 
     if (append_offset > UINT32_MAX - (uint64_t)physical_size) {
         free(src_buf);
@@ -1831,11 +1847,13 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
     free(enc_buf);
     fclose(src_fp);
 
-    if (tail == NULL) {
+    if (archive->tail == NULL) {
         archive->head = entry;
     } else {
-        tail->next = entry;
+        archive->tail->next = entry;
     }
+    archive->tail = entry;
+    archive->payload_end = append_offset + (uint64_t)physical_size;
     archive->num_entries++;
     archive->dirty = 1;
 
@@ -1846,7 +1864,6 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
                                 const char *entry_name,
                                 const void *data, size_t len,
                                 pakka_error_t *err) {
-    Pakfileentry_t *tail;
     Pakfileentry_t *entry;
     uint64_t append_offset;
     size_t name_len;
@@ -1917,10 +1934,7 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
 
     physical_size = use_encoded ? (uint32_t)enc_len : (uint32_t)len;
 
-    tail = find_tail(archive);
-    append_offset = (tail == NULL)
-                  ? (uint64_t)PAKFILE_HEADER_SIZE
-                  : compute_payload_end(archive);
+    append_offset = archive->payload_end;
     if (append_offset > UINT32_MAX - (uint64_t)physical_size) {
         free(enc_buf);
         err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
@@ -1974,11 +1988,13 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     }
     free(enc_buf);
 
-    if (tail == NULL) {
+    if (archive->tail == NULL) {
         archive->head = entry;
     } else {
-        tail->next = entry;
+        archive->tail->next = entry;
     }
+    archive->tail = entry;
+    archive->payload_end = append_offset + (uint64_t)physical_size;
     archive->num_entries++;
     archive->dirty = 1;
 
@@ -2032,8 +2048,8 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
          * empty data. STORED-format entries take the same path with
          * trivial overhead. */
         pakka_reader_t *probe_reader = NULL;
-        pakka_status_t open_s = pakka_open_entry(archive, entry_name,
-                                                 &probe_reader, err);
+        pakka_status_t open_s = pakka_open_entry_handle(archive, entry,
+                                                        &probe_reader, err);
         if (open_s != PAKKA_OK) return open_s;
         pakka_reader_close(probe_reader);
         return PAKKA_OK;        /* *data stays NULL, *len stays 0 */
@@ -2075,7 +2091,7 @@ pakka_status_t pakka_read_entry_alloc(pakka_archive_t *archive,
                         total, entry_name);
     }
 
-    s = pakka_open_entry(archive, entry_name, &reader, err);
+    s = pakka_open_entry_handle(archive, entry, &reader, err);
     if (s != PAKKA_OK) {
         free(buf);
         return s;
@@ -2139,10 +2155,22 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
             } else {
                 prev->next = current->next;
             }
+            /* Maintain the strict head/tail invariant: when removing the
+             * current tail, the new tail is `prev` (which is NULL exactly
+             * when this delete emptied the list — matching head). */
+            if (archive->tail == current) {
+                archive->tail = prev;
+            }
             pakka_entry_free(current);
             archive->num_entries--;
             archive->dirty = 1;
             archive->needs_rebuild = 1;
+            /* payload_end stays valid as an upper bound on max(offset +
+             * extent) across the surviving entries. The rebuild commit
+             * recomputes it from the freshly-packed layout anyway, and
+             * subsequent adds before commit still place payloads past
+             * any live byte. Eagerly recomputing here would cost another
+             * O(n) walk on every delete with no observable benefit. */
             return PAKKA_OK;
         }
         prev = current;
@@ -2282,6 +2310,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
     archive->head = new_head;
     {
         uint32_t *old_offsets_swap;
+        Pakfileentry_t *old_tail = archive->tail;
+        uint64_t old_payload_end = archive->payload_end;
         old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
         if (old_offsets_swap == NULL && n_entries > 0) {
             fclose(tfd);
@@ -2296,6 +2326,19 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             old_offsets_swap[i] = entry_ptrs[i]->offset;
             entry_ptrs[i]->offset = new_offsets[i];
         }
+        /* Restore tail + payload_end caches for the rebuilt list so
+         * write_pak_directory places the directory after the last
+         * payload byte. The rebuild packs entries contiguously in
+         * linked-list order starting at PAKFILE_HEADER_SIZE, so the
+         * post-rebuild payload_end is the last entry's offset plus its
+         * on-disk extent (an empty list collapses to header size). */
+        archive->tail = new_tail;
+        if (new_tail != NULL) {
+            archive->payload_end = (uint64_t)new_tail->offset
+                + (uint64_t)pak_entry_on_disk_extent(new_tail);
+        } else {
+            archive->payload_end = PAKFILE_HEADER_SIZE;
+        }
 
         old_fp = archive->fp;
         archive->fp = tfd;
@@ -2305,6 +2348,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             for (i = 0; i < n_entries; i++) {
                 entry_ptrs[i]->offset = old_offsets_swap[i];
             }
+            archive->tail = old_tail;
+            archive->payload_end = old_payload_end;
             fclose(tfd);
             (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
@@ -2317,6 +2362,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             for (i = 0; i < n_entries; i++) {
                 entry_ptrs[i]->offset = old_offsets_swap[i];
             }
+            archive->tail = old_tail;
+            archive->payload_end = old_payload_end;
             (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
             free(new_offsets);
@@ -2348,6 +2395,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                 for (i = 0; i < n_entries; i++) {
                     entry_ptrs[i]->offset = old_offsets_swap[i];
                 }
+                archive->tail = old_tail;
+                archive->payload_end = old_payload_end;
                 (void)pakka_platform_remove(rebuild_scratch);
                 archive->fp = pakka_platform_fopen(rename_target, "r+b");
                 free(old_offsets_swap);
@@ -3055,45 +3104,6 @@ int pakka_unsafe_entry_name(const char *path) {
     return 0;
 }
 
-Pakfileentry_t *find_tail(Pak_t *pak) {
-    Pakfileentry_t *tail;
-
-    if (pak->head == NULL) {
-        return NULL;
-    }
-
-    if (pak->head->next == NULL) {
-        return pak->head;
-    }
-
-    tail = pak->head->next;
-
-    while (tail->next != NULL) { tail = tail->next; }
-
-    return tail;
-}
-
-/* Walk every entry and return the highest offset+length seen — i.e. the
- * byte one past the last live payload byte in the pak. Quake's original
- * pak0.pak has entries in non-sequential byte order with an orphan payload
- * past the directory, so the directory tail's offset+length is not safe
- * as an append point. load_directory has already validated every entry
- * against file_size, so the arithmetic here cannot overflow u32. */
-uint64_t compute_payload_end(Pak_t *pak) {
-    Pakfileentry_t *e;
-    uint64_t max_end = PAKFILE_HEADER_SIZE;
-    uint64_t end;
-
-    for (e = pak->head; e != NULL; e = e->next) {
-        end = (uint64_t)e->offset + (uint64_t)pak_entry_on_disk_extent(e);
-        if (end > max_end) {
-            max_end = end;
-        }
-    }
-
-    return max_end;
-}
-
 void init_pak_header(Pak_t *pak) {
     const pakka_pak_geometry_t *geom = pakka_pak_geometry(pak->format);
     /* Default to PACK when the format hasn't resolved to a PAK-class
@@ -3103,6 +3113,7 @@ void init_pak_header(Pak_t *pak) {
     memcpy(pak->signature, sig, PAKFILE_SIGNATURE_LEN);
     pak->diroffset = PAKFILE_HEADER_SIZE;
     pak->dirlength = 0;
+    pak->payload_end = PAKFILE_HEADER_SIZE;
 }
 
 /* Serialize one pak header to pak->fp. Writes exactly
@@ -3227,11 +3238,9 @@ static pakka_status_t write_pak_entry(Pak_t *pak, Pakfileentry_t *entry,
 
 pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
     Pakfileentry_t *current = pak->head;
-    Pakfileentry_t *tail;
     pakka_status_t s;
     int saved_errno;
     uint64_t total_dirlength;
-    Pakfileentry_t *count_it;
     const pakka_pak_geometry_t *geom = pakka_pak_geometry(pak->format);
     uint32_t entry_size;
 
@@ -3257,28 +3266,17 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
         return write_pak_header(pak, "commit", err);
     }
 
-    tail = find_tail(pak);
-    /* Per-entry add and rebuild-copy paths already cap each entry's
-     * offset + on-disk extent at UINT32_MAX, so tail->offset + extent
-     * fits. The remaining overflow is diroffset + dirlength crossing
-     * 4 GiB once the directory is appended; reject before any write.
-     * Use the tail's on-disk extent rather than entry->length so DK
-     * compressed entries (where length is the uncompressed size, not
-     * the file extent) place the directory after the actual payload. */
-    {
-        uint32_t tail_extent = pak_entry_on_disk_extent(tail);
-        total_dirlength = 0;
-        for (count_it = current; count_it != NULL; count_it = count_it->next) {
-            total_dirlength += entry_size;
-        }
-        if ((uint64_t)tail->offset + (uint64_t)tail_extent + total_dirlength
-                > UINT32_MAX) {
-            return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
-                            "commit",
-                            "Pak directory would push file past 4 GiB");
-        }
-        pak->diroffset = tail->offset + tail_extent;
+    /* Place the directory immediately after the highest-offset payload
+     * (pak->payload_end), counting num_entries directory rows of fixed
+     * width. payload_end is maintained as add/delete/rebuild mutate the
+     * list, so we don't need to scan for tail or rescan extents here. */
+    total_dirlength = (uint64_t)pak->num_entries * (uint64_t)entry_size;
+    if (pak->payload_end + total_dirlength > UINT32_MAX) {
+        return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "commit",
+                        "Pak directory would push file past 4 GiB");
     }
+    pak->diroffset = (uint32_t)pak->payload_end;
     pak->dirlength = 0;
     if (pakka_platform_fseek(pak->fp, (int64_t)pak->diroffset, SEEK_SET) != 0) {
         saved_errno = errno;
