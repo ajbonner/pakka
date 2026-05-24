@@ -111,14 +111,27 @@ jobs:
   # workspace root.
   windows-zip:
     needs: verify
-    runs-on: windows-latest
+    # Pin to the same label test.yml uses — `windows-latest` resolves
+    # to a runner whose first cc.exe on PATH is MinGW, which links
+    # pakka's wmain-style entry point against WinMain and fails.
+    # Pakka's CMake config is MSVC-targeted (see CMakeLists.txt MSVC
+    # branches), so the release ZIP must come off MSVC too.
+    runs-on: windows-2025-vs2026
+    defaults:
+      run:
+        shell: pwsh
     steps:
       - uses: actions/checkout@v6
         with:
           persist-credentials: false
           ref: ${{ needs.verify.outputs.tag }}
+      # Same MSVC setup the test workflow uses — Node-24-compatible fork
+      # of ilammy/msvc-dev-cmd. Puts cl.exe + the Windows SDK on PATH so
+      # `cmake -G Ninja` picks MSVC instead of MinGW.
+      - uses: TheMrMilchmann/setup-msvc-dev@v4
+        with:
+          arch: x64
       - name: Build pakka.exe and package ZIP
-        shell: pwsh
         run: |
           cmake -B build/cmake -G Ninja .
           cmake --build build/cmake
