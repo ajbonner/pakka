@@ -22,11 +22,11 @@ Each tagged release attaches a `pakka-X.Y.Z.tar.gz` source tarball and a
 SHA-256 sidecar to the [GitHub release](https://github.com/ajbonner/pakka/releases).
 Grab them, verify the checksum, build, and install:
 
-    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.5.0/pakka-1.5.0.tar.gz
-    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.5.0/pakka-1.5.0.tar.gz.sha256
-    $ shasum -a 256 -c pakka-1.5.0.tar.gz.sha256
-    $ tar xzf pakka-1.5.0.tar.gz
-    $ cd pakka-1.5.0
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.6.0/pakka-1.6.0.tar.gz
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.6.0/pakka-1.6.0.tar.gz.sha256
+    $ shasum -a 256 -c pakka-1.6.0.tar.gz.sha256
+    $ tar xzf pakka-1.6.0.tar.gz
+    $ cd pakka-1.6.0
     $ make
 
 Then pick one install flavor:
@@ -62,7 +62,7 @@ the extracted `bin\` directory to your `PATH`, or copy `bin\pakka.exe`
 into a directory already on `PATH`. The zip layout matches the Unix
 install:
 
-    pakka-1.5.0-windows-x64\
+    pakka-1.6.0-windows-x64\
       bin\pakka.exe
       lib\pakka.lib          # static lib for integrators
       include\pakka.h        # public C header
