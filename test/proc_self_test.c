@@ -1,4 +1,4 @@
-/* proc_self_test — exercises tests/support/proc.{h,c}.
+/* proc_self_test — exercises test/support/proc.{h,c}.
  *
  * Spawns itself in "child mode" via argv[1] so the test has no
  * dependency on platform-specific binaries (no /bin/echo, no cmd.exe).
