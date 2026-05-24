@@ -380,6 +380,39 @@ fuzz-open: $(FUZZ_DIR)/pakka_fuzz_open
 fuzz-dk: $(FUZZ_DIR)/pakka_fuzz_dk_inflate
 fuzz-roundtrip: $(FUZZ_DIR)/pakka_fuzz_roundtrip
 
+# Local benchmark harness. Times the CLI against a fixed workload table
+# via hyperfine, with optional cross-ref comparison driven by a side
+# git worktree. Not wired into CI — shared runners are too noisy for
+# perf numbers; the bench is a developer tool. See dev/bench/README.md.
+#
+# NOTE: bench targets are deliberately NOT in the MAKECMDGOALS filter at
+# the top of this file that enables -DPAKKA_TEST_BUILD. The synth tool
+# and the pakka binary the bench measures must be the release-style
+# build so timings reflect what library consumers actually run.
+BENCH_DIR := $(BUILD_DIR)/bench
+BENCH_SYNTH := $(BENCH_DIR)/synth_tool
+
+.PHONY: bench bench-compare bench-clean
+
+$(BENCH_SYNTH): dev/bench/synth.c $(LIBPAKKA)
+	@mkdir -p $(BENCH_DIR)
+	$(CC) $(CFLAGS) -o $@ dev/bench/synth.c $(LIBPAKKA) $(LDLIBS)
+
+bench: $(TARGET) $(BENCH_SYNTH)
+	@dev/bench/run.sh ./$(TARGET) $(BENCH_SYNTH)
+
+# Usage: make bench-compare REF=v1.5.0
+bench-compare: $(TARGET) $(BENCH_SYNTH)
+	@if [ -z "$(REF)" ]; then \
+		echo "Usage: make bench-compare REF=<git-ref>" >&2; \
+		exit 1; \
+	fi
+	@dev/bench/compare.sh $(REF)
+
+bench-clean:
+	@dev/bench/compare.sh --clean 2>/dev/null || true
+	@rm -rf $(BENCH_DIR)
+
 .PHONY: coverage
 coverage:
 	@command -v lcov >/dev/null 2>&1 || { echo "coverage: lcov not found (brew install lcov / apt-get install lcov)" >&2; exit 1; }
