@@ -84,8 +84,9 @@ jobs:
   # Source tarball — `make dist` invokes `git archive HEAD` to produce
   # pakka-X.Y.Z.tar.gz + a SHA-256 sidecar. The fetch-depth: 0 above
   # leaves the tag in the work tree at HEAD, which is what git archive
-  # snapshots.
-  linux-tarball:
+  # snapshots. The tarball itself is OS-neutral (POSIX source); the
+  # ubuntu-latest runner is just convenience for git + openssl.
+  source-tarball:
     needs: verify
     runs-on: ubuntu-latest
     steps:
@@ -164,7 +165,7 @@ jobs:
   # tagged source so `gh release create` has repo context without
   # relying on env vars.
   release:
-    needs: [verify, linux-tarball, windows-zip]
+    needs: [verify, source-tarball, windows-zip]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
