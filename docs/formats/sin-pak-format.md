@@ -22,15 +22,6 @@ contract) applies unchanged. This doc covers only the differences.
   archived 1998 source dump linked in §1.2 is the only first-party
   loader available, and §2 below has been cross-checked against both
   the shipping corpus and that loader.
-- Ritual's internal `makepak` utility — the first-party SiN pak
-  builder, maintained as `utils/makepak/` alongside the engine
-  source and used to author the shipping `pak0.sin` / `pak1.sin`
-  (and `pakN.sin` for *Wages of Sin*). Its CLI surface and exact
-  output policy are not publicly documented; pakka's writer cannot
-  produce byte-identical archives because the encoding choices
-  (entry ordering, slack, padding) are `makepak`-internal. The
-  shipping byte layout is the implicit reference any independent
-  writer is cross-checked against.
 - yquake2/pakextract — reader implementation at
   [`pakextract.c`](https://github.com/yquake2/pakextract/blob/master/pakextract.c)
   (BSD-2-Clause). Reference C reader for the broader Quake-PAK
