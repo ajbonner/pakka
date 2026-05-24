@@ -14,31 +14,98 @@ range table. Two close relatives — SiN's `SPAK` and Daikatana's wider
 
 ## 1. Sources
 
-References that informed this document:
+### 1.1 Primary references
 
 - id Software's GPL'd Quake source release (1999),
-  `WinQuake/common.c` (`COM_LoadPackFile`) and `qfiles.h`
-  (`dpackheader_t` / `dpackfile_t`) — the authoritative reference
-  implementation. The 56-byte filename field and 64-byte entry size
-  are baked into those struct definitions, and every later engine
-  with PAK support reads them the same way.
-- id Software's Quake II source release (2001),
-  `qcommon/files.c` (`FS_LoadPackFile`) — identical layout,
-  unchanged constants. Q2 simply forked the loader.
+  [`WinQuake/common.c`](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c) —
+  the authoritative reference implementation. The
+  [`dpackfile_t`](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c#L1229)
+  and
+  [`dpackheader_t`](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c#L1236)
+  struct declarations and the
+  [`COM_LoadPackFile`](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c#L1619)
+  loader are all inline in this one file (Q1 has no separate
+  `qfiles.h`). The 56-byte filename field and 64-byte entry size are
+  baked into those struct definitions, and every later engine with
+  PAK support reads them the same way.
+- id Software's Quake II source release (2001):
+  [`FS_LoadPackFile`](https://github.com/id-Software/Quake-2/blob/master/qcommon/files.c#L448)
+  in
+  [`qcommon/files.c`](https://github.com/id-Software/Quake-2/blob/master/qcommon/files.c),
+  plus the
+  [`dpackfile_t`](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h#L40)
+  and
+  [`dpackheader_t`](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h#L47)
+  structs and the
+  [`IDPAKHEADER`](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h#L34)
+  magic in
+  [`qcommon/qfiles.h`](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h)
+  — Q2 split the struct declarations into a header but kept the
+  layout byte-identical to Q1.
 - Valve's GoldSrc engine, derived from Quake — the PAK loader was
   preserved bit-for-bit when Valve forked, and Half-Life 1's
-  `valve/pak0.pak` parses cleanly with id's loader.
+  `valve/pak0.pak` parses cleanly with id's loader. The publicly
+  released Half-Life SDK
+  ([Valve/halflife](https://github.com/ValveSoftware/halflife)) does
+  not include the engine PAK loader; the format match is asserted by
+  binary round-trip rather than by cross-reading source.
 - "The Unofficial Quake Specs" (UQS) by Olivier Montanuy (1996),
-  §3 "PACK files" — early community spec, useful for confirming
-  the layout matched what the engine actually wrote.
+  §3 "PACK files" — early community spec, useful for confirming the
+  layout matched what the engine actually wrote. Mirror:
+  <https://www.gamers.org/dEngine/quake/spec/quake-spec33/qkspec_3.htm>.
 - Quake Wiki — <https://quakewiki.org/wiki/.pak> — community
   reference covering all three engines together.
 - pakka's own implementation: `src/pakfile.c` (header parse, directory
   load, write paths), `src/common.c` (PAK-class geometry table),
   `src/common.h` (constants + struct layout).
 
+### 1.2 Additional references
+
+- Kaitai Struct formal `.ksy` grammar:
+  <https://formats.kaitai.io/quake_pak/> — machine-readable spec
+  with generated parsers in Python, C++, Java, JavaScript, Ruby, Go,
+  Lua, Perl, Rust. Useful as a conformance cross-check.
+- Just Solve The File Format Problem, "Quake PAK":
+  <http://fileformats.archiveteam.org/wiki/Quake_PAK> — concise
+  preservation-focused summary linking to other PAK family members.
+- ModdingWiki Shikadi disambiguation:
+  <https://moddingwiki.shikadi.net/wiki/PAK_Format> — clarifies that
+  "PAK" is a name shared by many unrelated game-archive formats
+  (Westwood, The Learning Company, Quake, ...) with no common spec.
+- Valve Developer Community, "PAK":
+  <https://developer.valvesoftware.com/wiki/PAK> — GoldSrc-facing
+  description and `pakka_*.pak` loader ordering used by Half-Life.
+- TWHL (Half-Life mapping wiki), "PAK":
+  <https://twhl.info/wiki/page/PAK> — practical modder-facing notes
+  on `pak0.pak`..`pak9.pak` precedence in the GoldSrc VFS.
+- erysdren, "idTech PAK Format" (2024):
+  <https://erysdren.me/docs/pak/> — modern consolidated byte-level
+  reference covering Quake / SiN / HROT under one heading.
+- yquake2/pakextract — reader implementation at
+  [`pakextract.c`](https://github.com/yquake2/pakextract/blob/master/pakextract.c)
+  (BSD-2-Clause). Small reference C reader covering the whole PAK /
+  SPAK / DK family.
+- Slartibarty/PAKExtract — <https://github.com/Slartibarty/PAKExtract>.
+  Alternative cross-format C reader covering Quake / Q2 / Half-Life /
+  SiN; useful divergence point when sanity-checking pakka's behaviour
+  against a second independent implementation.
+- QuakeSpasm —
+  [`Quake/common.c`](https://github.com/sezero/quakespasm/blob/master/Quake/common.c).
+  Maintained Quake source port; the modern compatibility target for
+  Quake 1 PAK quirks (large-file paths, big-endian portability,
+  optional case-folded mod lookups).
+
 The format is small enough that all sources agree to the byte; this
 document is the consolidated reference pakka uses.
+
+### 1.3 Preservation
+
+Every live external reference in §1.1 and §1.2 was submitted to the
+[Wayback Machine](https://web.archive.org/) on 2026-05-24. To fetch
+a snapshot of any link above, prepend `https://web.archive.org/web/`
+to its URL — the Wayback Machine resolves to the most recent capture.
+Sources that carry their own archival guarantee (GitHub source files,
+ArchiveTeam's Just Solve wiki) are excluded from the submission set.
 
 ## 2. File layout
 
@@ -69,8 +136,12 @@ on-disk file size; see `load_pakfile` in `src/pakfile.c`.
 | 56     | 4    | `file_pos`    | u32 LE — offset of payload bytes in the archive.     |
 | 60     | 4    | `file_length` | u32 LE — payload size in bytes.                      |
 
-Total: 64 bytes per entry. id's `qfiles.h` declares this as
-`dpackfile_t { char name[56]; int filepos, filelen; }`.
+Total: 64 bytes per entry. id declares this as
+`dpackfile_t { char name[56]; int filepos, filelen; }` — inline in
+[`WinQuake/common.c` L1229](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c#L1229)
+for Quake 1, and re-declared in
+[`qcommon/qfiles.h` L40](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h#L40)
+for Quake 2.
 
 **Filename field — 56 bytes.** Originally intended as a `char[56]`
 holding a NUL-terminated path. In practice the field is treated as
@@ -174,6 +245,61 @@ container. Q1 stores `.mdl` / `.bsp` / `.wav` / `.lmp`; Q2 stores
 In pakka the `pak` / `goldsrc` / `hl` `--format` aliases all map to
 the same `PAKKA_FORMAT_PAK` enum value, which selects the 56/64
 geometry row. There is no functional split.
+
+The one engine-level cap that *does* diverge across this family is
+the hardcoded `MAX_FILES_IN_PACK` limit each loader enforces:
+
+| Engine              | `MAX_FILES_IN_PACK` | Source                                                                                                                              |
+| ------------------- | ------------------- | ----------------------------------------------------------------------------------------------------------------------------------- |
+| Quake 1             | 2,048               | [`WinQuake/common.c` L1238](https://github.com/id-Software/Quake/blob/master/WinQuake/common.c#L1238)                              |
+| Quake 2             | 4,096               | [`qcommon/qfiles.h` L49](https://github.com/id-Software/Quake-2/blob/master/qcommon/qfiles.h#L49)                                  |
+| SiN                 | 16,384              | Ritual's `q_files.h` (see [`sin-pak-format.md`](sin-pak-format.md) §2.3).                                                          |
+| GoldSrc             | not in published SDK | Empirically the engine accepts well over Q1's 2,048 (Half-Life's `valve/pak0.pak` ships with several thousand entries).            |
+| pakka               | 1,048,576           | `PAKFILE_MAX_ENTRIES` in `src/common.h` — well above any engine cap so the cap is a guardrail against runaway metadata, not a constraint shipping archives ever hit. |
+
+The container itself imposes no entry limit beyond the 4 GiB
+`dirlength` u32 (`dirlength / 64` = 67,108,864 max entries on Quake's
+row). Archives written by pakka can exceed any individual engine's
+cap; loading them in a stock engine will fail at that engine's
+hardcoded check rather than at the format level.
+
+### 3.1 Engine lookup semantics
+
+The container has no first-class concept of search order — that
+lives in the VFS layer the engine layers on top of it. Documented
+here for completeness; pakka itself does not implement search-path
+behaviour because it operates on a single archive at a time.
+
+**Pak numbering and load order.** Quake / Q2 / GoldSrc scan
+`pakN.pak` files where `N` ranges 0..9 (`pak0.pak` through
+`pak9.pak`) in ascending numeric order; later paks override earlier
+ones on duplicate names. id's `WinQuake/common.c::COM_AddGameDirectory`
+mounts every matching pak as a separate VFS layer. The Valve
+Developer wiki page <https://developer.valvesoftware.com/wiki/PAK>
+documents the same convention for GoldSrc.
+
+**Override semantics.** When two paks in the same gamedir contain an
+entry with the same name, the **higher-numbered pak wins**. This is
+how Quake's mission packs (`pak1.pak`) replace base-game lumps
+without rewriting `pak0.pak`. For mod gamedirs (`-game`),
+`<mod>/pakN.pak` shadows `id1/pakN.pak`. PWAD-equivalent semantics:
+the engine merges directories rather than replacing them.
+
+**Case sensitivity.** The on-disk filename bytes are compared
+case-sensitively (`strcmp`, not `strcasecmp`), which is the
+convention that fell out of Quake's NeXTSTEP / IRIX origins. Every
+shipping pak from id and Valve uses lowercase ASCII. The engine
+matches lookups case-sensitively too; a mod that ships
+`Maps/E1M1.bsp` would not be found by an engine searching for
+`maps/e1m1.bsp`. pakka stays byte-faithful here — it never
+case-folds names on read or write — but the `pakka_verify` portable-
+union collision check (§4.3) does flag pairs that would collide
+under case-insensitive filesystems.
+
+**Loose files outside the pak.** Quake / Q2 / GoldSrc also walk the
+gamedir for loose files; a loose file shadows any same-named pak
+entry. pakka does not model this; it is purely an archive tool, not
+a full VFS implementation.
 
 ## 4. I/O integration in pakka
 
@@ -283,6 +409,24 @@ Every PAK-class read/write site in pakka dispatches off the
 `pakka_pak_geometry(fmt)` table rather than hard-coding constants, so
 adding a future variant means appending a row, not forking every
 code path.
+
+### 6.1 Namespace clarification — formats called "PAK" but unrelated
+
+The name "PAK" is heavily overloaded across game-archive formats and
+several formats share the `.pak` extension with no common spec. The
+table below lists the ones most often confused with Quake PAK; none
+of them parse with the `PACK` / `SPAK` loaders documented here.
+
+| Format                   | Magic       | Notes                                                         |
+| ------------------------ | ----------- | ------------------------------------------------------------- |
+| Quake WAD2               | `"WAD2"`    | Quake's texture WAD (`gfx.wad`). Unrelated to Doom WAD; not a PAK. |
+| Westwood PAK             | none        | C&C / Dune II archives; <https://moddingwiki.shikadi.net/wiki/PAK_Format_(Westwood)>. |
+| The Learning Company PAK | none        | Educational-software archives; <https://moddingwiki.shikadi.net/wiki/PAK_Format_(The_Learning_Company)>. |
+| HROT PAK                 | `"HROT"`    | HROT (2023) widens the filename field to 120 bytes; <https://erysdren.me/docs/pak/>. |
+
+pakka rejects unknown-magic cases at open with `PAKKA_ERR_FORMAT`
+and the error message "Not a pak file (bad signature)" (see the
+signature ladder in `src/pakfile.c::pakka_open`).
 
 ## 7. Test coverage
 

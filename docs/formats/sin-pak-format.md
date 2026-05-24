@@ -13,10 +13,26 @@ contract) applies unchanged. This doc covers only the differences.
 
 ## 1. Sources
 
+### 1.1 Primary references
+
 - Ritual Entertainment's shipped retail and demo archives — the
-  authoritative reference. SiN's `pak0.sin` / `pak1.sin` are the
-  byte corpus the format derives from.
-- yquake2/pakextract — <https://github.com/yquake2/pakextract>
+  authoritative byte corpus. SiN's `pak0.sin` / `pak1.sin` are the
+  reference fixtures the format derives from. Ritual never released
+  the engine source through an official GPL-style channel; the
+  archived 1998 source dump linked in §1.2 is the only first-party
+  loader available, and §2 below has been cross-checked against both
+  the shipping corpus and that loader.
+- Ritual's internal `makepak` utility — the first-party SiN pak
+  builder, maintained as `utils/makepak/` alongside the engine
+  source and used to author the shipping `pak0.sin` / `pak1.sin`
+  (and `pakN.sin` for *Wages of Sin*). Its CLI surface and exact
+  output policy are not publicly documented; pakka's writer cannot
+  produce byte-identical archives because the encoding choices
+  (entry ordering, slack, padding) are `makepak`-internal. The
+  shipping byte layout is the implicit reference any independent
+  writer is cross-checked against.
+- yquake2/pakextract — reader implementation at
+  [`pakextract.c`](https://github.com/yquake2/pakextract/blob/master/pakextract.c)
   (BSD-2-Clause). Reference C reader for the broader Quake-PAK
   family including SiN.
 - pakka's own implementation: `src/pakfile.c` (signature dispatch,
@@ -25,9 +41,35 @@ contract) applies unchanged. This doc covers only the differences.
   (`PAKKA_ENTRY_NAME_SIZE` 256-byte cap that accommodates SiN's
   wider field).
 
-There is no published SiN format spec; the layout is consistent
-across every shipping archive and the three values in the geometry
-row are the entire spec.
+### 1.2 Additional references
+
+- Internet Archive SiN 1998 source dump —
+  <https://archive.org/details/si-n-ritual-entertainment-1998-source-code.-7z>.
+  Mirrored Ritual engine source covering the SPAK loader — the only
+  first-party reference for SiN's pak handling in existence.
+- Slartibarty/PAKExtract — <https://github.com/Slartibarty/PAKExtract>.
+  Alternative cross-format C reader covering Quake / Q2 / Half-Life /
+  SiN. Useful divergence point when sanity-checking pakka's behaviour
+  against a second independent implementation.
+- wattostudios/GameExtractor —
+  <https://github.com/wattostudios/GameExtractor>. Cross-format
+  archive reader / writer (Java, GPL) including a SiN SPAK plugin;
+  useful as an independent reader for differential testing.
+- erysdren, "idTech PAK Format" (2024) — <https://erysdren.me/docs/pak/>.
+  Modern consolidated byte-level reference that places SiN alongside
+  Quake and HROT under one document.
+
+The layout is consistent across every shipping archive and the three
+values in the geometry row are the entire spec.
+
+### 1.3 Preservation
+
+Every live external reference in §1.1 and §1.2 was submitted to the
+[Wayback Machine](https://web.archive.org/) on 2026-05-24. To fetch
+a snapshot of any link above, prepend `https://web.archive.org/web/`
+to its URL. Sources that carry their own archival guarantee (GitHub
+source files, Internet Archive item pages) are excluded from the
+submission set.
 
 ## 2. Differences from Quake / Q2 PAK
 
@@ -77,10 +119,48 @@ from the Quake doc apply identically — the in-memory buffer is sized
 one byte larger so a `'\0'` can be force-written at index 120 before
 any C string API touches it.
 
-The wider name was Ritual's response to deeper directory hierarchies
-than Quake originally needed. SiN content paths like
+The wider name and the higher entry-count cap (see §2.3) landed
+late in SiN's development — both bumped on the same day,
+October 8, 1998, per the engine source's revision history, about a
+month before SiN shipped on November 9, 1998. That timing suggests
+Ritual hit Q2's `MAX_PAK_FILENAME_LENGTH` (56) and
+`MAX_FILES_IN_PACK` (4,096) ceilings during final asset assembly
+rather than designing the divergence up front. The widened name in
+particular ended up at exactly 120 bytes — enough headroom for the
+deepest paths the shipping corpus needed (SiN content paths like
 `pics/skins/aphrodite_redteam.tga` already crowd Quake's 56-byte
-limit; 120 bytes was enough headroom for the entire shipping corpus.
+limit) without much slack to spare.
+
+### 2.3 Engine-level loading constraints
+
+These are properties of the shipping SiN engine's loader, not of the
+SPAK container. Archives that violate them remain format-conformant;
+the engine just refuses to mount them.
+
+**Entry count cap.** Ritual's loader caps `numpackfiles` at 16,384
+(`MAX_FILES_IN_PACK` in the engine's `q_files.h`) — four times Q2's
+4,096. Pakka's own `PAKFILE_MAX_ENTRIES` is 1,048,576, so pakka will
+write archives that exceed the engine's cap; shipping `pak0.sin` /
+`pak1.sin` are well under it.
+
+**Mac port shipped `.rez`, not `.sin`.** The Mac SiN port (Rebecca
+Heineman's Burgerlib build, ca. 2002) replaced the SPAK loader with
+Burgerlib's `RezFile` resource container and shipped `pak0.rez` /
+`pak1.rez` instead. The on-disk SPAK layout in §2 is preserved as
+dead code inside that port's filesystem source but is not the active
+read path. PC SiN reads `.sin` files using the layout documented
+here; pakka models only the PC path.
+
+**Demo anti-modification check.** The SiN shareware demo's loader
+(compiled with a `NO_ADDONS` flag that retail builds disable)
+computes a checksum over the directory block — `dirlen` bytes
+starting at `diroffset`, payloads excluded — and refuses the
+archive if the result diverges from a hardcoded constant. Effect:
+any rebuilt demo `pak0.sin` fails to mount on the demo even when
+its payload bytes are byte-identical to the original, because the
+rebuilt directory's exact byte layout (entry order, slack,
+padding) rarely reproduces the original's. Retail SiN omits the
+check entirely and accepts any format-valid pak.
 
 ## 3. Disambiguation
 

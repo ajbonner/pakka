@@ -9,7 +9,7 @@ sees back (`PAKKA_FORMAT_PK3` vs `PAKKA_FORMAT_PK4`); the on-disk
 bytes, the loader, the writer, and every validation rule are shared.
 This doc covers both under one heading; references to "PK3/PK4"
 throughout mean "the shared format". The PK3-vs-PK4 split lives
-entirely at the dispatch boundary in `src/pakfile.c` — see §6.
+entirely at the dispatch boundary in `src/pakfile.c` — see §7.
 
 Unlike the PAK-class formats covered in
 [`quake-pak-format.md`](quake-pak-format.md) and its siblings, PK3 /
@@ -20,32 +20,99 @@ top.
 
 ## 1. Sources
 
-- PKWARE APPNOTE.TXT (current version at
-  <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>) —
-  the canonical ZIP specification. PK3 / PK4 are ZIP, so this is
-  the authoritative on-disk reference.
-- RFC 1951 (DEFLATE compressed data format) and RFC 1952 (gzip,
-  cited only for shared CRC-32 polynomial; pakka does not produce
-  gzip streams). PK3 / PK4 DEFLATE payloads are raw RFC 1951
-  streams with no zlib wrapper — see §4.
+### 1.1 Primary references
+
+- PKWARE APPNOTE.TXT — the canonical ZIP specification. PK3 / PK4
+  are ZIP, so this is the authoritative on-disk reference. Current
+  version: <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>.
+  Version-pinned mirror at the Library of Congress for v6.3.3 (the
+  edition pakka's spec citations match):
+  <https://www.loc.gov/preservation/digital/formats/digformatspecs/APPNOTE(20120901)_Version_6.3.3.txt>.
+  Historical version list:
+  <https://pkware.cachefly.net/webdocs/APPNOTE/> (6.3.0 through the
+  current point release).
+- ISO/IEC 21320-1:2015 — *Information technology — Document
+  Container File — Part 1: Core*.
+  <https://www.iso.org/standard/60101.html>. A normative,
+  intentionally constrained ZIP profile that prohibits encryption,
+  digital signatures, patched data, multi-volume archives, and any
+  compression method other than `0` (STORED) and `8` (DEFLATE) — the
+  same subset pakka enforces in §3. Implementations conforming to
+  ISO/IEC 21320-1 round-trip cleanly with pakka's writer.
+- RFC 1951 (DEFLATE compressed data format,
+  <https://www.rfc-editor.org/rfc/rfc1951>) and RFC 1952 (gzip,
+  <https://www.rfc-editor.org/rfc/rfc1952>, cited only for shared
+  CRC-32 polynomial; pakka does not produce gzip streams). PK3 / PK4
+  DEFLATE payloads are raw RFC 1951 streams with no zlib wrapper —
+  see §4. RFC 1950 (zlib wrapper format,
+  <https://www.rfc-editor.org/rfc/rfc1950>) is cited only to clarify
+  what PK3 / PK4 *do not* carry.
 - id Software's GPL'd Quake III Arena source release (2005),
-  `code/qcommon/files.c` (`FS_LoadZipFile`) — the reference loader
-  for PK3, and the de-facto compatibility target for any tool
-  producing PK3s the engine will read.
+  [`code/qcommon/files.c`](https://github.com/id-Software/Quake-III-Arena/blob/master/code/qcommon/files.c)
+  (`FS_LoadZipFile`) — the reference loader for PK3, and the
+  de-facto compatibility target for any tool producing PK3s the
+  engine will read.
 - id Software's GPL'd Doom 3 source release (2011),
-  `neo/framework/File_Manifest.cpp` and `neo/framework/File.cpp` —
-  the reference PK4 loader, structurally similar to Q3's.
+  [`neo/framework/FileSystem.cpp`](https://github.com/id-Software/DOOM-3/blob/master/neo/framework/FileSystem.cpp) —
+  the reference PK4 loader, structurally similar to Q3's. The Doom 3
+  BFG Edition source adds the resource-pack derivative at
+  [`neo/framework/File_Resource.cpp`](https://github.com/id-Software/DOOM-3-BFG/blob/master/neo/framework/File_Resource.cpp);
+  pakka does not target the BFG resource container, only the PK4
+  archives the BFG executable still consumes alongside.
 - pakka's own implementation: `src/pk3file.c` (entire ZIP-class
   read + write pipeline), `src/pakfile.c` (open-time signature
   dispatch + PK3-vs-PK4 label routing), `src/common.h` (`PK3_*`
   size constants, methods, and limits), `src/deflate/` (DEFLATE
   backend abstraction).
 
+### 1.2 Additional references
+
+- ioquake3 —
+  [`code/qcommon/files.c`](https://github.com/ioquake/ioq3/blob/main/code/qcommon/files.c).
+  Maintained Q3 source port; the de-facto modern compatibility target
+  for PK3-emitting tools.
+- dhewm3 —
+  [`neo/framework/FileSystem.cpp`](https://github.com/dhewm/dhewm3/blob/master/neo/framework/FileSystem.cpp).
+  Maintained Doom 3 source port; modern PK4 compatibility target.
+- libzip — <https://libzip.org/documentation/libzip.html>. Mature
+  read/write ZIP library (C, BSD-3-Clause); reference for current
+  UTF-8 / CP437 handling, atomic-write semantics, and Info-ZIP-style
+  extra-field interpretation.
+- Info-ZIP — <https://infozip.sourceforge.net/>. The de-facto CLI
+  reference implementation (`unzip` / `zip`); behaviour for the
+  legacy methods and the original CP437 default.
+- Kaitai Struct formal `.ksy` grammar: <https://formats.kaitai.io/zip/>
+  (source:
+  [`archive/zip.ksy`](https://github.com/kaitai-io/kaitai_struct_formats/blob/master/archive/zip.ksy)) —
+  machine-readable ZIP spec with generated parsers in many languages.
+- Library of Congress Sustainability of Digital Formats,
+  "ZIP File Format":
+  <https://www.loc.gov/preservation/digital/formats/fdd/fdd000354.shtml>
+  — preservation-oriented summary of ZIP versions and interoperability.
+- Wikipedia, "ZIP (file format)" —
+  <https://en.wikipedia.org/wiki/ZIP_(file_format)>. Useful as a
+  cross-cited tertiary summary covering method numbers, ZIP64
+  history, and the Implode / Shrink / Reduce legacy methods pakka
+  does not implement.
+- hanshq, "Shrink, Reduce, and Implode: The Legacy Zip Compression
+  Methods" — <https://www.hanshq.net/zip2.html>. Annotated reference
+  for the methods PK3 / PK4 never use; useful background when
+  triaging an archive pakka refuses with `PAKKA_ERR_UNSUPPORTED`.
+
 The shared loader strategy (PK3 and PK4 being the same format with
 different extensions) is documented in `src/pk3file.c`'s opening
 comment, and the historical reason — id's `FS_LoadZipFile` was
 copied near-verbatim from Q3 to D3 — is preserved by every engine
 fork in the wild.
+
+### 1.3 Preservation
+
+Every live external reference in §1.1 and §1.2 was submitted to the
+[Wayback Machine](https://web.archive.org/) on 2026-05-24. To fetch
+a snapshot of any link above, prepend `https://web.archive.org/web/`
+to its URL. Sources that carry their own archival guarantee (RFCs,
+ISO standards, GitHub source files, Wikipedia, the Library of
+Congress) are excluded from the submission set.
 
 ## 2. File layout
 
@@ -150,6 +217,26 @@ the PAK-class formats. pakka's PK3 / PK4 I/O uses local `pk3_read_u16`
 because the ZIP path operates on in-memory buffers, not stdio
 streams. The byte-extraction semantics are identical.
 
+### 2.5 ZIP record signature catalog
+
+Every record in a ZIP stream begins with a 4-byte magic. The full
+APPNOTE.TXT §4.3 record set, with pakka's per-record handling:
+
+| Signature      | Record                                       | pakka handling                                                                                       |
+| -------------- | -------------------------------------------- | ---------------------------------------------------------------------------------------------------- |
+| `PK\x03\x04`   | Local File Header (LFH)                      | Written, parsed, cross-checked against CDR (§2.3). Also one of the open-time format-dispatch magics. |
+| `PK\x01\x02`   | Central Directory Record (CDR)               | Written, parsed per-record (`pk3_validate_cdr_record`). Wrong magic mid-CDR → "Bad CDR signature at entry N". |
+| `PK\x05\x06`   | End of Central Directory (EOCD)              | Written; located by reverse scan over the last 65557 bytes (`pk3_find_eocd`). Also a format-dispatch magic for empty archives. |
+| `PK\x07\x08`   | Optional Data Descriptor / spanning marker   | Refused at open: as the leading 4 bytes it indicates a multi-disk archive; as the post-payload data descriptor it requires general-purpose flag bit 3, which is rejected (`PAKKA_ERR_UNSUPPORTED`). |
+| `PK\x06\x06`   | ZIP64 End of Central Directory               | Not searched for. ZIP64 is detected upstream via `0xFFFF`/`0xFFFFFFFF` sentinels in the EOCD (refused with `"ZIP64 archives are not supported"`) or per-entry CDR (`"ZIP64 per-entry fields are not supported"`); the ZIP64 EOCD record itself is never reached. |
+| `PK\x06\x07`   | ZIP64 EOCD Locator                           | Same — never searched for; the sentinel check upstream refuses before this record matters.           |
+| `PK\x06\x08`   | Archive Extra Data Record                    | Not searched for. If present between LFHs / CDRs, would surface as a "Bad CDR signature" or LFH-validation error. |
+| `PK\x05\x05`   | Digital signature                            | Not searched for. Lies between the CDR and EOCD; harmless to the EOCD reverse scan, and unreferenced by anything pakka reads. The signature bytes are silently ignored on read and never emitted on write. |
+| `PK\x30\x30`   | Temporary spanning marker                    | Not specifically recognized. If it appears as the leading 4 bytes of a file, the signature ladder in `pakka_open` falls through to `"Not a pak file (bad signature)"`; if it appears later in a stream pakka is parsing, the surrounding record-signature check rejects it. pakka has no spanning code path. |
+
+For the upstream record catalog see APPNOTE.TXT §4.3
+(<https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>).
+
 ## 3. What pakka accepts and refuses
 
 ### 3.1 Compression methods
@@ -219,6 +306,31 @@ skips** these on read (real-world tools like `zip(1)` and 7-Zip emit
 them; refusing would break compatibility with archives the engine
 loaders happily ignore). On write, pakka never emits them — directory
 hierarchy is implicit in the slash-separated entry names.
+
+### 3.5 General-purpose flag bits — pakka's stance
+
+The 16-bit `flags` word appears in both the LFH (offset 6) and the
+CDR (offset 8). APPNOTE.TXT §4.4.4 defines the full set; pakka's
+stance per bit:
+
+| Bit | Mask     | APPNOTE meaning                                 | pakka                                                                                  |
+| --- | -------- | ----------------------------------------------- | -------------------------------------------------------------------------------------- |
+| 0   | `0x0001` | Encrypted entry                                 | Refused at open (`PAKKA_ERR_UNSUPPORTED`, "Encrypted ZIP entries are not supported"). pakka writes 0. |
+| 1   | `0x0002` | DEFLATE level high (method 8) / 8K window (method 6) | Ignored on read (informational); pakka writes 0.                                   |
+| 2   | `0x0004` | DEFLATE level low / 4K window                   | Ignored on read; pakka writes 0.                                                       |
+| 3   | `0x0008` | Data descriptor follows payload                 | Refused at open (`PAKKA_ERR_UNSUPPORTED`, "ZIP data descriptors are not supported"). pakka writes 0. |
+| 4   | `0x0010` | Enhanced DEFLATE                                | Ignored on read; pakka writes 0.                                                       |
+| 5   | `0x0020` | Compressed patched data                         | Not actively refused; never seen in PK3 / PK4. pakka writes 0.                         |
+| 6   | `0x0040` | Strong encryption                               | Not actively checked. APPNOTE requires bit 0 also set for strong-encryption archives, and pakka refuses bit 0; an archive that set bit 6 alone (no shipping tool does) would be accepted as-is. pakka writes 0. |
+| 7-10 | —       | Unused / reserved                               | Ignored. pakka writes 0.                                                               |
+| 11  | `0x0800` | Language encoding flag (EFS) — entry name + comment are UTF-8 | Read: prefer UTF-8 decode (§5 of [windows-codepage](windows-codepage.md)); GP-bit-11-set + non-UTF-8 bytes = `PAKKA_ERR_FORMAT`. Write: pakka sets the bit when the name has any byte > 0x7F **and** is valid UTF-8 per RFC 3629; pure-ASCII names leave it clear. |
+| 12  | `0x1000` | Reserved for PKWARE enhanced compression        | Ignored. pakka writes 0.                                                               |
+| 13  | `0x2000` | Encrypted central directory                     | Not actively checked. An encrypted CDR would also encrypt entries (bit 0), which pakka refuses; pakka does not inspect bit 13 independently. pakka writes 0. |
+| 14-15 | —      | Reserved                                        | Ignored. pakka writes 0.                                                               |
+
+The "Ignored" rows reflect that pakka does not enforce or interpret
+those bits beyond writing zero on commit. None of them appear in
+shipping PK3 / PK4 archives.
 
 ## 4. DEFLATE — read and write
 
@@ -309,7 +421,91 @@ reflected) over the **uncompressed** bytes. pakka:
 The CRC table (`pk3_crc32_table[256]`) lives in `src/pk3file.c` as a
 file-scope constant; no first-use construction.
 
-## 6. PK3 vs PK4 in pakka
+The polynomial is the IEEE 802.3 CRC-32 (`0xEDB88320` LSB-first,
+`0x04C11DB7` MSB-first), shared with PNG, gzip, and Ethernet. The
+canonical reference is in RFC 1952 §8 and ITU-T V.42 §8.
+
+## 6. Security profile
+
+PK3 / PK4 archives often come from untrusted sources (mod sites,
+multiplayer pure-server downloads, archived demos). The treatment
+below is the worked-through threat model behind the refusals in §3.2
+and the per-entry caps in §3.3.
+
+### 6.1 Decompression bombs
+
+A small DEFLATE payload can declare a 4 GiB `usize`. pakka caps both
+the on-disk CDR allocation and the per-entry decompressed buffer:
+
+- `PK3_MAX_CDR_SIZE` (default 64 MiB) bounds the EOCD-declared
+  `cdr_size` before any CDR bytes are read. A hostile archive
+  declaring `cdr_size = 0xFFFFFFFF` is rejected at the malloc gate.
+- `pakka_set_max_decompressed_size` (default 64 MiB) bounds
+  `pakka_open_entry` / `pakka_read_entry_alloc`. STORED entries use
+  the declared `csize` (which equals `usize`); DEFLATE entries cap
+  both the compressed and decompressed allocations against the
+  setting. The CRC32 cross-check (§5) catches mid-stream truncation
+  but does not bound peak RSS — the cap does.
+
+### 6.2 Path traversal
+
+The entry-name safety check (`pakka_unsafe_entry_name` in
+`src/common.c`) rejects `..` path components, absolute paths
+(leading `/`), drive-letter prefixes, Windows reserved device names
+(`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`), and any control
+byte (`< 0x20` or `== 0x7F`). The check runs across the **full
+declared `name_len`**, not the C-string view, so a crafted
+`"good.txt\0../escape"` cannot smuggle a traversal through a NUL.
+
+### 6.3 Symlinks and special file types
+
+The CDR's `external_attrs` upper 16 bits encode a Unix mode word on
+archives written by Info-ZIP and friends. pakka rejects entries
+whose mode encodes `IFLNK` (`(ext_attrs >> 16) & 0o170000 ==
+0o120000`) at open time. The extract path never calls `symlink(2)`
+regardless, so an undetected symlink would materialize as a regular
+file with the link target as its contents — annoying but not unsafe.
+The open-time rejection is the cleaner diagnostic.
+
+### 6.4 LFH / CDR disagreement
+
+The LFH duplicates fields the CDR records (§2.3). Crafted archives
+in the wild use this to lie to streaming readers (which trust the
+LFH) while presenting a sanitized CDR (which random-access readers
+trust). pakka cross-checks `method`, `crc32`, `csize`, `usize`,
+`name_len`, and the name bytes themselves at open time
+(`pk3_validate_lfh`); any disagreement returns `PAKKA_ERR_FORMAT`.
+
+### 6.5 Overlapping payloads
+
+A pathological archive can declare two CDR entries pointing at
+overlapping LFH ranges. pakka does not currently reject this — the
+read paths seek to each LFH independently — but every LFH offset is
+bounds-checked against the file size, so an overlap cannot read past
+EOF. Overlap is flagged as a verify-time warning by `pakka_verify`
+when the per-entry on-disk extents intersect.
+
+### 6.6 Name-encoding ambiguity
+
+See [`windows-codepage.md`](windows-codepage.md) §5 for the
+UTF-8-versus-CP437 decode policy and the false-positive caveat in
+§5.3 (some CP1251 byte sequences are accidentally legal UTF-8). PK3
+/ PK4 has no encoding-flag-clears mechanism beyond GP bit 11; pakka
+silently prefers UTF-8 on read.
+
+### 6.7 Out of scope
+
+- **Hardlink-like ZIP entries** (two entries pointing at the same
+  LFH offset by design) — not seen in PK3 / PK4 in the wild; pakka
+  treats them as overlap (§6.5).
+- **Polyglot files** (an archive that is also a valid PNG / PDF /
+  ELF). pakka reads from the EOCD reverse scan, so prefix garbage
+  is tolerated by construction — including up to 65557 bytes of
+  arbitrary prefix that a polyglot could carry.
+- **Quine ZIPs** (archives that contain themselves). pakka reads,
+  never recursively expands; safe by absence-of-feature.
+
+## 7. PK3 vs PK4 in pakka
 
 The two labels diverge in exactly three places:
 
@@ -340,7 +536,7 @@ Academy, Soldier of Fortune II, and every Q3-engine fork
 (ioquake3, OpenArena, Tremulous, World of Padman, ...) ship. The
 PK4 label is recognisable in the wild by file extension only.
 
-## 7. Cross-format notes
+## 8. Cross-format notes
 
 Where the PAK-class formats sit in a tight 3-row family
 (`PACK` 56/64, `SPAK` 120/128, `PACK` 56/72), PK3 / PK4 sits on a
@@ -359,7 +555,7 @@ modding tool's output (Q3 demos, dhewm3 mod paks, ioquake3 pure
 servers). The constrained-subset stance is documented in id's
 `FS_LoadZipFile` and inherited verbatim.
 
-## 8. Test coverage
+## 9. Test coverage
 
 - `test/pk3_test.c` — end-to-end CLI tests against synthetic PK3
   archives covering STORED + DEFLATE entries, LFH/CDR/EOCD
@@ -390,7 +586,7 @@ servers). The constrained-subset stance is documented in id's
   s390x, catches byte-order regressions in the local
   `pk3_read_*` / `pk3_put_*` helpers.
 
-## 9. Related docs
+## 10. Related docs
 
 - [`quake-pak-format.md`](quake-pak-format.md) — Quake / Q2 /
   GoldSrc PAK (the PK3 ancestor).

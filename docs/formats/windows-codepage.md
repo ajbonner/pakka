@@ -22,27 +22,75 @@ through the C API store whatever bytes the caller passed (see §4 and
 
 ## 1. Sources
 
+### 1.1 Primary references
+
 - Microsoft Win32 / MSVC CRT documentation for the `W`-suffixed APIs
   pakka calls on Windows: `_wfopen`, `_wremove`, `_wstat64i32`,
   `_wfullpath`, `_wgetcwd`, `_wmkdir`, `_wopendir` / `_wreaddir`,
   `MoveFileExW`, `CreateFileW`, `GetFileAttributesW`,
-  `GetTempPathW`, plus `MultiByteToWideChar` /
-  `WideCharToMultiByte` for the conversion at the boundary.
-- PKWARE APPNOTE.TXT §4.4.4 — defines general-purpose flag bit 11
-  (the "language encoding" / EFS flag) as the signal that ZIP entry
-  names are UTF-8. The legacy default before bit 11 is CP437.
+  `GetTempPathW`, plus
+  [`MultiByteToWideChar`](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-multibytetowidechar) /
+  [`WideCharToMultiByte`](https://learn.microsoft.com/en-us/windows/win32/api/stringapiset/nf-stringapiset-widechartomultibyte)
+  for the conversion at the boundary. The exact contracts for
+  `MB_ERR_INVALID_CHARS` / `WC_ERR_INVALID_CHARS` are taken from
+  those two pages.
+- PKWARE APPNOTE.TXT §4.4.4 (current:
+  <https://pkware.cachefly.net/webdocs/casestudies/APPNOTE.TXT>) —
+  defines general-purpose flag bit 11 (the "language encoding" / EFS
+  flag) as the signal that ZIP entry names are UTF-8. The legacy
+  default before bit 11 is CP437.
 - IBM CP437 codepage table (the "OEM US" / DOS code page) — used as
   the ZIP-spec fallback decoding for entry names whose GP bit 11 is
-  clear.
-- RFC 3629 — UTF-8 syntax. pakka's validator rejects overlong
-  encodings, surrogate halves (U+D800..U+DFFF), and codepoints
-  above U+10FFFF.
+  clear. Authoritative tables:
+  [IBM CP437](https://www.ibm.com/docs/en/db2/12.1.x?topic=tables-code-page-437-generic-system-437)
+  and the Unicode vendor mapping at
+  <https://www.unicode.org/Public/MAPPINGS/VENDORS/MISC/IBMGRAPH.TXT>.
+- RFC 3629 — UTF-8 syntax,
+  <https://www.rfc-editor.org/rfc/rfc3629>. pakka's validator rejects
+  overlong encodings, surrogate halves (U+D800..U+DFFF), and
+  codepoints above U+10FFFF, all per §4 of that RFC.
 - pakka's own implementation: `src/cli.c` (`wmain` / `cli_run` +
   the sanitize / substitute call sites), `src/platform.{h,c}`
   (UTF-8 ↔ UTF-16 conversion and W-suffixed dispatch),
   `src/pk3file.c` (GP bit 11 writer, CP437 fallback decoder,
   name-decode policy), `src/common.{h,c}` (`pakka_is_valid_utf8`,
   `pakka_utf8_substitute_invalid`).
+
+### 1.2 Additional references
+
+- Microsoft Learn, "Use UTF-8 code pages in Windows apps" —
+  <https://learn.microsoft.com/en-us/windows/apps/design/globalizing/use-utf8-code-page>.
+  Documents the Windows 10 version 1903+ `activeCodePage` manifest
+  element discussed in §8.
+- Microsoft Learn, "Application Manifests" —
+  <https://learn.microsoft.com/en-us/windows/win32/sbscs/application-manifests>.
+  Full manifest schema reference.
+- Microsoft Learn, "Code Page Identifiers" —
+  <https://learn.microsoft.com/en-us/windows/win32/intl/code-page-identifiers>.
+  Numeric CP IDs (CP437 = 437, CP1251 = 1251, CP1252 = 1252,
+  Shift-JIS = 932, GBK = 936, UTF-8 = 65001) — useful when reading
+  ZIP archives written by non-pakka tools that record the codepage
+  in a vendor extra field.
+- Microsoft Learn, "Naming Files, Paths, and Namespaces" —
+  <https://learn.microsoft.com/en-us/windows/win32/fileio/naming-a-file>.
+  Reserved device names, path syntax, the `\\?\` long-path prefix,
+  and `MAX_PATH` semantics — context for pakka's name-safety check.
+- Unicode Standard Annex #15, "Unicode Normalization Forms" —
+  <https://unicode.org/reports/tr15/>. Defines NFC / NFD / NFKC /
+  NFKD; relevant for the normalization caveat in §10.
+- Unicode Technical Report #36, "Unicode Security Considerations" —
+  <https://unicode.org/reports/tr36/>. Bidi controls, confusables,
+  invisible codepoints — the broader security context behind pakka's
+  control-byte rejection and listing sanitizer.
+
+### 1.3 Preservation
+
+Every live external reference in §1.1 and §1.2 was submitted to the
+[Wayback Machine](https://web.archive.org/) on 2026-05-24. To fetch
+a snapshot of any link above, prepend `https://web.archive.org/web/`
+to its URL. Sources that carry their own archival guarantee (RFCs,
+Microsoft Learn, ibm.com, unicode.org, GitHub source files) are
+excluded from the submission set.
 
 ## 2. Background
 
@@ -71,7 +119,47 @@ Rust, Go, and Python on Windows.
 
 ## 3. Architecture
 
-Three layers, each with a single responsibility.
+Three layers, each with a single responsibility — the entry point
+that converts argv at the command-line boundary, the in-process
+UTF-8 narrow-char convention, and the platform layer that re-encodes
+at the syscall boundary.
+
+The two conversion points and the UTF-8 zone between them are the
+load-bearing structure:
+
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  External boundary  (Win32 wide-char / NTFS UTF-16)                  │
+    └────────────────┬─────────────────────────────────▲───────────────────┘
+                     │                                 │
+                     │  argv from OS                   │  _wfopen, _wmkdir,
+                     │  (wchar_t **)                   │  MoveFileExW,
+                     │                                 │  CreateFileW,
+                     │                                 │  _wopendir / _wreaddir,
+                     │                                 │  GetFileAttributesW,
+                     │                                 │  GetTempPathW
+                     │                                 │
+        WideCharToMultiByte                  MultiByteToWideChar
+        (CP_UTF8, WC_ERR_INVALID_CHARS)      (CP_UTF8, MB_ERR_INVALID_CHARS)
+        src/cli.c::wmain                     src/platform.c::u8_to_w
+                     │                                 ▲
+                     ▼                                 │
+    ┌──────────────────────────────────────────────────────────────────────┐
+    │  Internal  (UTF-8 everywhere)                                        │
+    │                                                                      │
+    │  argv_utf8 → cli_run → pakka_open / create / add / extract / verify  │
+    │  → pakka_platform_*  (src/platform.c)                                │
+    │                                                                      │
+    │  Every `const char *` in include/pakka.h is UTF-8 on Windows by      │
+    │  contract; entry->filename, internal path buffers, and the C API     │
+    │  arguments callers pass all live in this zone.                       │
+    └──────────────────────────────────────────────────────────────────────┘
+
+A malformed byte sequence at either conversion gate raises `EILSEQ`
+(`*_ERR_INVALID_CHARS`) rather than silently substituting U+FFFD;
+this is what makes the conversion a true boundary rather than a
+lossy approximation. POSIX builds collapse both gates into identity:
+the OS already treats narrow paths as opaque UTF-8 bytes, so
+`pakka_platform_*` is one-line wrappers around the POSIX call.
 
 ### 3.1 Entry point — `wmain`
 
@@ -182,7 +270,32 @@ in `src/pk3file.c`.
 
 pakka tries UTF-8 first regardless of any encoding flag, on the
 principle that "actually valid UTF-8" is the strongest signal
-available.
+available. The decode boundary collapses three on-disk encodings
+into the single UTF-8 in-memory representation:
+
+    On-disk archive bytes                  Decode boundary             entry->filename
+    ─────────────────────                  ───────────────             ───────────────
+
+    PK3/PK4, GP bit 11 set        ──► validate UTF-8 ──►              ┐
+       (claims UTF-8)                  reject if invalid                │
+                                       (PAKKA_ERR_FORMAT)               │
+                                                                        │
+    PK3/PK4, GP bit 11 clear      ──► decode CP437 ────►                │   UTF-8
+       (defaults to CP437)            high-half table  ──►              ├──► (always)
+                                      via src/pk3file.c                 │
+                                                                        │
+    PAK / SiN / Daikatana / WAD   ──► passthrough ─────►                │
+       (opaque bytes; no              (raw bytes; the                   │
+        encoding metadata)             archive does not                 │
+                                       declare a charset)              ─┘
+
+The CP437 decoder is `pk3_decode_entry_name` in `src/pk3file.c`; it
+returns `PK3_DECODE_TOOLONG` when the high-half expansion exceeds
+the in-memory name buffer (CP437 bytes that map to U+00BF..U+00FF
+each become 2 UTF-8 bytes, so a maximally-long high-half name can
+double in size). PAK-class formats have no decoder — the raw bytes
+*are* the filename, valid UTF-8 or not, and §6 covers what happens
+on extract / list when those bytes aren't UTF-8.
 
 ### 5.1 ZIP / PK3 / PK4
 
@@ -279,6 +392,22 @@ control-byte substitution. Listing a legacy CP1251 PAK on a UTF-8
 console therefore produces printable ASCII without raw 8-bit bytes
 corrupting the TTY state, and without claiming the name is
 something it isn't.
+
+### 6.5 Invalid-UTF-8 decision matrix
+
+The full per-operation behaviour for an entry whose on-disk name
+bytes are not valid UTF-8 per RFC 3629, broken down by archive
+class and code path:
+
+| Class                | Read / list                                                                  | Extract                                                                                                   | C API (`pakka_find_entry`, `pakka_open_entry`, ...) |
+| -------------------- | ---------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------- | --------------------------------------------------- |
+| PAK / SiN / DK / WAD | Listing prints sanitized form (invalid bytes → `?`); raw bytes never reach TTY. | `_` substitution per byte; `[warn]` to stderr; file materialized under sanitized name; exit 0.            | Returns raw on-disk bytes (no sanitization). Caller may pass them straight to a write path that calls `pakka_platform_*`; on Windows that returns `EILSEQ` from the UTF-8-to-UTF-16 conversion at the boundary. |
+| PK3 / PK4 (bit 11 set) | `pakka_open` rejects the archive with `PAKKA_ERR_FORMAT` ("entry N: name claims UTF-8 but is not"). | Same — open never succeeds.                                                                               | Same — open never succeeds.                         |
+| PK3 / PK4 (bit 11 clear) | Bytes decoded through the CP437 high-half table (§5.1); result is UTF-8; listing prints as-is. | The CP437→UTF-8 result is written to disk as-is.                                                          | Returns the CP437→UTF-8 result.                     |
+
+The collision check (§6.3) runs on the **sanitized** name for PAK-class
+formats, so two distinct on-disk names that map to the same sanitized
+form refuse to extract rather than silently overwrite.
 
 ## 7. Public API
 

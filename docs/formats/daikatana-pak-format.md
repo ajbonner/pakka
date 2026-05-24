@@ -10,25 +10,58 @@ custom byte-codec (LZSS-style) documented in §3 below.
 
 ## 1. Sources
 
-References that informed this document:
+### 1.1 Primary references
 
 - Daniel Gibson, "Daikatana .pak format" (gist) —
   <https://gist.github.com/DanielGibson/8bde6241c93e5efe8b75e5e00d0b9858>.
   This is the canonical narrative reference and the basis for §2 and
   the decoder opcode table in §3.
-- yquake2/pakextract — <https://github.com/yquake2/pakextract>
+- yquake2/pakextract — reader implementation at
+  [`pakextract.c`](https://github.com/yquake2/pakextract/blob/master/pakextract.c)
   (BSD-2-Clause). Reference C decoder; pakka's `pakka_dk_inflate` in
-  `src/dk_codec.c` matches its behaviour exactly.
+  `src/dk_codec.c` matches its behaviour exactly. The `-dk` flag
+  selects the DK row.
 - `dktools_readme.htm` (John Romero, Ion Storm 2000) — public
   documentation shipped with the Daikatana editing-tools distribution
   (`dktools_11h`). Section 4 covers `dkpak.exe`, the packer Ion Storm
   used to build the game's shipped paks. Default mode auto-allocates
   files by type into three output paks (`base` / `models` / `maps`);
   `-userpak` mode collapses that into a single pak and preserves
-  whatever staging directory tree the author provides.
+  whatever staging directory tree the author provides. Mirror
+  hosting the tools and readme:
+  <https://dk.toastednet.org/files.html>.
 - pakka's own implementation: `src/dk_codec.c` (decoder + encoder),
   `src/pakfile.c` (directory I/O, add-path policy, on-disk-extent
   helper), and `src/common.c` (PAK-class geometry table).
+
+### 1.2 Additional references
+
+- Internet Archive Daikatana source collection —
+  <https://archive.org/details/daikatana-src-collection>. Mirror of
+  talonbrave's archive of the Daikatana 1998 → 1.3 source tree
+  (community-released, not first-party id-style GPL); useful for
+  historical context on the engine fork lineage.
+- atsb/daikatana-restoration-project —
+  <https://github.com/atsb/daikatana-restoration-project>. Modern
+  open-source restoration of the 1.2 source aimed at running on
+  contemporary systems; alternative engine PAK reader.
+- MacSourcePorts/daikatana —
+  <https://github.com/MacSourcePorts/daikatana>. macOS-targeted port
+  of the Daikatana 1.3 codebase (note: the upstream is not formally
+  open source; this repo packages community changes).
+- DaiPAK on ModDB —
+  <https://www.moddb.com/games/daikatana/downloads/daipak>. Archived
+  third-party PAK creation tool (separate from Ion Storm's
+  `dkpak.exe`); useful for differential testing against pakka's
+  encoder output.
+- DeathEngine2 GitHub —
+  <https://github.com/DeathEngine2>. Hosts community-maintained
+  source snapshots of John Romero's Daikatana code.
+- Ion Storm tools mirror —
+  <https://dk.toastednet.org/IonRadiant/installing.shtml>. Workflow
+  documentation for the original editing tool chain (IonRadiant +
+  `dkpak.exe`); the in-archive layout `dkpak` produces is the
+  upstream test of any third-party encoder's compatibility.
 
 The encoder strategy in §4 is pakka's own design, justified by per-token
 byte-cost analysis. The encoder produces streams that the decoder in
@@ -36,6 +69,15 @@ byte-cost analysis. The encoder produces streams that the decoder in
 encoder output through the decoder in `test/dk_codec_test.c`, and
 cross-validated against `dkpak`-produced output in
 `test/fixtures/dk/`.
+
+### 1.3 Preservation
+
+Every live external reference in §1.1 and §1.2 was submitted to the
+[Wayback Machine](https://web.archive.org/) on 2026-05-24. To fetch
+a snapshot of any link above, prepend `https://web.archive.org/web/`
+to its URL. Sources that carry their own archival guarantee (GitHub
+source files, Internet Archive item pages) are excluded from the
+submission set.
 
 ## 2. File layout
 
@@ -85,6 +127,44 @@ pakka the directory I/O sites use `pakka_read_u32_le` /
 `pakka_write_u32_le` from `src/common.c`; the CI matrix includes a
 big-endian s390x job to keep this honest. Offsets and lengths are
 capped at `UINT32_MAX` (4 GiB) at every write site.
+
+### 2.4 Quake-vs-Daikatana disambiguation — decision table
+
+Both Quake PAK and Daikatana use the `"PACK"` magic, so the open-time
+layout probe in `src/pakfile.c::probe_pak_layout` has to disambiguate
+geometry. The probe runs two checks per candidate row size (64-byte
+Quake vs 72-byte Daikatana): first that `dirlength` divides evenly
+into the row, then that every directory entry's `file_pos +
+on-disk extent` lands inside the captured file size and that
+`file_pos >= PAKFILE_HEADER_SIZE` (12). The decision table:
+
+| Quake probe (64-byte rows) | DK probe (72-byte rows) | Result                                                                                                            |
+| -------------------------- | ----------------------- | ----------------------------------------------------------------------------------------------------------------- |
+| OK                         | divisibility-fail (`% 72 ≠ 0`) | Quake (`PAKKA_FORMAT_PAK`).                                                                                |
+| divisibility-fail (`% 64 ≠ 0`) | OK                  | Daikatana (`PAKKA_FORMAT_DAIKATANA`).                                                                             |
+| OK                         | extent-fail (`% 72 == 0` but entries don't fit) | Quake.                                                                                |
+| extent-fail (`% 64 == 0` but entries don't fit) | OK                 | Daikatana — the common shipping-DK case, since `compressed_length` only makes sense in 72-byte rows.              |
+| OK                         | OK                      | Ambiguous → `PAKKA_ERR_FORMAT` ("Ambiguous PACK archive (parses as both Quake and Daikatana); pass --format pak or --format daikatana"). |
+| Fail (any reason)          | Fail (any reason)       | `PAKKA_ERR_FORMAT` ("PACK archive does not parse as Quake or Daikatana (entry offset/length out of range)").      |
+| `dirlength == 0` (empty)   | `dirlength == 0` (empty) | Short-circuited to Quake (`PAKKA_FORMAT_PAK`) without running either probe — empties would trivially pass both. Pass `--format daikatana` to force DK identity. |
+
+An explicit `format_hint` from `pakka_open_ex` or `--format` short-
+circuits the probe entirely — the hint is asserted against the
+on-disk magic and the row size is taken from the hint. This is the
+safe path for callers who know what they have.
+
+In practice every shipping Daikatana pak has at least one
+compressed entry, so the 72-byte row's extra `compressed_length`
+field validates the on-disk extent and the 64-byte row's extent
+check fails. Synthetic fixtures live at `test/dk_test.c`:
+`test_ambiguous_576_rejected` exercises the "both probes fail"
+path (a 576-byte all-zero directory that divides into both row
+sizes but whose zeroed `file_pos` fails the `file_pos >= 12`
+check under both layouts); `test_create_empty_then_open_with_hint`
+exercises the empty-archive short-circuit. There is currently no
+fixture for the genuine both-probes-pass ambiguity — that would
+need a hand-crafted directory whose row layout is consistent under
+both 64- and 72-byte interpretations.
 
 ## 3. Wire format: byte-codec opcode table
 
