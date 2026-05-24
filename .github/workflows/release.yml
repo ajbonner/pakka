@@ -105,11 +105,11 @@ jobs:
             pakka-*.tar.gz.sha256
           if-no-files-found: error
 
-  # Windows ZIP — CMake + Ninja build, then `cpack -G ZIP` produces
-  # pakka-X.Y.Z-windows-x64.zip under build/cmake/. Compute SHA-256
-  # sidecar alongside it. Note: PowerShell uses backtick (`) for line
-  # continuation, not `\`; and the zip is in build/cmake/, not the
-  # workspace root.
+  # Windows ZIPs — CMake + Ninja build, then `cpack -G ZIP` produces
+  # pakka-X.Y.Z-windows-{x64,x86}.zip under build/cmake/. Compute
+  # SHA-256 sidecars alongside them. Note: PowerShell uses backtick
+  # (`) for line continuation, not `\`; and the zips are in
+  # build/cmake/, not the workspace root.
   windows-zip:
     needs: verify
     # Pin to the same label test.yml uses — `windows-latest` resolves
@@ -118,6 +118,14 @@ jobs:
     # Pakka's CMake config is MSVC-targeted (see CMakeLists.txt MSVC
     # branches), so the release ZIP must come off MSVC too.
     runs-on: windows-2025-vs2026
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - package_arch: x64
+            msvc_arch: x64
+          - package_arch: x86
+            msvc_arch: x86
     defaults:
       run:
         shell: pwsh
@@ -131,10 +139,10 @@ jobs:
       # `cmake -G Ninja` picks MSVC instead of MinGW.
       - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
-          arch: x64
+          arch: ${{ matrix.msvc_arch }}
       - name: Build pakka.exe and package ZIP
         run: |
-          cmake -B build/cmake -G Ninja .
+          cmake -B build/cmake -G Ninja -DPAKKA_PACKAGE_PLATFORM=windows-${{ matrix.package_arch }} .
           cmake --build build/cmake
           Push-Location build/cmake
           cpack -G ZIP
@@ -143,7 +151,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ needs.verify.outputs.version }}"
-          $zipName = "pakka-$version-windows-x64.zip"
+          $zipName = "pakka-$version-windows-${{ matrix.package_arch }}.zip"
           $zipPath = "build/cmake/$zipName"
           if (-not (Test-Path $zipPath)) {
               throw "expected $zipPath after cpack — not found"
@@ -152,20 +160,72 @@ jobs:
           "$hash  $zipName" | Out-File "$zipPath.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-zip
+          name: windows-${{ matrix.package_arch }}-zip
           path: |
-            build/cmake/pakka-*-windows-x64.zip
-            build/cmake/pakka-*-windows-x64.zip.sha256
+            build/cmake/pakka-*-windows-${{ matrix.package_arch }}.zip
+            build/cmake/pakka-*-windows-${{ matrix.package_arch }}.zip.sha256
           if-no-files-found: error
 
-  # Final job: download both build-job artifacts and attach them to a
+  # Native macOS binary archives — Makefile build + staged install into
+  # a package root, then both .tar.gz and .zip flavors with SHA-256
+  # sidecars. These run on the same native Intel and Apple Silicon
+  # labels as test.yml so the binary architecture matches the package
+  # suffix; no cross-compile or universal-binary merge step is hidden
+  # in the release path.
+  macos-archives:
+    needs: verify
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - runner: macos-26-intel
+            package_arch: x86_64
+          - runner: macos-26
+            package_arch: arm64
+    runs-on: ${{ matrix.runner }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ needs.verify.outputs.tag }}
+      - name: Build native macOS binary
+        run: make
+      - name: Package macOS archives
+        env:
+          VERSION: ${{ needs.verify.outputs.version }}
+          PACKAGE_ARCH: ${{ matrix.package_arch }}
+        run: |
+          set -euo pipefail
+          package="pakka-${VERSION}-macos-${PACKAGE_ARCH}"
+          rm -rf dist package-root
+          mkdir -p dist package-root
+          make install PREFIX= DESTDIR="$PWD/package-root/$package"
+          tar -C package-root -czf "dist/$package.tar.gz" "$package"
+          (cd package-root && zip -qry "../dist/$package.zip" "$package")
+          (
+              cd dist
+              shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256"
+              shasum -a 256 "$package.zip" > "$package.zip.sha256"
+          )
+      - uses: actions/upload-artifact@v7
+        with:
+          name: macos-${{ matrix.package_arch }}-archives
+          path: |
+            dist/pakka-*-macos-${{ matrix.package_arch }}.tar.gz
+            dist/pakka-*-macos-${{ matrix.package_arch }}.tar.gz.sha256
+            dist/pakka-*-macos-${{ matrix.package_arch }}.zip
+            dist/pakka-*-macos-${{ matrix.package_arch }}.zip.sha256
+          if-no-files-found: error
+
+  # Final job: download all build-job artifacts and attach them to a
   # fresh GitHub release. --generate-notes derives the changelog from
   # commits since the previous release tag; --verify-tag protects
   # against a typo'd workflow_dispatch input. We still check out the
   # tagged source so `gh release create` has repo context without
   # relying on env vars.
   release:
-    needs: [verify, source-tarball, windows-zip]
+    needs: [verify, source-tarball, windows-zip, macos-archives]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6

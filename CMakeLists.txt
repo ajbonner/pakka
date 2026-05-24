@@ -160,12 +160,16 @@ install(FILES man/pakka.3     DESTINATION ${CMAKE_INSTALL_MANDIR}/man3)
 install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 
 # CPack ZIP generator — `cpack -G ZIP` (from the build dir) writes
-# pakka-${PROJECT_VERSION}-windows-x64.zip with the layout above.
-# Used by the Windows release workflow; safe to invoke on any host.
+# pakka-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}.zip with the
+# layout above. Used by the Windows release workflow; safe to invoke on
+# any host. The release workflow passes windows-x86 for 32-bit MSVC
+# builds; the default preserves the original x64 package name.
+set(PAKKA_PACKAGE_PLATFORM "windows-x64" CACHE STRING
+    "Platform suffix for binary release packages")
 set(CPACK_GENERATOR "ZIP")
 set(CPACK_PACKAGE_NAME "pakka")
 set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-set(CPACK_PACKAGE_FILE_NAME "pakka-${PROJECT_VERSION}-windows-x64")
+set(CPACK_PACKAGE_FILE_NAME "pakka-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}")
 set(CPACK_PACKAGE_VENDOR "Aaron Bonner")
 set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
     "CLI utility for game-engine archive formats (PAK, PK3, PK4, SiN, WAD)")
