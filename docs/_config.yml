@@ -1,0 +1,37 @@
+title: Pakka
+description: >-
+  A command line utility for working with Quake, GoldSrc, SiN,
+  Daikatana, Doom, Quake 3, and Doom 3 archive formats.
+url: https://ajbonner.github.io
+baseurl: /pakka
+
+theme: jekyll-theme-cayman
+
+permalink: pretty
+
+plugins:
+  - jekyll-relative-links
+  - jekyll-optional-front-matter
+  - jekyll-readme-index
+
+relative_links:
+  enabled: true
+  collections: false
+
+optional_front_matter:
+  remove_originals: true
+
+readme_index:
+  enabled: false
+
+include:
+  - index.md
+
+exclude:
+  - _config.yml
+
+defaults:
+  - scope:
+      path: ""
+    values:
+      layout: default
