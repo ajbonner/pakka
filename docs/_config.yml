@@ -5,11 +5,12 @@ description: >-
 url: https://ajbonner.github.io
 baseurl: /pakka
 
-theme: jekyll-theme-hacker
+remote_theme: ajbonner/jekyll-theme-phosphor@v0.3.0
 
 permalink: pretty
 
 plugins:
+  - jekyll-remote-theme
   - jekyll-relative-links
   - jekyll-optional-front-matter
   - jekyll-readme-index
