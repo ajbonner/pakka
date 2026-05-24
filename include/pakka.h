@@ -28,7 +28,7 @@ const char *pakka_version(void);
 
 typedef enum {
     PAKKA_FORMAT_AUTO = 0,
-    PAKKA_FORMAT_PAK,        /* id Quake 1 / 2 and GoldSrc (Half-Life 1, CS 1.6, TFC, ...) — bit-identical PACK layout */
+    PAKKA_FORMAT_PAK,        /* id Quake 1 / 2 and Half-Life / GoldSrc — bit-identical PACK layout */
     PAKKA_FORMAT_PK3,
     PAKKA_FORMAT_PK4,
     PAKKA_FORMAT_SIN,        /* Ritual 1998, SPAK + 120-byte names */

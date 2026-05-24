@@ -1066,11 +1066,11 @@ static int strip_long_options(int argc, char **argv, opts_t *opts) {
             }
             {
                 const char *name = argv[src + 1];
-                /* GoldSrc PAKs (Half-Life 1, CS 1.6, TFC, ...) are
-                 * bit-identical to Quake/Q2 PAK; the aliases give modders
-                 * a discoverable name on --help. IWAD and PWAD are not
-                 * bit-identical (different 4-byte magic), so they get
-                 * their own tokens — no shared "wad" alias. */
+                /* GoldSrc PAKs are bit-identical to Quake/Q2 PAK; the
+                 * aliases give Half-Life modders a discoverable name
+                 * on --help. IWAD and PWAD are not bit-identical
+                 * (different 4-byte magic), so they get their own
+                 * tokens — no shared "wad" alias. */
                 if (strcmp(name, "pak") == 0
                     || strcmp(name, "goldsrc") == 0
                     || strcmp(name, "hl") == 0) {
@@ -1243,7 +1243,7 @@ static void version(void) {
     printf("libpakka %s (linked)\n", pakka_version());
     printf("\n");
     printf("Supported formats:\n");
-    printf("  pak         Quake 1 / 2 and GoldSrc (Half-Life 1, CS 1.6, TFC, ...)  read + write\n");
+    printf("  pak         Quake 1 / 2 and Half-Life / GoldSrc  read + write\n");
     printf("              (--format goldsrc and --format hl are aliases for pak)\n");
     printf("  sin         Ritual SiN (1998)    read + write\n");
     printf("  daikatana   Ion Storm (2000)     read + write (.tga/.bmp/.wal/.pcx/.bsp auto-compressed)\n");
@@ -1284,7 +1284,7 @@ static void help(void) {
     fprintf(stderr, " --as <entry_name> <source_path> add source file as the given entry name (only with -a or -c)\n");
     fprintf(stderr, "                                 (repeat --as for multiple aliased pairs; may mix with plain paths)\n");
     fprintf(stderr, " --format <name>                 pin archive format: pak, sin, daikatana, iwad, pwad, pk3, pk4\n");
-    fprintf(stderr, "                                 (goldsrc and hl are aliases for pak — Half-Life 1 / CS 1.6 / TFC use Quake PAK)\n");
+    fprintf(stderr, "                                 (goldsrc and hl are aliases for pak — Half-Life / GoldSrc use the Quake PAK layout)\n");
     fprintf(stderr, "                                 (on open: skip auto-detect; on create: override extension sniffer)\n");
     fprintf(stderr, " --deep                          deeper integrity check (with --verify; ZIP CRC32, DK decode)\n");
     fprintf(stderr, " --compress                      DEFLATE-encode added entries (PK3/PK4 only, with -c or -a)\n");

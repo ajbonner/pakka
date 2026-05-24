@@ -1,8 +1,9 @@
 # Pakka
-A command line utility for working with Quake 1 / 2 and GoldSrc
-(Half-Life 1, Counter-Strike 1.6, TFC, ...) `.pak` files, SiN `.sin`
-archives, Daikatana `.pak` archives, Doom `.wad` files (IWAD and
-PWAD), Quake 3 `.pk3` files, and Doom 3 `.pk4` files.
+A C library (`libpakka`) for reading, writing, and editing the archive
+formats used by id Software, Ritual, Ion Storm, and Valve game engines
+— Quake 1 / 2 and Half-Life / GoldSrc PAK, SiN SPAK, Daikatana PAK,
+Doom IWAD / PWAD, Quake 3 PK3, and Doom 3 PK4. The `pakka(1)`
+command-line tool is a thin wrapper around the same API.
 
 Why 'pakka', well pak files, and I have kids and Makka Pakka is their favourite
 [In the Night Garden](http://www.inthenightgarden.co.uk/) character.
@@ -91,7 +92,7 @@ supported formats; `man pakka` for the manpage.
 Pakka reads, writes, and edits every supported format with the full
 operation set — list, extract, create, add, delete, verify — across:
 
-* Quake 1 / 2 PAK (also GoldSrc: Half-Life 1, CS 1.6, TFC, Sven Co-op)
+* Quake 1 / 2 PAK and Half-Life / GoldSrc PAK (bit-identical layout)
 * SiN
 * Daikatana
 * Doom IWAD and PWAD

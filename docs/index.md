@@ -4,12 +4,11 @@ title: Pakka Documentation
 
 # Pakka documentation
 
-Pakka is a command-line utility for working with the archive formats
-used by id Software, Ritual, Ion Storm, and Valve game engines —
-Quake 1 / 2 PAK, GoldSrc PAK (Half-Life 1, CS 1.6, TFC, ...), SiN
-SPAK, Daikatana PAK, Doom WAD / IWAD / PWAD, Quake 3 PK3, and Doom 3
-PK4. It also ships as a small C library (`libpakka.a`) with an
-opaque-handle API.
+Pakka is a C library (`libpakka`) for reading, writing, and editing
+the archive formats used by id Software, Ritual, Ion Storm, and Valve
+game engines — Quake 1 / 2 and Half-Life / GoldSrc PAK, SiN SPAK,
+Daikatana PAK, Doom IWAD / PWAD, Quake 3 PK3, and Doom 3 PK4. The
+`pakka(1)` command-line tool is a thin wrapper around the same API.
 
 The [project README](https://github.com/ajbonner/pakka/blob/master/README.md)
 is the quickstart and launching-off point. These pages are the
