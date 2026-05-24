@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="{{ site.lang | default: 'en' }}">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{% if page.title %}{{ page.title }} &mdash; {{ site.title }}{% else %}{{ site.title }}{% endif %}</title>
+  {% if site.description %}<meta name="description" content="{{ site.description | strip_newlines | strip }}">{% endif %}
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;700&family=VT323&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="{{ '/assets/css/style.css' | relative_url }}">
+  <style>
+    .banner-left a.banner-home { color: inherit; text-decoration: none; }
+    .banner-left a.banner-home:hover,
+    .banner-left a.banner-home:focus { color: var(--fg-bright); }
+  </style>
+</head>
+<body>
+  <div class="crt" aria-hidden="true"></div>
+  <div class="terminal">
+    <header class="banner">
+      <span class="banner-left"><a href="{{ '/' | relative_url }}" class="banner-home">{{ site.title | default: 'phosphor' }}(7)</a>{% if page.title %} &mdash; {{ page.title }}{% endif %}</span>
+      <span class="banner-right">{{ site.time | date: '%Y-%m-%d' }}</span>
+    </header>
+    {% unless page.url == '/' %}
+    {% assign segs = page.url | replace: '/', ' ' | strip | split: ' ' %}
+    <nav class="breadcrumbs" aria-label="breadcrumb">
+      <a href="{{ '/' | relative_url }}">~</a>{% assign acc = '' %}{% for s in segs %}{% assign acc = acc | append: '/' | append: s %}<span class="sep">/</span>{% if forloop.last %}<span class="here">{{ s }}</span>{% else %}<a href="{{ acc | append: '/' | relative_url }}">{{ s }}</a>{% endif %}{% endfor %}
+    </nav>
+    {% endunless %}
+    <main>
+      {{ content }}
+    </main>
+    <footer class="prompt">
+      <span class="user">{{ site.title | default: 'guest' | downcase }}@vt100</span><span class="sep">:</span><span class="path">~</span><span class="sep">$</span> <span class="caret">_</span>
+    </footer>
+  </div>
+</body>
+</html>
