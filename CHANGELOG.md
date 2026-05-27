@@ -7,6 +7,8 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.8.0] — 2026-05-27
+
 ### Added
 - Library-only `libpakka` Windows zips (x86 + x64) — static lib, public
   header, and `pakka(3)` manpage, no CLI — for integrators embedding
@@ -231,7 +233,8 @@ the 2026 modernization pass picked it up again.
 - POSIX build via a hand-rolled `Makefile`.
 - MIT licence.
 
-[Unreleased]: https://github.com/ajbonner/pakka/compare/v1.7.0...HEAD
+[Unreleased]: https://github.com/ajbonner/pakka/compare/v1.8.0...HEAD
+[1.8.0]: https://github.com/ajbonner/pakka/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/ajbonner/pakka/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ajbonner/pakka/compare/v1.5.0...v1.6.0
 [1.5.0]: https://github.com/ajbonner/pakka/compare/v1.4.0...v1.5.0

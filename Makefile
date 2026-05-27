@@ -1,7 +1,7 @@
 # Requires GNU make. On BSD: pkg_add gmake (or pkg install gmake), then run gmake.
 APP_NAME="\"Pakka\""
 MAJOR=1
-MINOR=7
+MINOR=8
 PATCH=0
 BUILD_DATE="\"$(shell date +'%b %d, %Y')\""
 VERSION="\"$(MAJOR).$(MINOR).$(PATCH)\""

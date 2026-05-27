@@ -32,11 +32,11 @@ and a SHA-256 sidecar to the
 [GitHub release](https://github.com/ajbonner/pakka/releases). Grab
 them, verify the checksum, build, and install:
 
-    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.7.0/pakka-1.7.0.tar.gz
-    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.7.0/pakka-1.7.0.tar.gz.sha256
-    $ shasum -a 256 -c pakka-1.7.0.tar.gz.sha256
-    $ tar xzf pakka-1.7.0.tar.gz
-    $ cd pakka-1.7.0
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.8.0/pakka-1.8.0.tar.gz
+    $ curl -fLO https://github.com/ajbonner/pakka/releases/download/v1.8.0/pakka-1.8.0.tar.gz.sha256
+    $ shasum -a 256 -c pakka-1.8.0.tar.gz.sha256
+    $ tar xzf pakka-1.8.0.tar.gz
+    $ cd pakka-1.8.0
     $ make
 
 Then pick one install flavor:
@@ -75,7 +75,7 @@ Releases ship `pakka-X.Y.Z-windows-x64.zip` and
 against the MSVC build. Layout (x64 shown; x86 is identical with the
 `-x64` suffix swapped for `-x86`):
 
-    pakka-1.7.0-windows-x64\
+    pakka-1.8.0-windows-x64\
       bin\pakka.exe
       lib\pakka.lib                       # static lib for integrators
       include\pakka.h                     # public C header
@@ -89,7 +89,7 @@ The library-only `libpakka-X.Y.Z-windows-x64.zip` and
 `PAKKA_BUILD_CLI=OFF` — no `pakka.exe`, no `pakka(1)` manpage. For C/C++
 integrators embedding libpakka who don't need the CLI:
 
-    libpakka-1.7.0-windows-x64\
+    libpakka-1.8.0-windows-x64\
       lib\pakka.lib                       # static library
       include\pakka.h                     # public C header
       share\man\man3\pakka.3
@@ -102,7 +102,7 @@ Releases also ship native macOS binary archives — a `.tar.gz` for Intel
 (`x86_64`) and Apple Silicon (`arm64`), produced via `make install` into
 a staged package root. Layout (Apple Silicon shown):
 
-    pakka-1.7.0-macos-arm64/
+    pakka-1.8.0-macos-arm64/
       bin/pakka
       lib/libpakka.a
       include/pakka.h
