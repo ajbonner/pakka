@@ -15,8 +15,8 @@ with a `.sha256` sidecar:
 | `pakka-X.Y.Z.tar.gz` — source tarball       | Any POSIX with GNU make + C99         |
 | `pakka-X.Y.Z-windows-x64.zip`               | Windows 64-bit (MSVC + CMake)         |
 | `pakka-X.Y.Z-windows-x86.zip`               | Windows 32-bit (MSVC + CMake)         |
-| `pakka-X.Y.Z-macos-x86_64.tar.gz` and `.zip`| macOS Intel                           |
-| `pakka-X.Y.Z-macos-arm64.tar.gz` and `.zip` | macOS Apple Silicon                   |
+| `pakka-X.Y.Z-macos-x86_64.tar.gz`           | macOS Intel                           |
+| `pakka-X.Y.Z-macos-arm64.tar.gz`            | macOS Apple Silicon                   |
 
 The macOS and Windows packages are built on native runners — no
 cross-compile, no universal-binary merge.
@@ -82,10 +82,9 @@ against the MSVC build. Layout (x64 shown; x86 is identical with the
 
 ## macOS archive layout
 
-Releases also ship native macOS binary archives — both `.tar.gz` and
-`.zip` for Intel (`x86_64`) and Apple Silicon (`arm64`), produced via
-`make install` into a staged package root. Layout (Apple Silicon
-shown):
+Releases also ship native macOS binary archives — a `.tar.gz` for Intel
+(`x86_64`) and Apple Silicon (`arm64`), produced via `make install` into
+a staged package root. Layout (Apple Silicon shown):
 
     pakka-1.7.0-macos-arm64/
       bin/pakka

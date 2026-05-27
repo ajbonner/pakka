@@ -46,8 +46,8 @@ See [Installation docs](https://ajbonner.github.io/pakka/install/) for
 Releases ship pre-built archives alongside the source tarball:
 
 * `pakka-X.Y.Z-windows-x64.zip` and `pakka-X.Y.Z-windows-x86.zip`
-* `pakka-X.Y.Z-macos-x86_64.tar.gz` / `.zip` (Intel)
-* `pakka-X.Y.Z-macos-arm64.tar.gz` / `.zip` (Apple Silicon)
+* `pakka-X.Y.Z-macos-x86_64.tar.gz` (Intel)
+* `pakka-X.Y.Z-macos-arm64.tar.gz` (Apple Silicon)
 
 Each carries a `.sha256` sidecar. Unzip / untar anywhere and add the
 extracted `bin/` to your `PATH`, or copy the `pakka` binary into a

@@ -7,6 +7,10 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Removed
+- macOS `.zip` release archives. `.tar.gz` is the canonical macOS/Unix
+  artifact; `.zip` remains the Windows release format.
+
 ## [1.7.0] — 2026-05-24
 
 ### Added

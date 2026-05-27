@@ -167,8 +167,9 @@ jobs:
           if-no-files-found: error
 
   # Native macOS binary archives — Makefile build + staged install into
-  # a package root, then both .tar.gz and .zip flavors with SHA-256
-  # sidecars. These run on the same native Intel and Apple Silicon
+  # a package root, then a .tar.gz archive with a SHA-256 sidecar
+  # (.tar.gz is the canonical macOS/Unix format; .zip is Windows-only).
+  # These run on the same native Intel and Apple Silicon
   # labels as test.yml so the binary architecture matches the package
   # suffix; no cross-compile or universal-binary merge step is hidden
   # in the release path.
@@ -202,11 +203,9 @@ jobs:
           mkdir -p dist package-root
           make install PREFIX= DESTDIR="$PWD/package-root/$package"
           tar -C package-root -czf "dist/$package.tar.gz" "$package"
-          (cd package-root && zip -qry "../dist/$package.zip" "$package")
           (
               cd dist
               shasum -a 256 "$package.tar.gz" > "$package.tar.gz.sha256"
-              shasum -a 256 "$package.zip" > "$package.zip.sha256"
           )
       - uses: actions/upload-artifact@v7
         with:
@@ -214,8 +213,6 @@ jobs:
           path: |
             dist/pakka-*-macos-${{ matrix.package_arch }}.tar.gz
             dist/pakka-*-macos-${{ matrix.package_arch }}.tar.gz.sha256
-            dist/pakka-*-macos-${{ matrix.package_arch }}.zip
-            dist/pakka-*-macos-${{ matrix.package_arch }}.zip.sha256
           if-no-files-found: error
 
   # Final job: download all build-job artifacts and attach them to a
