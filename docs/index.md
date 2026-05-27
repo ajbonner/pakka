@@ -54,7 +54,8 @@ ordering, codec opcode tables — see the per-format pages:
 See the
 [GitHub releases page](https://github.com/ajbonner/pakka/releases)
 for source tarballs and pre-built binaries (Windows x64 / x86, macOS
-Intel / Apple Silicon), each with SHA-256 sidecars.
+Intel / Apple Silicon) — plus library-only `libpakka` zips for Windows —
+each with SHA-256 sidecars.
 
 ## License
 

@@ -195,19 +195,21 @@ if(PAKKA_INSTALL)
 
     if(PAKKA_BUILD_CLI)
         install(TARGETS pakka_exe RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR})
+        install(FILES man/pakka.1 DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
     endif()
     install(TARGETS pakka     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
     install(FILES include/pakka.h DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-    install(FILES man/pakka.1     DESTINATION ${CMAKE_INSTALL_MANDIR}/man1)
     install(FILES man/pakka.3     DESTINATION ${CMAKE_INSTALL_MANDIR}/man3)
     install(FILES README.md LICENSE DESTINATION ${CMAKE_INSTALL_DOCDIR})
 endif()
 
 # CPack ZIP generator — `cpack -G ZIP` (from the build dir) writes
-# pakka-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}.zip with the
-# layout above. Used by the Windows release workflow; safe to invoke on
-# any host. The release workflow passes windows-x86 for 32-bit MSVC
-# builds; the default preserves the original x64 package name.
+# ${PAKKA_PACKAGE_BASENAME}-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}.zip
+# with the layout above. Used by the Windows release workflow; safe to
+# invoke on any host. The workflow varies these per leg: windows-x86 for
+# 32-bit MSVC builds, and basename libpakka with PAKKA_BUILD_CLI=OFF for
+# the library-only package. The defaults preserve the full-bundle x64
+# package name.
 #
 # Whole block is gated so include(CPack) — which registers a global
 # `package` target and writes CPackConfig.cmake at the top of the build
@@ -217,10 +219,12 @@ endif()
 if(PAKKA_PACKAGE)
     set(PAKKA_PACKAGE_PLATFORM "windows-x64" CACHE STRING
         "Platform suffix for binary release packages")
+    set(PAKKA_PACKAGE_BASENAME "pakka" CACHE STRING
+        "Base name for binary release packages (pakka = CLI+lib, libpakka = library-only)")
     set(CPACK_GENERATOR "ZIP")
     set(CPACK_PACKAGE_NAME "pakka")
     set(CPACK_PACKAGE_VERSION ${PROJECT_VERSION})
-    set(CPACK_PACKAGE_FILE_NAME "pakka-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}")
+    set(CPACK_PACKAGE_FILE_NAME "${PAKKA_PACKAGE_BASENAME}-${PROJECT_VERSION}-${PAKKA_PACKAGE_PLATFORM}")
     set(CPACK_PACKAGE_VENDOR "Aaron Bonner")
     set(CPACK_PACKAGE_DESCRIPTION_SUMMARY
         "CLI utility for game-engine archive formats (PAK, PK3, PK4, SiN, WAD)")

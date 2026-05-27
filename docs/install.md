@@ -15,11 +15,15 @@ with a `.sha256` sidecar:
 | `pakka-X.Y.Z.tar.gz` — source tarball       | Any POSIX with GNU make + C99         |
 | `pakka-X.Y.Z-windows-x64.zip`               | Windows 64-bit (MSVC + CMake)         |
 | `pakka-X.Y.Z-windows-x86.zip`               | Windows 32-bit (MSVC + CMake)         |
+| `libpakka-X.Y.Z-windows-x64.zip`            | Windows 64-bit, library-only (no CLI) |
+| `libpakka-X.Y.Z-windows-x86.zip`            | Windows 32-bit, library-only (no CLI) |
 | `pakka-X.Y.Z-macos-x86_64.tar.gz`           | macOS Intel                           |
 | `pakka-X.Y.Z-macos-arm64.tar.gz`            | macOS Apple Silicon                   |
 
 The macOS and Windows packages are built on native runners — no
-cross-compile, no universal-binary merge.
+cross-compile, no universal-binary merge. The `libpakka-*` zips are the
+same Windows build with the CLI omitted — static lib, header, and
+`pakka(3)` manpage only — for integrators embedding libpakka.
 
 ## From the source tarball (Unix)
 
@@ -76,6 +80,18 @@ against the MSVC build. Layout (x64 shown; x86 is identical with the
       lib\pakka.lib                       # static lib for integrators
       include\pakka.h                     # public C header
       share\man\man1\pakka.1
+      share\man\man3\pakka.3
+      share\doc\pakka\README.md
+      share\doc\pakka\LICENSE
+
+The library-only `libpakka-X.Y.Z-windows-x64.zip` and
+`libpakka-X.Y.Z-windows-x86.zip` are the same build configured with
+`PAKKA_BUILD_CLI=OFF` — no `pakka.exe`, no `pakka(1)` manpage. For C/C++
+integrators embedding libpakka who don't need the CLI:
+
+    libpakka-1.7.0-windows-x64\
+      lib\pakka.lib                       # static library
+      include\pakka.h                     # public C header
       share\man\man3\pakka.3
       share\doc\pakka\README.md
       share\doc\pakka\LICENSE

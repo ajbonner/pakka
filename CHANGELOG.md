@@ -7,6 +7,12 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+### Added
+- Library-only `libpakka` Windows zips (x86 + x64) — static lib, public
+  header, and `pakka(3)` manpage, no CLI — for integrators embedding
+  libpakka. Built from the same MSVC release path with
+  `PAKKA_BUILD_CLI=OFF`.
+
 ### Removed
 - macOS `.zip` release archives. `.tar.gz` is the canonical macOS/Unix
   artifact; `.zip` remains the Windows release format.

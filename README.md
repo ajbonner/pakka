@@ -53,6 +53,11 @@ Each carries a `.sha256` sidecar. Unzip / untar anywhere and add the
 extracted `bin/` to your `PATH`, or copy the `pakka` binary into a
 directory already on `PATH`.
 
+Embedding the library without the CLI? Windows integrators can grab the
+library-only `libpakka-X.Y.Z-windows-x64.zip` /
+`libpakka-X.Y.Z-windows-x86.zip` — static lib, header, and `pakka(3)`
+manpage, no `pakka.exe`.
+
 ### From source (git clone)
 
     $ git clone https://github.com/ajbonner/pakka.git

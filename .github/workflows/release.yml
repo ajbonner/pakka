@@ -105,11 +105,13 @@ jobs:
             pakka-*.tar.gz.sha256
           if-no-files-found: error
 
-  # Windows ZIPs — CMake + Ninja build, then `cpack -G ZIP` produces
-  # pakka-X.Y.Z-windows-{x64,x86}.zip under build/cmake/. Compute
-  # SHA-256 sidecars alongside them. Note: PowerShell uses backtick
-  # (`) for line continuation, not `\`; and the zips are in
-  # build/cmake/, not the workspace root.
+  # Windows ZIPs — CMake + Ninja build, then `cpack -G ZIP`. Each matrix
+  # leg writes one zip under build/cmake/: the full pakka-X.Y.Z-windows-
+  # {x64,x86}.zip (CLI + lib) and the library-only libpakka-X.Y.Z-windows-
+  # {x64,x86}.zip (PAKKA_BUILD_CLI=OFF — static lib + header + libpakka
+  # manpage + docs, no CLI). Compute SHA-256 sidecars alongside them.
+  # Note: PowerShell uses backtick (`) for line continuation, not `\`;
+  # and the zips are in build/cmake/, not the workspace root.
   windows-zip:
     needs: verify
     # Pin to the same label test.yml uses — `windows-latest` resolves
@@ -124,8 +126,20 @@ jobs:
         include:
           - package_arch: x64
             msvc_arch: x64
+            cli: "ON"
+            pkg: pakka
           - package_arch: x86
             msvc_arch: x86
+            cli: "ON"
+            pkg: pakka
+          - package_arch: x64
+            msvc_arch: x64
+            cli: "OFF"
+            pkg: libpakka
+          - package_arch: x86
+            msvc_arch: x86
+            cli: "OFF"
+            pkg: libpakka
     defaults:
       run:
         shell: pwsh
@@ -140,9 +154,12 @@ jobs:
       - uses: TheMrMilchmann/setup-msvc-dev@v4
         with:
           arch: ${{ matrix.msvc_arch }}
-      - name: Build pakka.exe and package ZIP
+      - name: Build and package ZIP
+        # PAKKA_BUILD_TESTING=OFF: the release build only packages — it
+        # never runs ctest — so skip compiling the test suite (which also
+        # references the pakka_exe target that the CLI=OFF leg doesn't build).
         run: |
-          cmake -B build/cmake -G Ninja -DPAKKA_PACKAGE_PLATFORM=windows-${{ matrix.package_arch }} .
+          cmake -B build/cmake -G Ninja -DPAKKA_BUILD_CLI=${{ matrix.cli }} -DPAKKA_PACKAGE_BASENAME=${{ matrix.pkg }} -DPAKKA_BUILD_TESTING=OFF -DPAKKA_PACKAGE_PLATFORM=windows-${{ matrix.package_arch }} .
           cmake --build build/cmake
           Push-Location build/cmake
           cpack -G ZIP
@@ -151,7 +168,7 @@ jobs:
         shell: pwsh
         run: |
           $version = "${{ needs.verify.outputs.version }}"
-          $zipName = "pakka-$version-windows-${{ matrix.package_arch }}.zip"
+          $zipName = "${{ matrix.pkg }}-$version-windows-${{ matrix.package_arch }}.zip"
           $zipPath = "build/cmake/$zipName"
           if (-not (Test-Path $zipPath)) {
               throw "expected $zipPath after cpack — not found"
@@ -160,10 +177,10 @@ jobs:
           "$hash  $zipName" | Out-File "$zipPath.sha256" -Encoding ascii
       - uses: actions/upload-artifact@v7
         with:
-          name: windows-${{ matrix.package_arch }}-zip
+          name: ${{ matrix.pkg }}-windows-${{ matrix.package_arch }}-zip
           path: |
-            build/cmake/pakka-*-windows-${{ matrix.package_arch }}.zip
-            build/cmake/pakka-*-windows-${{ matrix.package_arch }}.zip.sha256
+            build/cmake/${{ matrix.pkg }}-*-windows-${{ matrix.package_arch }}.zip
+            build/cmake/${{ matrix.pkg }}-*-windows-${{ matrix.package_arch }}.zip.sha256
           if-no-files-found: error
 
   # Native macOS binary archives — Makefile build + staged install into
