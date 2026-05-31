@@ -158,7 +158,7 @@ source must stay readable and unchanged until `pakka_commit` /
 ## Call-pattern example
 
 [`test/c_api_test.c`](https://github.com/ajbonner/pakka/blob/master/test/c_api_test.c)
-exercises the entire public surface against the installed
+exercises the entire public API against the installed
 `libpakka.a` only — no internal headers. It's the canonical example
 of call patterns and structured-error handling.
 

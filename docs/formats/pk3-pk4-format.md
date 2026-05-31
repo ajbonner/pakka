@@ -346,7 +346,7 @@ backends:
 | zlib     | System `<zlib.h>` with `windowBits = -MAX_WBITS` | `make PAKKA_DEFLATE_BACKEND=zlib` / `cmake -DPAKKA_USE_ZLIB=ON`. |
 
 Both backends export the same `pakka_deflate_compress` /
-`pakka_deflate_inflate` surface; `src/pk3file.c` never includes
+`pakka_deflate_inflate` interface; `src/pk3file.c` never includes
 either codec directly.
 
 The negative `windowBits` value on the zlib backend selects raw
@@ -452,7 +452,7 @@ the on-disk CDR allocation and the per-entry decompressed buffer:
 The entry-name safety check (`pakka_unsafe_entry_name` in
 `src/common.c`) rejects `..` path components, absolute paths
 (leading `/`), drive-letter prefixes, Windows reserved device names
-(`CON`, `PRN`, `AUX`, `NUL`, `COM1..9`, `LPT1..9`), and any control
+(`CON`, `PRN`, `AUX`, `NUL`, `COM0..9`, `LPT0..9`), and any control
 byte (`< 0x20` or `== 0x7F`). The check runs across the **full
 declared `name_len`**, not the C-string view, so a crafted
 `"good.txt\0../escape"` cannot smuggle a traversal through a NUL.
@@ -566,7 +566,7 @@ servers). The constrained-subset stance is documented in id's
   (max_decompressed cap, commit-refuses-changed-source,
   open_entry_handle paths, rebuild rollback in-memory) and the
   fault-injection cases via subprocess respawn.
-- `test/pk4_test.c` — the same shape re-run with `.pk4` extensions
+- `test/pk4_test.c` — the same suite re-run with `.pk4` extensions
   + `--format pk4`, asserting that the bytes are identical to the
   PK3 case and the only observable difference is the label
   returned by `pakka_format()`.

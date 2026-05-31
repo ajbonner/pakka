@@ -3,7 +3,7 @@
 Pakka reads, writes, and edits every supported archive format with the
 full operation set — list, extract, create, add, delete, verify. The
 formats differ in their on-disk container, their filename width, and
-whether they support compression; the CLI and library surface them
+whether they support compression; the CLI and library expose them
 uniformly.
 
 ## Format selection at create time

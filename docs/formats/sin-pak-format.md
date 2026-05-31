@@ -8,7 +8,7 @@ documented in [`quake-pak-format.md`](quake-pak-format.md). Every
 structural rule from that doc (12-byte header, on-disk LE u32s,
 unordered directory, no compression, no checksums, NUL-padded
 filenames without a required terminator, orphan-bytes tolerance,
-empty-archive shape, the `pakka_read_u32_le` / `pakka_write_u32_le`
+empty-archive handling, the `pakka_read_u32_le` / `pakka_write_u32_le`
 contract) applies unchanged. This doc covers only the differences.
 
 ## 1. Sources

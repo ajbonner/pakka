@@ -26,7 +26,7 @@ Requires a C99 compiler, `make`, `curl`, `openssl`, and `tar`
 * **`c_api_test`** — a C-API exerciser linked only against the
   public header. Covers NULL tolerance, round-trips, structured-
   error population, and the `pakka_open_entry` /
-  `pakka_reader_read` streaming surface that black-box CLI tests
+  `pakka_reader_read` streaming API that black-box CLI tests
   can't reach.
 
 ## Running tests on Windows

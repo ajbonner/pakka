@@ -121,7 +121,7 @@ catalog.
 | 8      | 4    | `infotableofs`  | int32 LE — byte offset of the directory block in the archive.          |
 
 Two differences from the Quake / SiN / Daikatana header that share this
-12-byte shape:
+12-byte layout:
 
 1. **Field order is reversed.** Quake-class stores `(diroffset,
    dirlength)`; WAD stores `(numlumps, infotableofs)`. pakka normalizes
@@ -276,7 +276,7 @@ Vanilla Doom (`linuxdoom-1.10`) — 10 lumps per map, fixed order:
 Hexen / ZDoom — 11 lumps per map, adds `BEHAVIOR` between `SECTORS`
 and `REJECT` (compiled ACS bytecode for the Hexen scripting system).
 
-UDMF (Universal Doom Map Format) — uses a different shape entirely:
+UDMF (Universal Doom Map Format) — uses a different layout entirely:
 a `TEXTMAP` lump (UTF-8 text describing geometry) bracketed by
 `ZNODES`, optional `REJECT` / `DIALOGUE` / `BEHAVIOR`, and closed by
 an `ENDMAP` marker lump. Source: ZDoom Wiki,
@@ -303,7 +303,7 @@ for textures only:
   `compression` byte. The container shares the WAD name but is
   byte-incompatible with Doom WAD.
 - **WAD3** — GoldSrc's texture WAD (`halflife.wad`, `liquids.wad`,
-  ...). Magic `"WAD3"`, same overall shape as WAD2 with miptex payload
+  ...). Magic `"WAD3"`, same overall layout as WAD2 with miptex payload
   changes. Half-Life 1's texture pipeline reads WAD3; the GoldSrc PAK
   carries everything else.
 
@@ -355,7 +355,7 @@ pakka's policy:
 
 ## 6. pakka integration notes
 
-The WAD-aware branches in the codebase live at five sites in
+The WAD-aware branches in the codebase live at nine sites in
 `src/pakfile.c`, each gated by `pakka_format_is_wad()`:
 
 | Site                            | Purpose                                                                            |

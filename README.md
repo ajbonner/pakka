@@ -1,5 +1,5 @@
 # Pakka
-A command line utility `pakka(1)`and C library (`libpakka`) for reading, writing, and editing the archive
+A command line utility `pakka(1)` and C library (`libpakka`) for reading, writing, and editing the archive
 formats used by id Software, Ritual, Ion Storm, and Valve game engines
 - Quake 1 / 2 and Half-Life / GoldSrc PAK, SiN SPAK, Daikatana PAK,
 Doom IWAD / PWAD, Quake 3 PK3, and Doom 3 PK4.

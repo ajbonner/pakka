@@ -124,8 +124,8 @@ that converts argv at the command-line boundary, the in-process
 UTF-8 narrow-char convention, and the platform layer that re-encodes
 at the syscall boundary.
 
-The two conversion points and the UTF-8 zone between them are the
-load-bearing structure:
+The two conversion points and the UTF-8 zone between them are what
+the diagram below traces:
 
     ┌──────────────────────────────────────────────────────────────────────┐
     │  External boundary  (Win32 wide-char / NTFS UTF-16)                  │
@@ -418,7 +418,7 @@ Every `const char *` path or entry-name argument across
 interpreted as UTF-8 on Windows. Library callers holding wide
 strings convert before calling. There is no
 `pakka_open_w(const wchar_t *, ...)` overload planned — the API
-surface stays single-signature.
+stays single-signature.
 
 The UTF-8-on-Windows contract is documented in the comment block at
 the top of the `pakka_platform_*` declarations in `src/platform.h`.

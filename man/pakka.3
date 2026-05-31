@@ -13,7 +13,7 @@ libpakka \- C library for reading and writing game-engine archives
 .fi
 .SH DESCRIPTION
 .B libpakka
-exposes the same archive surface as
+exposes the same archive operations as
 .BR pakka (1)
 as a C99 library. All exported symbols are prefixed
 .B pakka_
@@ -97,7 +97,7 @@ explicitly. Supported formats:
 .SH VERSION
 .TP
 .B const char *pakka_version(void);
-Returns the linked library's version string (e.g. \(dq1.5.0\(dq). Static
+Returns the linked library's version string (e.g. \(dq1.9.0\(dq). Static
 storage, never
 .BR NULL .
 Useful for runtime feature gating in language bindings or for embedding
