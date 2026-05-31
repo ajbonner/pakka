@@ -127,7 +127,8 @@ pakka_status_t pakka_create(const char *path, pakka_format_t format,
                             unsigned flags,
                             pakka_archive_t **out, pakka_error_t *err);
 /* pakka_close implicitly commits any pending pakka_add_file /
- * pakka_delete changes before releasing the archive — equivalent to
+ * pakka_add_memory / pakka_delete / pakka_rename / pakka_copy changes
+ * before releasing the archive — equivalent to
  * calling pakka_commit() explicitly first. A failed implicit commit
  * is sticky: pakka_close still releases the handle and frees the
  * archive, but returns the commit status (and for a pakka_create-
@@ -154,9 +155,9 @@ pakka_status_t pakka_find_entry(const pakka_archive_t *archive,
  *
  * Returned pointers remain valid until the owning archive is closed or
  * the entry list is mutated by pakka_add_file / pakka_add_memory /
- * pakka_delete / pakka_commit (including the implicit commit performed
- * by pakka_close). Any iterator mid-walk MUST be discarded across a
- * mutation. pakka_entry_first returns NULL on an empty archive or a
+ * pakka_delete / pakka_rename / pakka_copy / pakka_commit (including the
+ * implicit commit performed by pakka_close). Any iterator mid-walk MUST
+ * be discarded across a mutation. pakka_entry_first returns NULL on an empty archive or a
  * NULL argument; pakka_entry_next returns NULL at end-of-list or on a
  * NULL argument. The archive must be live — pakka_close frees the
  * handle, so calling either function after close (or with a stale
@@ -194,7 +195,14 @@ uint64_t    pakka_entry_compressed_size(const pakka_entry_t *entry);
  * stay coherent. A reader becomes invalid the moment its archive is
  * closed; callers must pakka_reader_close every reader before
  * pakka_close. The archive owns the underlying FILE*; pakka_reader_close
- * only frees the reader handle. */
+ * only frees the reader handle.
+ *
+ * A reader also becomes invalid across a mutating call or a commit on the
+ * same archive (pakka_add_file / pakka_add_memory / pakka_delete /
+ * pakka_rename / pakka_copy / pakka_commit, including the implicit commit
+ * in pakka_close): a rebuild commit closes and reopens the underlying
+ * file handle and relocates payloads, so a reader opened beforehand would
+ * read stale offsets. Close and reopen the reader after any mutation. */
 pakka_status_t pakka_open_entry(pakka_archive_t *archive,
                                 const char *entry_name,
                                 pakka_reader_t **out,
@@ -287,6 +295,65 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
 pakka_status_t pakka_delete(pakka_archive_t *archive,
                             const char *entry_name,
                             pakka_error_t *err);
+
+/* Rename (move) an entry within the archive. Only the directory name
+ * field changes — the payload bytes never move, so a rename is an
+ * index-only update. For a PAK-class archive opened PAKKA_OPEN_READ_WRITE
+ * the commit rewrites just the trailing directory in place (the payload
+ * is left untouched), so renaming one entry in a multi-gigabyte archive
+ * costs O(directory), not O(payload).
+ *
+ * new_name is validated exactly like an added entry name: length cap for
+ * the format, unsafe-name rejection, and a duplicate check. If new_name
+ * already names an entry the call fails with PAKKA_ERR_DUPLICATE and the
+ * archive is unchanged — except IWAD/PWAD, which allow duplicate lump
+ * names (the rename proceeds). old_name == new_name is a no-op returning
+ * PAKKA_OK. old_name must name an existing entry (PAKKA_ERR_NOT_FOUND
+ * otherwise); when it appears more than once (only possible on IWAD/PWAD)
+ * the first match in directory order is renamed.
+ *
+ * Atomicity follows the open mode, exactly like pakka_add_file: a
+ * PAK-class archive opened PAKKA_OPEN_READ_WRITE rewrites the directory
+ * in place (fast, not crash-atomic — only the directory region is
+ * touched, never the payload), while PAKKA_OPEN_READ_WRITE_ATOMIC and
+ * every PK3/PK4 archive publish via a full temp-file rebuild + rename.
+ * Use pakka_commit_is_atomic to query the effective guarantee. The change
+ * is staged in memory and applied by pakka_commit (or the implicit commit
+ * in pakka_close). Requires a writable archive. */
+pakka_status_t pakka_rename(pakka_archive_t *archive,
+                            const char *old_name, const char *new_name,
+                            pakka_error_t *err);
+
+/* Duplicate an entry under a second name. Semantics differ by format:
+ *   - PAK-class (PAK / SiN / Daikatana / IWAD / PWAD): the new entry
+ *     shares the source's payload bytes — one payload, two directory
+ *     entries pointing at the same offset. No payload is copied, so the
+ *     archive grows by just one directory record, and the sharing is
+ *     preserved across later rebuilds (a subsequent pakka_delete, or an
+ *     atomic-mode commit) rather than silently duplicating the bytes.
+ *   - PK3 / PK4 (ZIP): the payload is duplicated at commit. ZIP requires
+ *     each entry to carry its own local file header with a matching name,
+ *     so byte aliasing is not possible; the duplicate is an independent,
+ *     fully valid copy.
+ *
+ * dst_name is validated like an added entry name (length cap, unsafe
+ * name, duplicate). A pre-existing dst_name fails with PAKKA_ERR_DUPLICATE
+ * (except IWAD/PWAD, which allow duplicate lump names). src_name must
+ * exist (PAKKA_ERR_NOT_FOUND otherwise); the first match in directory
+ * order is copied when the name is duplicated (IWAD/PWAD only).
+ *
+ * Copying a source that was added in this session but not yet committed
+ * duplicates the staged payload — after commit the two PAK-class entries
+ * have distinct offsets (no sharing), because there are no on-disk bytes
+ * to alias yet. Copy a committed source to obtain shared bytes.
+ *
+ * Atomicity follows the open mode (see pakka_rename /
+ * pakka_commit_is_atomic). Staged in memory and applied by pakka_commit /
+ * pakka_close. Requires a writable archive. */
+pakka_status_t pakka_copy(pakka_archive_t *archive,
+                          const char *src_name, const char *dst_name,
+                          pakka_error_t *err);
+
 pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err);
 
 /* Reports whether a pakka_commit on this archive is atomic — i.e.

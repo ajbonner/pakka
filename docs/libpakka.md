@@ -74,6 +74,17 @@ These read fields from the opaque `pakka_entry_t`:
   from source path.
 * `pakka_add_memory` — add bytes from a caller-owned buffer.
 * `pakka_delete` — remove an entry by name.
+* `pakka_rename` — rename (move) an entry. Index-only: the payload
+  never moves, so on a plain `PAKKA_OPEN_READ_WRITE` PAK-class handle
+  the commit rewrites just the directory in place. Refuses an existing
+  destination with `PAKKA_ERR_DUPLICATE` (IWAD / PWAD allow duplicate
+  names); `old == new` is a no-op.
+* `pakka_copy` — duplicate an entry under a new name. PAK-class formats
+  share the source's bytes (one payload, two directory entries pointing
+  at the same offset — the file grows by one directory record, and the
+  sharing survives later rebuilds). PK3 / PK4 duplicate the payload at
+  commit (ZIP needs a per-entry local header). Copying a still-staged
+  source duplicates the staged bytes (no sharing until it is committed).
 * `pakka_commit` — explicit flush; `pakka_close` calls this for you
   on a dirty archive.
 * `pakka_commit_is_atomic` — query whether a commit on this handle is
@@ -120,6 +131,8 @@ and how the archive was opened:
 | `pakka_delete` then commit | atomic (rebuild → rename) | atomic |
 | `pakka_add_*` then commit, `PAKKA_OPEN_READ_WRITE` | **in place — a mid-write failure can corrupt the original** | atomic |
 | `pakka_add_*` then commit, `PAKKA_OPEN_READ_WRITE_ATOMIC` | atomic (staged → rebuild → rename) | atomic |
+| `pakka_rename` / `pakka_copy` then commit, `PAKKA_OPEN_READ_WRITE` | **in place directory rewrite — index-only, payload untouched, not crash-atomic** | atomic (rebuild → rename) |
+| `pakka_rename` / `pakka_copy` then commit, `PAKKA_OPEN_READ_WRITE_ATOMIC` | atomic (rebuild → rename) | atomic |
 
 The PAK family defaults to streaming adds straight into the live file:
 fast and bounded-memory, but an interrupted add or commit can leave the
@@ -156,4 +169,8 @@ Concurrent calls on the same handle are undefined; concurrent calls
 on different handles to the same on-disk archive are unsupported
 (file locking is not pakka's responsibility). Entry pointers
 returned by `pakka_entry_at` / `pakka_find_entry` are invalidated by
-any mutation (`pakka_add_file`, `pakka_delete`, `pakka_commit`).
+any mutation (`pakka_add_file`, `pakka_add_memory`, `pakka_delete`,
+`pakka_rename`, `pakka_copy`, `pakka_commit`). Open `pakka_reader_t`
+handles are likewise invalidated by a mutation or commit — a rebuild
+commit reopens the underlying file — so close and reopen readers across
+one.

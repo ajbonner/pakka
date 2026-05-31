@@ -1763,6 +1763,27 @@ static void pak_link_staged_entry(Pak_t *pak, Pakfileentry_t *entry) {
     pak->needs_rebuild = 1;
 }
 
+/* Append an already-populated entry produced by pakka_copy and mark the
+ * archive dirty. Unlike pak_link_staged_entry the needs_rebuild decision
+ * is the caller's: a PAK-class entry that aliases an on-disk payload keeps
+ * it clear (the cheap in-place directory rewrite suffices, payload bytes
+ * never move), while a ZIP duplicate or a copy of a still-staged payload
+ * sets it so the commit rebuilds. */
+static void pak_link_copy_entry(Pak_t *pak, Pakfileentry_t *entry,
+                                int needs_rebuild) {
+    if (pak->tail == NULL) {
+        pak->head = entry;
+    } else {
+        pak->tail->next = entry;
+    }
+    pak->tail = entry;
+    pak->num_entries++;
+    pak->dirty = 1;
+    if (needs_rebuild) {
+        pak->needs_rebuild = 1;
+    }
+}
+
 pakka_status_t pakka_add_file(pakka_archive_t *archive,
                               const char *source_path,
                               const char *entry_name,
@@ -2452,6 +2473,178 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
     return PAKKA_ERR_NOT_FOUND;
 }
 
+pakka_status_t pakka_rename(pakka_archive_t *archive,
+                            const char *old_name, const char *new_name,
+                            pakka_error_t *err) {
+    Pakfileentry_t *entry;
+    size_t new_len;
+    pakka_status_t pre_s;
+
+    if (archive == NULL || old_name == NULL || new_name == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "rename",
+                        "pakka_rename: archive, old_name and new_name "
+                        "must be non-NULL");
+    }
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "rename",
+                        "pakka_rename: archive not writable "
+                        "or no live file handle");
+    }
+
+    /* Renaming to the same name is a no-op. Short-circuit before the
+     * duplicate check in pak_add_preflight (which would otherwise reject
+     * the entry as a collision with itself), but still confirm the entry
+     * exists so a no-op rename of a missing name reports NOT_FOUND. */
+    if (strcmp(old_name, new_name) == 0) {
+        if (find_entry(archive, (char *)old_name) == NULL) {
+            err_fill(err, PAKKA_ERR_NOT_FOUND, PAKKA_ERR_DOMAIN_NONE, 0,
+                     "rename", "Entry not found: %s", old_name);
+            err_set_entry(err, old_name, (size_t)-1, 0, 0);
+            return PAKKA_ERR_NOT_FOUND;
+        }
+        return PAKKA_OK;
+    }
+
+    entry = find_entry(archive, (char *)old_name);
+    if (entry == NULL) {
+        err_fill(err, PAKKA_ERR_NOT_FOUND, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "rename", "Entry not found: %s", old_name);
+        err_set_entry(err, old_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_NOT_FOUND;
+    }
+
+    /* Validate the destination exactly like an add: length cap for the
+     * format, unsafe-name rejection, and duplicate check (WAD exempt). */
+    pre_s = pak_add_preflight(archive, new_name, "rename", err);
+    if (pre_s != PAKKA_OK) {
+        return pre_s;
+    }
+
+    new_len = strlen(new_name);     /* capped by pak_add_preflight */
+    memcpy(entry->filename, new_name, new_len);
+    entry->filename[new_len] = '\0';
+
+    archive->dirty = 1;
+    /* PAK-class: the payload never moves, so the cheap in-place directory
+     * rewrite handles it — leave needs_rebuild clear. ZIP must rebuild so
+     * the local file header (not just the central directory) carries the
+     * new name, preserving the ZIP-always-atomic contract. */
+    if (pakka_format_is_zip(archive->format)) {
+        archive->needs_rebuild = 1;
+    }
+    return PAKKA_OK;
+}
+
+pakka_status_t pakka_copy(pakka_archive_t *archive,
+                          const char *src_name, const char *dst_name,
+                          pakka_error_t *err) {
+    Pakfileentry_t *src;
+    Pakfileentry_t *dup;
+    size_t dst_len;
+    pakka_status_t pre_s;
+
+    if (archive == NULL || src_name == NULL || dst_name == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "copy",
+                        "pakka_copy: archive, src_name and dst_name "
+                        "must be non-NULL");
+    }
+    if (!archive->writable || archive->fp == NULL) {
+        return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
+                        PAKKA_ERR_DOMAIN_NONE, 0, "copy",
+                        "pakka_copy: archive not writable "
+                        "or no live file handle");
+    }
+
+    src = find_entry(archive, (char *)src_name);
+    if (src == NULL) {
+        err_fill(err, PAKKA_ERR_NOT_FOUND, PAKKA_ERR_DOMAIN_NONE, 0,
+                 "copy", "Entry not found: %s", src_name);
+        err_set_entry(err, src_name, (size_t)-1, 0, 0);
+        return PAKKA_ERR_NOT_FOUND;
+    }
+
+    pre_s = pak_add_preflight(archive, dst_name, "copy", err);
+    if (pre_s != PAKKA_OK) {
+        return pre_s;
+    }
+
+    dst_len = strlen(dst_name);     /* capped by pak_add_preflight */
+    dup = calloc(1, sizeof(Pakfileentry_t));
+    if (dup == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "copy", "Cannot allocate pak entry for %s",
+                        dst_name);
+    }
+    memcpy(dup->filename, dst_name, dst_len);
+    dup->filename[dst_len] = '\0';
+
+    /* Size + compression metadata is identical for the duplicate. The
+     * offset is the source's (shared) for an on-disk PAK-class entry;
+     * overwritten to 0 below for a staged copy. */
+    dup->length              = src->length;
+    dup->crc32               = src->crc32;
+    dup->dk_compressed_size  = src->dk_compressed_size;
+    dup->dk_is_compressed    = src->dk_is_compressed;
+    dup->pk3_compressed_size = src->pk3_compressed_size;
+    dup->pk3_payload_offset  = src->pk3_payload_offset;
+    dup->pk3_lfh_offset      = src->pk3_lfh_offset;
+    dup->pk3_method          = src->pk3_method;
+    dup->offset              = src->offset;
+
+    if (src->pending_source != NULL || src->pending_data != NULL) {
+        /* Source not committed yet: no on-disk bytes to alias, so
+         * deep-copy the staged payload. The duplicate is its own owner;
+         * after commit the two entries have distinct offsets. */
+        if (src->pending_data != NULL) {
+            /* Preserve the non-NULL zero-length sentinel: a 0-byte staged
+             * payload uses a 1-byte buffer so the entry still reads as
+             * pending. malloc(0) may return NULL, which would make the
+             * copy look committed and read garbage from offset 0. */
+            size_t n = src->pending_data_len;
+            dup->pending_data = malloc(n > 0 ? n : 1);
+            if (dup->pending_data == NULL) {
+                pakka_entry_free(dup);
+                return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                                0, "copy",
+                                "Cannot duplicate staged payload for %s",
+                                dst_name);
+            }
+            if (n > 0) {
+                memcpy(dup->pending_data, src->pending_data, n);
+            } else {
+                ((char *)dup->pending_data)[0] = '\0';
+            }
+            dup->pending_data_len = n;
+        } else {
+            dup->pending_source = pakka_platform_strdup(src->pending_source);
+            if (dup->pending_source == NULL) {
+                pakka_entry_free(dup);
+                return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                                0, "copy",
+                                "Cannot duplicate staged source for %s",
+                                dst_name);
+            }
+        }
+        dup->offset = 0;        /* assigned by the rebuild commit */
+        pak_link_copy_entry(archive, dup, 1 /* needs_rebuild */);
+        return PAKKA_OK;
+    }
+
+    /* On-disk source. A PAK-class duplicate aliases the source's bytes
+     * (one payload, two directory entries) and needs no rebuild — the
+     * cheap in-place directory rewrite emits the extra entry, and the
+     * rebuild path (atomic mode or a later delete) preserves the sharing
+     * via offset-dedup. A ZIP duplicate cannot alias bytes (each entry
+     * needs its own local header), so it sets needs_rebuild and the ZIP
+     * commit re-emits an independent LFH+payload under dst_name. */
+    pak_link_copy_entry(archive, dup,
+                        pakka_format_is_zip(archive->format) ? 1 : 0);
+    return PAKKA_OK;
+}
+
 /* Commit pending changes to disk. Three modes:
  *   - clean state (!dirty): no-op
  *   - dirty without rebuild (adds only): write directory in place at the
@@ -2475,6 +2668,27 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
  * mutations are reversible until the rename succeeds. After the
  * rename, the scratch IS the canonical content, so any
  * post-publish failure (reopen) keeps the new offsets installed. */
+/* Sort key for rebuild offset-dedup. A pakka_copy of an on-disk entry
+ * yields two directory entries sharing one (offset, on-disk extent); the
+ * rebuild copies those bytes once and points both at the same temp offset
+ * so the sharing survives. Sorting the on-disk entries by (offset, extent,
+ * list index) groups the aliases and puts the lowest list index — the
+ * "owner" that actually gets copied — first within each group. */
+typedef struct {
+    uint32_t offset;
+    uint32_t extent;
+    size_t   idx;
+} pak_dedup_key_t;
+
+static int pak_dedup_key_cmp(const void *a, const void *b) {
+    const pak_dedup_key_t *ka = (const pak_dedup_key_t *)a;
+    const pak_dedup_key_t *kb = (const pak_dedup_key_t *)b;
+    if (ka->offset != kb->offset) return ka->offset < kb->offset ? -1 : 1;
+    if (ka->extent != kb->extent) return ka->extent < kb->extent ? -1 : 1;
+    if (ka->idx != kb->idx)       return ka->idx < kb->idx ? -1 : 1;
+    return 0;
+}
+
 static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                                            pakka_error_t *err) {
     Pakfileentry_t *current;
@@ -2499,6 +2713,16 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
     Pakfileentry_t **entry_ptrs = NULL;
     size_t n_entries = 0;
     size_t i;
+    /* True payload high-water mark of the rebuilt scratch, captured from
+     * its write cursor after the copy loop (see below). Seeded to header
+     * size for the empty-list case where the copy loop never runs. */
+    int64_t rebuilt_payload_end = PAKFILE_HEADER_SIZE;
+    /* owner[k] = list index whose freshly-copied bytes entry k reuses
+     * (offset-dedup), or k itself when k owns its share-group, is a staged
+     * entry, or has no alias. NULL disables dedup (no entries, or scratch
+     * alloc failed — the rebuild then copies every entry, which is correct,
+     * just without preserving byte-sharing). */
+    size_t *owner = NULL;
 
     dir_hint = archive->is_new ? archive->tmp_pakpath
                                : archive->cur_pakpath;
@@ -2548,18 +2772,58 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                         "Cannot seek in rebuild scratch");
     }
 
-    /* Copy survivors. entry->offset is NOT mutated by
-     * copy_between_paks (it returns the new offset via out param).
-     * On failure here, nothing in archive state has changed. */
+    /* Build the offset-dedup map (best-effort: on alloc failure owner
+     * stays NULL and every entry is copied independently). Only on-disk
+     * entries participate — a staged copy materializes its own payload,
+     * and two staged entries can share offset 0 without sharing bytes. */
+    if (n_entries > 0) {
+        pak_dedup_key_t *keys = malloc(sizeof(pak_dedup_key_t) * n_entries);
+        owner = malloc(sizeof(size_t) * n_entries);
+        if (keys != NULL && owner != NULL) {
+            size_t m = 0;
+            for (i = 0; i < n_entries; i++) {
+                owner[i] = i;
+                if (entry_ptrs[i]->pending_source == NULL
+                    && entry_ptrs[i]->pending_data == NULL) {
+                    keys[m].offset = entry_ptrs[i]->offset;
+                    keys[m].extent = pak_entry_on_disk_extent(entry_ptrs[i]);
+                    keys[m].idx = i;
+                    m++;
+                }
+            }
+            qsort(keys, m, sizeof(pak_dedup_key_t), pak_dedup_key_cmp);
+            for (i = 1; i < m; i++) {
+                if (keys[i].offset == keys[i - 1].offset
+                    && keys[i].extent == keys[i - 1].extent) {
+                    owner[keys[i].idx] = owner[keys[i - 1].idx];
+                }
+            }
+        } else {
+            free(owner);
+            owner = NULL;       /* degrade: copy everything, no dedup */
+        }
+        free(keys);
+    }
+
+    /* Copy survivors in list order. entry->offset is NOT mutated by
+     * copy_between_paks (it returns the new offset via out param). An
+     * entry whose bytes a lower-indexed owner already copied (dedup)
+     * reuses that owner's new offset instead of copying again. On failure
+     * here, nothing in archive state has changed. */
     for (i = 0; i < n_entries; i++) {
-        status = copy_between_paks(entry_ptrs[i], archive->fp, tfd,
-                                   &new_offsets[i], err);
-        if (status != PAKKA_OK) {
-            fclose(tfd);
-            (void)pakka_platform_remove(rebuild_scratch);
-            free(new_offsets);
-            free(entry_ptrs);
-            return status;
+        if (owner != NULL && owner[i] != i) {
+            new_offsets[i] = new_offsets[owner[i]];
+        } else {
+            status = copy_between_paks(entry_ptrs[i], archive->fp, tfd,
+                                       &new_offsets[i], err);
+            if (status != PAKKA_OK) {
+                free(owner);
+                fclose(tfd);
+                (void)pakka_platform_remove(rebuild_scratch);
+                free(new_offsets);
+                free(entry_ptrs);
+                return status;
+            }
         }
         if (new_tail == NULL) {
             new_head = entry_ptrs[i];
@@ -2572,6 +2836,24 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
         new_tail->next = NULL;
     }
 
+    /* Capture the true payload high-water mark from the temp write cursor
+     * before write_pak_directory seeks. With dedup the tail entry may be a
+     * shared alias whose offset points backward, so tail->offset+extent
+     * would undercount and could place the directory over live payload. */
+    rebuilt_payload_end = pakka_platform_ftell(tfd);
+    free(owner);
+    owner = NULL;
+    if (rebuilt_payload_end < 0) {
+        saved_errno = errno;
+        fclose(tfd);
+        (void)pakka_platform_remove(rebuild_scratch);
+        free(new_offsets);
+        free(entry_ptrs);
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot determine rebuilt payload size");
+    }
+
     /* write_pak_directory needs to see the new offsets. Install
      * them now (still rollback-safe; archive->head order is
      * already the new layout, and pak->fp hasn't been swapped to
@@ -2582,6 +2864,10 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
         uint32_t *old_offsets_swap;
         Pakfileentry_t *old_tail = archive->tail;
         uint64_t old_payload_end = archive->payload_end;
+        /* write_pak_directory overwrites diroffset/dirlength; snapshot
+         * them too so a failed rebuild restores the cache fully. */
+        uint32_t old_diroffset = archive->diroffset;
+        uint32_t old_dirlength = archive->dirlength;
         old_offsets_swap = malloc(sizeof(uint32_t) * n_entries);
         if (old_offsets_swap == NULL && n_entries > 0) {
             fclose(tfd);
@@ -2597,18 +2883,13 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             entry_ptrs[i]->offset = new_offsets[i];
         }
         /* Restore tail + payload_end caches for the rebuilt list so
-         * write_pak_directory places the directory after the last
-         * payload byte. The rebuild packs entries contiguously in
-         * linked-list order starting at PAKFILE_HEADER_SIZE, so the
-         * post-rebuild payload_end is the last entry's offset plus its
-         * on-disk extent (an empty list collapses to header size). */
+         * write_pak_directory places the directory after the last payload
+         * byte. payload_end is the temp write cursor captured after the
+         * copy loop (the true high-water mark — robust to deduped aliases
+         * whose offset points backward; for an empty list it is the
+         * header size, the seek position the copy loop left untouched). */
         archive->tail = new_tail;
-        if (new_tail != NULL) {
-            archive->payload_end = (uint64_t)new_tail->offset
-                + (uint64_t)pak_entry_on_disk_extent(new_tail);
-        } else {
-            archive->payload_end = PAKFILE_HEADER_SIZE;
-        }
+        archive->payload_end = (uint64_t)rebuilt_payload_end;
 
         old_fp = archive->fp;
         archive->fp = tfd;
@@ -2620,6 +2901,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             }
             archive->tail = old_tail;
             archive->payload_end = old_payload_end;
+            archive->diroffset = old_diroffset;
+            archive->dirlength = old_dirlength;
             fclose(tfd);
             (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
@@ -2634,6 +2917,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
             }
             archive->tail = old_tail;
             archive->payload_end = old_payload_end;
+            archive->diroffset = old_diroffset;
+            archive->dirlength = old_dirlength;
             (void)pakka_platform_remove(rebuild_scratch);
             free(old_offsets_swap);
             free(new_offsets);
@@ -2677,6 +2962,8 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                 }
                 archive->tail = old_tail;
                 archive->payload_end = old_payload_end;
+                archive->diroffset = old_diroffset;
+                archive->dirlength = old_dirlength;
                 (void)pakka_platform_remove(rebuild_scratch);
                 archive->fp = pakka_platform_fopen(rename_target, "r+b");
                 free(old_offsets_swap);
@@ -2776,6 +3063,12 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
                             (uint32_t)saved_errno, "commit",
                             "Cannot flush pak directory write");
         }
+        /* Keep the cached size truthful: write_pak_directory just placed
+         * the directory at diroffset (= payload_end) with dirlength bytes,
+         * so the file now ends there. A pakka_copy that shares bytes grows
+         * the file by one directory row via this path. */
+        archive->file_size = (uint64_t)archive->diroffset
+                           + (uint64_t)archive->dirlength;
         archive->dirty = 0;
         return PAKKA_OK;
     }

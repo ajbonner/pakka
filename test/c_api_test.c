@@ -1722,6 +1722,619 @@ static int test_atomic_dk_pending(const char *scratch_dir) {
     return 0;
 }
 
+/* On-disk PAK directory entry width (56-byte name + two u32) and header
+ * size (4-byte magic + two u32). Mirror the internal PAKFILE_DIR_ENTRY_SIZE
+ * / PAKFILE_HEADER_SIZE; redeclared because the test sees only the public
+ * header. A pakka_copy that shares bytes appends exactly one directory row
+ * and no payload, and the header size lets the dedup-at-scale test predict
+ * the exact rebuilt file size. */
+#define RC_PAK_DIR_ENTRY_SIZE 64
+#define RC_PAK_HEADER_SIZE    12
+
+static long rc_file_size(const char *path) {
+    FILE *fp = fopen(path, "rb");
+    long n;
+    if (fp == NULL) return -1;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return -1; }
+    n = ftell(fp);
+    fclose(fp);
+    return n;
+}
+
+static int test_rename_roundtrip(const char *scratch_dir) {
+    char pak_path[1024];
+    const char *names[]  = {"dir/alpha.txt", "dir/beta.txt"};
+    const char *bodies[] = {"alpha-body", "beta-body!!"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_rename.pak", scratch_dir);
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 2) != 0)
+        FAIL("build rename base pak");
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open for rename");
+
+    /* NULL tolerance */
+    s = pakka_rename(NULL, "dir/alpha.txt", "x", &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "rename NULL archive");
+    s = pakka_rename(a, NULL, "x", &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "rename NULL old");
+    s = pakka_rename(a, "dir/alpha.txt", NULL, &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "rename NULL new");
+
+    /* missing source */
+    s = pakka_rename(a, "dir/nope.txt", "dir/x.txt", &err);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "rename missing source");
+
+    /* destination already exists */
+    s = pakka_rename(a, "dir/alpha.txt", "dir/beta.txt", &err);
+    EXPECT_EQ(s, PAKKA_ERR_DUPLICATE, "rename onto existing");
+
+    /* unsafe destination */
+    s = pakka_rename(a, "dir/alpha.txt", "../escape.txt", &err);
+    EXPECT_EQ(s, PAKKA_ERR_UNSAFE_NAME, "rename to unsafe name");
+
+    /* old == new: no-op on an existing entry, NOT_FOUND if it's missing */
+    s = pakka_rename(a, "dir/alpha.txt", "dir/alpha.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "rename to same name is a no-op");
+    s = pakka_rename(a, "dir/ghost.txt", "dir/ghost.txt", &err);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "same-name rename of missing entry");
+
+    /* the real rename */
+    s = pakka_rename(a, "dir/alpha.txt", "dir/gamma.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "rename alpha -> gamma");
+    if (pakka_entry_count(a) != 2) FAIL("rename changed entry count");
+
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "commit rename");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after rename");
+    a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen after rename");
+    if (pakka_entry_count(a) != 2) FAIL("reopen rename count != 2");
+    s = pakka_find_entry(a, "dir/alpha.txt", &e);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "old name gone");
+    s = pakka_find_entry(a, "dir/gamma.txt", &e);
+    EXPECT_EQ(s, PAKKA_OK, "new name present");
+    s = pakka_read_entry_alloc(a, "dir/gamma.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read renamed entry");
+    if (out_len != 10 || memcmp(out, "alpha-body", 10) != 0)
+        FAIL("renamed entry content mismatch");
+    pakka_free(out); out = NULL;
+    s = pakka_read_entry_alloc(a, "dir/beta.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read beta after rename");
+    if (out_len != 11 || memcmp(out, "beta-body!!", 11) != 0)
+        FAIL("beta content changed by rename");
+    pakka_free(out); out = NULL;
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
+static int test_rename_inplace_cheap(const char *scratch_dir) {
+    char pak_path[1024];
+    const char *names[]  = {"one.txt", "two.txt", "three.txt"};
+    const char *bodies[] = {"1111", "222222", "33"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    long before, after;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_rename_cheap.pak",
+             scratch_dir);
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 3) != 0)
+        FAIL("build rename-cheap base pak");
+    before = rc_file_size(pak_path);
+    if (before < 0) FAIL("size before rename");
+
+    /* Plain READ_WRITE takes the cheap in-place directory rewrite. Entry
+     * count is unchanged, the on-disk name field is fixed-width, and the
+     * payload never moves — so the file size must not change at all. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open plain RW for cheap rename");
+    if (pakka_commit_is_atomic(a) != 0)
+        FAIL("plain-RW PAK should report non-atomic (cheap path)");
+    s = pakka_rename(a, "two.txt", "renamed-two.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "cheap rename");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close cheap rename");
+
+    after = rc_file_size(pak_path);
+    if (after != before)
+        FAIL("rename changed file size: before=%ld after=%ld", before, after);
+    (void)remove(pak_path);
+    return 0;
+}
+
+static int test_copy_shared_bytes_pak(const char *scratch_dir) {
+    char pak_path[1024];
+    const char *names[]  = {"a.bin", "b.bin"};
+    const char *bodies[] = {"AAAAAAAA", "BB"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e_src;
+    const pakka_entry_t *e_dup;
+    void *out = NULL;
+    size_t out_len = 0;
+    long before, after;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_copy_share.pak",
+             scratch_dir);
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 2) != 0)
+        FAIL("build copy-share base pak");
+    before = rc_file_size(pak_path);
+    if (before < 0) FAIL("size before copy");
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open plain RW for copy");
+
+    s = pakka_copy(a, "missing.bin", "x.bin", &err);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "copy missing source");
+    s = pakka_copy(a, "a.bin", "b.bin", &err);
+    EXPECT_EQ(s, PAKKA_ERR_DUPLICATE, "copy onto existing");
+    s = pakka_copy(NULL, "a.bin", "x", &err);
+    EXPECT_EQ(s, PAKKA_ERR_INVALID_ARGUMENT, "copy NULL archive");
+
+    s = pakka_copy(a, "a.bin", "a-copy.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "copy a -> a-copy");
+    if (pakka_entry_count(a) != 3) FAIL("copy did not add an entry");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close after copy");
+    a = NULL;
+
+    after = rc_file_size(pak_path);
+    /* One payload, two directory entries: the file grows by exactly one
+     * directory row, NOT by the payload size. */
+    if (after - before != RC_PAK_DIR_ENTRY_SIZE)
+        FAIL("copy grew file by %ld, want one dir row (%d)",
+             after - before, RC_PAK_DIR_ENTRY_SIZE);
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen after copy");
+    if (pakka_entry_count(a) != 3) FAIL("reopen copy count != 3");
+    s = pakka_find_entry(a, "a.bin", &e_src);
+    EXPECT_EQ(s, PAKKA_OK, "find source");
+    s = pakka_find_entry(a, "a-copy.bin", &e_dup);
+    EXPECT_EQ(s, PAKKA_OK, "find copy");
+    if (pakka_entry_offset(e_src) != pakka_entry_offset(e_dup))
+        FAIL("copy did not share bytes: src off=%llu dup off=%llu",
+             (unsigned long long)pakka_entry_offset(e_src),
+             (unsigned long long)pakka_entry_offset(e_dup));
+
+    s = pakka_read_entry_alloc(a, "a-copy.bin", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read copy");
+    if (out_len != 8 || memcmp(out, "AAAAAAAA", 8) != 0)
+        FAIL("copy content mismatch");
+    pakka_free(out); out = NULL;
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
+static int test_copy_survives_rebuild(const char *scratch_dir) {
+    char pak_path[1024];
+    const char *names[]  = {"keep/a.bin", "keep/b.bin", "drop/c.bin"};
+    const char *bodies[] = {"AAAAAAAAAAAA", "B", "CCCCC"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e1, *e2;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_copy_rebuild.pak",
+             scratch_dir);
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 3) != 0)
+        FAIL("build copy-rebuild base pak");
+
+    /* Atomic mode commits always rebuild, so this directly exercises the
+     * rebuild offset-dedup. Copy shares a's bytes; deleting c also forces
+     * the rebuild path in plain mode. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open atomic for copy-rebuild");
+    s = pakka_copy(a, "keep/a.bin", "keep/a2.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "copy a -> a2");
+    s = pakka_delete(a, "drop/c.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "delete c");
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "commit copy+delete (rebuild)");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close copy-rebuild");
+    a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen copy-rebuild");
+    if (pakka_entry_count(a) != 3) FAIL("expected 3 entries (a, b, a2)");
+    s = pakka_find_entry(a, "drop/c.bin", &e1);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "c deleted");
+
+    /* dedup held across the rebuild: a and a2 still share one offset */
+    s = pakka_find_entry(a, "keep/a.bin", &e1);
+    EXPECT_EQ(s, PAKKA_OK, "find a");
+    s = pakka_find_entry(a, "keep/a2.bin", &e2);
+    EXPECT_EQ(s, PAKKA_OK, "find a2");
+    if (pakka_entry_offset(e1) != pakka_entry_offset(e2))
+        FAIL("rebuild un-shared the copied bytes");
+
+    s = pakka_read_entry_alloc(a, "keep/a2.bin", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read a2 after rebuild");
+    if (out_len != 12 || memcmp(out, "AAAAAAAAAAAA", 12) != 0)
+        FAIL("a2 content wrong after rebuild");
+    pakka_free(out); out = NULL;
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
+static int test_copy_pending_source(const char *scratch_dir) {
+    char pak_path[1024];
+    const char *names[]  = {"base.txt"};
+    const char *bodies[] = {"base"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *ee;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_copy_pending.pak",
+             scratch_dir);
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 1) != 0)
+        FAIL("build copy-pending base pak");
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open atomic for copy-pending");
+
+    /* Copy a still-uncommitted (staged) entry: duplicates the staged
+     * payload rather than aliasing on-disk bytes. */
+    s = pakka_add_memory(a, "staged.bin", "STAGEDDATA", 10, &err);
+    EXPECT_EQ(s, PAKKA_OK, "stage add");
+    s = pakka_copy(a, "staged.bin", "staged-copy.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "copy staged (pending) entry");
+
+    /* Copy a staged zero-byte entry: exercises the non-NULL zero-length
+     * pending_data sentinel duplication. */
+    s = pakka_add_memory(a, "empty.bin", "", 0, &err);
+    EXPECT_EQ(s, PAKKA_OK, "stage empty add");
+    s = pakka_copy(a, "empty.bin", "empty-copy.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "copy staged empty entry");
+
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "commit pending copies");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close pending copies");
+    a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen pending copies");
+    if (pakka_entry_count(a) != 5)
+        FAIL("expected 5 entries after pending copies");
+
+    s = pakka_read_entry_alloc(a, "staged-copy.bin", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read staged-copy");
+    if (out_len != 10 || memcmp(out, "STAGEDDATA", 10) != 0)
+        FAIL("staged-copy content mismatch");
+    pakka_free(out); out = NULL;
+
+    s = pakka_find_entry(a, "empty-copy.bin", &ee);
+    EXPECT_EQ(s, PAKKA_OK, "find empty-copy");
+    if (pakka_entry_size(ee) != 0) FAIL("empty-copy not zero length");
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
+static int test_zip_rename_copy(const char *scratch_dir) {
+    char pk3_path[1024];
+    const char *names[]  = {"scripts/a.cfg", "scripts/b.cfg"};
+    const char *bodies[] = {"alpha-config", "beta-config!"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pk3_path, sizeof pk3_path, "%s/c_api_zip_rc.pk3", scratch_dir);
+    if (atomic_make_pak(pk3_path, PAKKA_FORMAT_PK3, names, bodies, 2) != 0)
+        FAIL("build zip rename/copy base");
+
+    s = pakka_open(pk3_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open pk3 RW");
+    s = pakka_rename(a, "scripts/a.cfg", "scripts/renamed.cfg", &err);
+    EXPECT_EQ(s, PAKKA_OK, "zip rename");
+    s = pakka_copy(a, "scripts/b.cfg", "scripts/b-copy.cfg", &err);
+    EXPECT_EQ(s, PAKKA_OK, "zip copy (duplicate)");
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "zip commit rename/copy");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "zip close");
+    a = NULL;
+
+    s = pakka_open(pk3_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen pk3");
+    if (pakka_entry_count(a) != 3) FAIL("zip rename/copy count != 3");
+
+    /* Old name gone; new name readable. Reading decompresses via the
+     * entry's payload offset, so a stale local file header (name only
+     * rewritten in the central directory) would corrupt the entry. */
+    s = pakka_find_entry(a, "scripts/a.cfg", &e);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "zip old name gone");
+    s = pakka_read_entry_alloc(a, "scripts/renamed.cfg", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read zip renamed");
+    if (out_len != 12 || memcmp(out, "alpha-config", 12) != 0)
+        FAIL("zip renamed content mismatch");
+    pakka_free(out); out = NULL;
+
+    s = pakka_read_entry_alloc(a, "scripts/b-copy.cfg", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read zip copy");
+    if (out_len != 12 || memcmp(out, "beta-config!", 12) != 0)
+        FAIL("zip copy content mismatch");
+    pakka_free(out); out = NULL;
+
+    /* Deep verify confirms every LFH/CDR/CRC is consistent after the
+     * rename+copy rebuild — the strongest guard against a stale LFH. */
+    s = pakka_verify(a, PAKKA_VERIFY_DEEP, NULL, NULL, &err);
+    EXPECT_EQ(s, PAKKA_OK, "deep-verify zip after rename/copy");
+
+    pakka_close(a, NULL);
+    (void)remove(pk3_path);
+    return 0;
+}
+
+static int test_wad_rename_copy(const char *scratch_dir) {
+    char wad_path[1024];
+    /* WAD lump names are <= 8 bytes and duplicates are legal by design. */
+    const char *names[]  = {"THINGS", "THINGS", "SECTORS"};
+    const char *bodies[] = {"t-one", "t-two", "sect"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    snprintf(wad_path, sizeof wad_path, "%s/c_api_rc.wad", scratch_dir);
+    if (atomic_make_pak(wad_path, PAKKA_FORMAT_PWAD, names, bodies, 3) != 0)
+        FAIL("build wad rename/copy base");
+
+    s = pakka_open(wad_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open wad RW");
+
+    /* WAD allows duplicate names: rename/copy onto an existing name
+     * succeeds (no PAKKA_ERR_DUPLICATE). find_entry targets the first
+     * match, so this renames the first THINGS lump. */
+    s = pakka_rename(a, "THINGS", "SECTORS", &err);
+    EXPECT_EQ(s, PAKKA_OK, "wad rename onto existing allowed");
+    if (pakka_entry_count(a) != 3) FAIL("wad rename changed count");
+
+    s = pakka_copy(a, "SECTORS", "SECTORS", &err);
+    EXPECT_EQ(s, PAKKA_OK, "wad copy onto existing allowed");
+    if (pakka_entry_count(a) != 4) FAIL("wad copy did not add entry");
+
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "wad commit");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "wad close");
+    a = NULL;
+
+    s = pakka_open(wad_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen wad");
+    if (pakka_entry_count(a) != 4) FAIL("reopen wad count != 4");
+    pakka_close(a, NULL);
+    (void)remove(wad_path);
+    return 0;
+}
+
+/* Payload-size independence: rename and shared-byte copy must cost the
+ * same regardless of how large the entry's payload is. A multi-MB payload
+ * makes the point unmissable — rename rewrites no payload (file size
+ * unchanged) and copy adds exactly one directory row (not another copy of
+ * the payload). This is the non-flaky, byte-counting proof of the
+ * "index-only, O(directory) not O(payload)" guarantee. */
+#define RC_BIG_PAYLOAD (4u * 1024u * 1024u)
+
+static int test_rename_copy_payload_independent(const char *scratch_dir) {
+    char pak_path[1024];
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    unsigned char *big;
+    void *back = NULL;
+    size_t back_len = 0;
+    const pakka_entry_t *e1, *e2;
+    long s0, s1, s2;
+    size_t i;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_payload_indep.pak",
+             scratch_dir);
+    (void)remove(pak_path);
+
+    big = malloc(RC_BIG_PAYLOAD);
+    if (big == NULL) FAIL("alloc big payload");
+    for (i = 0; i < RC_BIG_PAYLOAD; i++) big[i] = (unsigned char)(i & 0xFF);
+
+    /* Build a pak with one large binary entry. atomic_make_pak takes
+     * strlen'd string bodies, so add the binary payload directly. */
+    s = pakka_create(pak_path, PAKKA_FORMAT_PAK, PAKKA_CREATE_DEFAULT, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create payload-indep pak");
+    s = pakka_add_memory(a, "big.bin", big, RC_BIG_PAYLOAD, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add big payload");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close payload-indep base");
+    a = NULL;
+    s0 = rc_file_size(pak_path);
+    if (s0 < 0) { free(big); FAIL("size after build"); }
+
+    /* Rename a 4 MiB-payload entry on a plain-RW handle: index-only, so
+     * the on-disk size must not change at all. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open RW for big rename");
+    s = pakka_rename(a, "big.bin", "big-renamed.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "rename big entry");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close big rename");
+    a = NULL;
+    s1 = rc_file_size(pak_path);
+    if (s1 != s0) {
+        free(big);
+        FAIL("rename of a %u-byte payload changed file size (%ld -> %ld)",
+             (unsigned)RC_BIG_PAYLOAD, s0, s1);
+    }
+
+    /* Copy the 4 MiB entry: shares bytes, so the file grows by exactly one
+     * directory row regardless of payload size. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open RW for big copy");
+    s = pakka_copy(a, "big-renamed.bin", "big-copy.bin", &err);
+    EXPECT_EQ(s, PAKKA_OK, "copy big entry");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close big copy");
+    a = NULL;
+    s2 = rc_file_size(pak_path);
+    if (s2 - s1 != RC_PAK_DIR_ENTRY_SIZE) {
+        free(big);
+        FAIL("copy of a %u-byte payload grew file by %ld, want one dir row (%d)",
+             (unsigned)RC_BIG_PAYLOAD, s2 - s1, RC_PAK_DIR_ENTRY_SIZE);
+    }
+
+    /* The copy still reads back the full, correct 4 MiB payload and shares
+     * the source's offset. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen payload-indep");
+    s = pakka_find_entry(a, "big-renamed.bin", &e1);
+    EXPECT_EQ(s, PAKKA_OK, "find renamed");
+    s = pakka_find_entry(a, "big-copy.bin", &e2);
+    EXPECT_EQ(s, PAKKA_OK, "find copy");
+    if (pakka_entry_offset(e1) != pakka_entry_offset(e2)) {
+        free(big);
+        FAIL("big copy did not share the source offset");
+    }
+    s = pakka_read_entry_alloc(a, "big-copy.bin", &back, &back_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read big copy");
+    if (back_len != RC_BIG_PAYLOAD || memcmp(back, big, RC_BIG_PAYLOAD) != 0) {
+        pakka_free(back); free(big);
+        FAIL("big copy content mismatch");
+    }
+    pakka_free(back);
+    free(big);
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
+/* Dedup at scale: copying one source many times then forcing a rebuild
+ * must collapse to a SINGLE on-disk payload (one set of bytes, many
+ * directory pointers), not N duplicates. Asserts the exact rebuilt size
+ * so a non-deduping regression (which would write ~N payloads) fails
+ * loudly. Also stresses the rebuild's dedup map at 1000+ aliases. */
+#define RC_DEDUP_PAYLOAD 1024u
+#define RC_DEDUP_COPIES  1000
+
+static int test_copy_dedup_at_scale(const char *scratch_dir) {
+    char pak_path[1024];
+    char name[64];
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    unsigned char *payload;
+    void *back = NULL;
+    size_t back_len = 0;
+    const pakka_entry_t *e_src, *e_first, *e_last;
+    uint64_t shared_off;
+    long expected, actual;
+    int i;
+    size_t j;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_dedup_scale.pak",
+             scratch_dir);
+    (void)remove(pak_path);
+
+    payload = malloc(RC_DEDUP_PAYLOAD);
+    if (payload == NULL) FAIL("alloc dedup payload");
+    for (j = 0; j < RC_DEDUP_PAYLOAD; j++)
+        payload[j] = (unsigned char)((j * 7u + 3u) & 0xFF);
+
+    s = pakka_create(pak_path, PAKKA_FORMAT_PAK, PAKKA_CREATE_DEFAULT, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "create dedup-scale pak");
+    s = pakka_add_memory(a, "src.bin", payload, RC_DEDUP_PAYLOAD, &err);
+    EXPECT_EQ(s, PAKKA_OK, "add dedup source");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close dedup base");
+    a = NULL;
+
+    /* Atomic mode: every commit rebuilds, so each copy exercises the
+     * rebuild offset-dedup. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open atomic dedup-scale");
+    for (i = 0; i < RC_DEDUP_COPIES; i++) {
+        snprintf(name, sizeof name, "copy_%04d.bin", i);
+        s = pakka_copy(a, "src.bin", name, &err);
+        if (s != PAKKA_OK) { free(payload); FAIL("copy #%d failed", i); }
+    }
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "commit dedup-scale rebuild");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "close dedup-scale");
+    a = NULL;
+
+    /* Exactly one payload survives: header + one payload + (N+1) dir rows.
+     * A non-deduping rebuild would write (N+1) payloads (~1 MiB vs ~64 KiB). */
+    actual = rc_file_size(pak_path);
+    expected = (long)RC_PAK_HEADER_SIZE + (long)RC_DEDUP_PAYLOAD
+             + (long)(RC_DEDUP_COPIES + 1) * RC_PAK_DIR_ENTRY_SIZE;
+    if (actual != expected) {
+        free(payload);
+        FAIL("dedup-scale file size %ld, want %ld (one shared payload)",
+             actual, expected);
+    }
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen dedup-scale");
+    if (pakka_entry_count(a) != (size_t)(RC_DEDUP_COPIES + 1)) {
+        free(payload);
+        FAIL("dedup-scale count %zu, want %d",
+             pakka_entry_count(a), RC_DEDUP_COPIES + 1);
+    }
+
+    /* src and every copy share one offset */
+    s = pakka_find_entry(a, "src.bin", &e_src);
+    EXPECT_EQ(s, PAKKA_OK, "find src");
+    shared_off = pakka_entry_offset(e_src);
+    s = pakka_find_entry(a, "copy_0000.bin", &e_first);
+    EXPECT_EQ(s, PAKKA_OK, "find first copy");
+    s = pakka_find_entry(a, "copy_0999.bin", &e_last);
+    EXPECT_EQ(s, PAKKA_OK, "find last copy");
+    if (pakka_entry_offset(e_first) != shared_off
+        || pakka_entry_offset(e_last) != shared_off) {
+        free(payload);
+        FAIL("dedup-scale copies do not share the source offset");
+    }
+
+    /* a copy's content is intact */
+    s = pakka_read_entry_alloc(a, "copy_0500.bin", &back, &back_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read a dedup copy");
+    if (back_len != RC_DEDUP_PAYLOAD
+        || memcmp(back, payload, RC_DEDUP_PAYLOAD) != 0) {
+        pakka_free(back); free(payload);
+        FAIL("dedup-scale copy content mismatch");
+    }
+    pakka_free(back);
+    free(payload);
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <pak0.pak> <scratch_dir>\n", argv[0]);
@@ -1751,6 +2364,15 @@ int main(int argc, char **argv) {
     if (test_atomic_toctou(argv[2]) != 0) return 1;
     if (test_atomic_pending_reads(argv[2]) != 0) return 1;
     if (test_atomic_dk_pending(argv[2]) != 0) return 1;
+    if (test_rename_roundtrip(argv[2]) != 0) return 1;
+    if (test_rename_inplace_cheap(argv[2]) != 0) return 1;
+    if (test_copy_shared_bytes_pak(argv[2]) != 0) return 1;
+    if (test_copy_survives_rebuild(argv[2]) != 0) return 1;
+    if (test_copy_pending_source(argv[2]) != 0) return 1;
+    if (test_zip_rename_copy(argv[2]) != 0) return 1;
+    if (test_wad_rename_copy(argv[2]) != 0) return 1;
+    if (test_rename_copy_payload_independent(argv[2]) != 0) return 1;
+    if (test_copy_dedup_at_scale(argv[2]) != 0) return 1;
 
     printf("c_api_test: OK\n");
     return 0;

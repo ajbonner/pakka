@@ -276,7 +276,8 @@ or
 .B PAKKA_OPEN_READ_WRITE_ATOMIC
 (or created via
 .BR pakka_create )
-accepts adds and deletes. Changes accumulate in memory until
+accepts adds, deletes, renames, and copies. Changes accumulate in memory
+until
 .BR pakka_commit ;
 .B pakka_close
 implicitly commits.
@@ -340,6 +341,44 @@ as soon as this function returns.
 .B pakka_status_t pakka_delete(pakka_archive_t *archive, const char *entry_name, pakka_error_t *err);
 Mark an entry for deletion. The on-disk archive is not modified until
 .BR pakka_commit / pakka_close .
+.TP
+.B pakka_status_t pakka_rename(pakka_archive_t *archive, const char *old_name, const char *new_name, pakka_error_t *err);
+Rename (move) an entry. Only the directory name changes \(em the payload
+bytes never move, so for a PAK-class handle opened plain
+.B PAKKA_OPEN_READ_WRITE
+the commit rewrites just the directory in place (an index-only update,
+O(directory) rather than O(payload)).
+.B new_name
+is validated like an added entry name (length cap, unsafe-name) and must
+not already exist \(em a collision returns
+.B PAKKA_ERR_DUPLICATE
+(IWAD / PWAD allow duplicate lump names).
+.B old_name
+must exist
+.RB ( PAKKA_ERR_NOT_FOUND
+otherwise); when duplicated (IWAD / PWAD only) the first match in directory
+order is renamed.
+.B old_name
+==
+.B new_name
+is a no-op. PK3 / PK4 rewrite the local file header and central directory
+on commit. Atomicity follows the open mode, like
+.BR pakka_add_file .
+.TP
+.B pakka_status_t pakka_copy(pakka_archive_t *archive, const char *src_name, const char *dst_name, pakka_error_t *err);
+Duplicate an entry under
+.IR dst_name .
+For PAK-class formats the new entry shares the source's payload bytes \(em
+one payload, two directory entries pointing at the same offset, so the
+archive grows by just one directory record and the sharing survives later
+rebuilds. For PK3 / PK4 the payload is duplicated at commit (ZIP requires a
+per-entry local header, so byte aliasing is impossible). Validation and the
+duplicate-name policy match
+.BR pakka_rename ;
+.B src_name
+must exist. Copying a source added in this session but not yet committed
+duplicates the staged payload (no sharing \(em there are no on-disk bytes to
+alias yet); copy a committed source to share bytes.
 .TP
 .B pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err);
 Flush all pending adds and deletes to disk. By default PAK / SiN /
