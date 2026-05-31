@@ -7,6 +7,24 @@ and the project follows [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 
 ## [Unreleased]
 
+## [1.9.0] — 2026-05-31
+
+### Added
+- `pakka_rename` — rename (move) an entry. The payload never moves; for a
+  PAK-class archive opened `PAKKA_OPEN_READ_WRITE` the commit rewrites only
+  the directory in place (O(directory), not O(payload)). PK3 / PK4 rewrite
+  the local file header and central directory on commit. Refuses an
+  existing destination with `PAKKA_ERR_DUPLICATE` (IWAD / PWAD exempt).
+- `pakka_copy` — duplicate an entry under a new name. PAK-class formats
+  share the source's payload bytes — one payload, two directory entries
+  pointing at the same offset — and the sharing survives rebuilds. PK3 /
+  PK4 duplicate the payload, since ZIP requires a per-entry local header.
+- Opt-in atomic commit mode (`PAKKA_OPEN_READ_WRITE_ATOMIC`) for PAK-class
+  archives: adds are staged in memory and every commit publishes a complete
+  fresh archive via a temp file + rename, so an interrupted add or commit
+  cannot corrupt the published archive. Query the effective guarantee with
+  `pakka_commit_is_atomic`.
+
 ## [1.8.0] — 2026-05-27
 
 ### Added
@@ -233,7 +251,8 @@ the 2026 modernization pass picked it up again.
 - POSIX build via a hand-rolled `Makefile`.
 - MIT licence.
 
-[Unreleased]: https://github.com/ajbonner/pakka/compare/v1.8.0...HEAD
+[Unreleased]: https://github.com/ajbonner/pakka/compare/v1.9.0...HEAD
+[1.9.0]: https://github.com/ajbonner/pakka/compare/v1.8.0...v1.9.0
 [1.8.0]: https://github.com/ajbonner/pakka/compare/v1.7.0...v1.8.0
 [1.7.0]: https://github.com/ajbonner/pakka/compare/v1.6.0...v1.7.0
 [1.6.0]: https://github.com/ajbonner/pakka/compare/v1.5.0...v1.6.0
