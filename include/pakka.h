@@ -39,7 +39,20 @@ typedef enum {
 
 typedef enum {
     PAKKA_OPEN_READ       = 0,
-    PAKKA_OPEN_READ_WRITE = 1
+    PAKKA_OPEN_READ_WRITE = 1,
+    /* Like PAKKA_OPEN_READ_WRITE, but for PAK-class archives (PAK / SiN /
+     * Daikatana / IWAD / PWAD) every mutating commit is published
+     * atomically: adds are staged in memory rather than streamed into the
+     * live file, and commit writes a complete fresh archive to a temp file
+     * then renames it over the original, so an interrupted add or commit
+     * cannot corrupt the published archive. (Plain PAKKA_OPEN_READ_WRITE
+     * adds stream in place — fast, bounded memory, but a mid-write failure
+     * can tear the original; pakka_delete already rebuilds either way.)
+     * For PK3/PK4 this is identical to PAKKA_OPEN_READ_WRITE — ZIP commits
+     * are always atomic. pakka_create is already atomic-on-publish, so it
+     * takes no mode. Use pakka_commit_is_atomic to query the effective
+     * guarantee without hardcoding format knowledge. */
+    PAKKA_OPEN_READ_WRITE_ATOMIC = 2
 } pakka_open_mode_t;
 
 /* Reserved for future bits (exclusive-create, atomic-replace, etc.).
@@ -214,9 +227,18 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
  * the on-disk pattern).
  *
  * Format-specific timing of the source read:
- *   - PAK / SiN: source bytes are read and written into the archive
- *     immediately. After return, source_path can be freely modified or
- *     deleted.
+ *   - PAK / SiN (plain PAKKA_OPEN_READ_WRITE): source bytes are read and
+ *     written into the archive immediately. After return, source_path can
+ *     be freely modified or deleted.
+ *   - PAK / SiN / Daikatana / IWAD / PWAD opened
+ *     PAKKA_OPEN_READ_WRITE_ATOMIC: a STORED add defers to commit exactly
+ *     like the PK3/PK4 STORED path below — pakka_add_file records the
+ *     CRC32 + size and stashes the source path, and the bytes are read
+ *     again (and revalidated) at commit, so source_path MUST stay
+ *     readable and unchanged until pakka_commit / pakka_close returns.
+ *     Daikatana entries that get compressed are captured at add time
+ *     (see the Daikatana bullet); pakka_add_memory pins bytes at call
+ *     time on every format.
  *   - PK3 / PK4 with STORED (default): pakka_add_file records the
  *     CRC32 + size, stashes the source path, and reads the bytes
  *     again at commit time (or close time, which implicitly commits).
@@ -266,6 +288,20 @@ pakka_status_t pakka_delete(pakka_archive_t *archive,
                             const char *entry_name,
                             pakka_error_t *err);
 pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err);
+
+/* Reports whether a pakka_commit on this archive is atomic — i.e.
+ * guaranteed to either fully succeed or leave the on-disk file
+ * unchanged, never a torn intermediate. Lets a consumer decide whether
+ * it needs its own backup-and-replace dance without hardcoding which
+ * formats stream in place. Returns nonzero (atomic) for:
+ *   - any PK3/PK4 archive (ZIP commits always rebuild + rename),
+ *   - any archive from pakka_create (published via temp + rename on close),
+ *   - any archive opened PAKKA_OPEN_READ_WRITE_ATOMIC,
+ *   - any read-only archive (commit is a no-op).
+ * Returns zero only for a PAK-class archive opened plain
+ * PAKKA_OPEN_READ_WRITE, whose adds stream into the live file. Returns
+ * zero on a NULL argument. */
+int pakka_commit_is_atomic(const pakka_archive_t *archive);
 
 /* Read an entry's full payload into a freshly malloc'd buffer. *data
  * and *len are populated on success; caller MUST release the buffer

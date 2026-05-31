@@ -242,7 +242,8 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
                         "pakka_open: path and out must be non-NULL");
     }
 
-    if (mode != PAKKA_OPEN_READ && mode != PAKKA_OPEN_READ_WRITE) {
+    if (mode != PAKKA_OPEN_READ && mode != PAKKA_OPEN_READ_WRITE
+        && mode != PAKKA_OPEN_READ_WRITE_ATOMIC) {
         return err_fill(err, PAKKA_ERR_INVALID_ARGUMENT,
                         PAKKA_ERR_DOMAIN_NONE, 0, "open",
                         "pakka_open: unknown mode value %d", (int)mode);
@@ -260,7 +261,8 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
                         "pakka_open: unknown format_hint value %d",
                         (int)format_hint);
     }
-    writable = (mode == PAKKA_OPEN_READ_WRITE) ? 1 : 0;
+    writable = (mode == PAKKA_OPEN_READ_WRITE
+                || mode == PAKKA_OPEN_READ_WRITE_ATOMIC) ? 1 : 0;
 
     pak = calloc(sizeof(Pak_t), 1);
     if (pak == NULL) {
@@ -290,6 +292,7 @@ pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode,
                         "Cannot open %s", path);
     }
     pak->writable = writable;
+    pak->atomic_commit = (mode == PAKKA_OPEN_READ_WRITE_ATOMIC) ? 1 : 0;
 
     /* Hold an exclusive non-blocking lock for mutating opens. Two
      * concurrent `pakka -a` invocations would otherwise both seek to
@@ -1153,6 +1156,135 @@ uint64_t pakka_entry_compressed_size(const pakka_entry_t *entry) {
     return (uint64_t)entry->length;
 }
 
+/* Serve a staged PAK-class entry (PAKKA_OPEN_READ_WRITE_ATOMIC) through
+ * the reader's inflated_buf, so read-after-add works before commit just
+ * as it does for ZIP. Staged bytes come from pending_source (a file path,
+ * re-hardened against a symlink / non-regular swap) or pending_data (an
+ * owned buffer); DK-compressed staged bytes are inflated first under the
+ * max_decompressed cap. Mirrors the pending branch of
+ * pakka_pk3_open_entry_impl. On success the buffer is owned by the reader
+ * and released by pakka_reader_close. */
+static pakka_status_t pak_open_pending_reader(pakka_archive_t *archive,
+                                              pakka_reader_t *reader,
+                                              const pakka_entry_t *entry,
+                                              pakka_error_t *err) {
+    unsigned char *buf;
+    uint32_t extent = pak_entry_on_disk_extent(entry);
+
+    if (extent == 0) {
+        reader->remaining = 0;      /* empty payload: reader_read returns 0 */
+        return PAKKA_OK;
+    }
+
+    buf = malloc(extent);
+    if (buf == NULL) {
+        return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "open_entry",
+                        "Cannot allocate staged-entry buffer for %s "
+                        "(%u bytes)", entry->filename, (unsigned)extent);
+    }
+
+    if (entry->pending_source != NULL) {
+        struct stat sb;
+        FILE *src;
+        int saved_errno;
+        if (pakka_platform_is_reparse_or_symlink(entry->pending_source)) {
+            free(buf);
+            return err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
+                            0, "open_entry",
+                            "Pending source %s for %s is now a symlink/"
+                            "reparse point", entry->pending_source,
+                            entry->filename);
+        }
+        if (pakka_platform_lstat(entry->pending_source, &sb) != 0) {
+            saved_errno = errno;
+            free(buf);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "open_entry",
+                            "Cannot stat pending source %s for %s",
+                            entry->pending_source, entry->filename);
+        }
+        if (!S_ISREG(sb.st_mode)) {
+            free(buf);
+            return err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
+                            0, "open_entry",
+                            "Pending source %s for %s is no longer a "
+                            "regular file", entry->pending_source,
+                            entry->filename);
+        }
+        src = pakka_platform_fopen(entry->pending_source, "rb");
+        if (src == NULL) {
+            saved_errno = errno;
+            free(buf);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "open_entry",
+                            "Cannot reopen pending source %s for %s",
+                            entry->pending_source, entry->filename);
+        }
+        if (fread(buf, 1, extent, src) != extent) {
+            saved_errno = errno;
+            fclose(src);
+            free(buf);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "open_entry",
+                            "Short read from pending source %s for %s",
+                            entry->pending_source, entry->filename);
+        }
+        fclose(src);
+    } else {
+        memcpy(buf, entry->pending_data, extent);
+    }
+
+    if (entry->dk_is_compressed) {
+        /* Staged DK-compressed: buf holds dk_compressed_size encoded bytes;
+         * inflate to entry->length under the cap (mirrors the on-disk DK
+         * reader above). */
+        unsigned char *out;
+        uint32_t ulen = entry->length;
+        pakka_status_t ds;
+        if (archive->max_decompressed > 0
+            && ((uint64_t)ulen > archive->max_decompressed
+                || (uint64_t)extent > archive->max_decompressed)) {
+            free(buf);
+            return err_fill(err, PAKKA_ERR_LIMIT, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open_entry",
+                            "Staged Daikatana entry %s exceeds "
+                            "max_decompressed_size (uncompressed=%u, "
+                            "compressed=%u, cap=%" PRIu64 ")",
+                            entry->filename, (unsigned)ulen,
+                            (unsigned)extent, archive->max_decompressed);
+        }
+        if (ulen == 0) {
+            free(buf);
+            reader->remaining = 0;
+            return PAKKA_OK;
+        }
+        out = malloc(ulen);
+        if (out == NULL) {
+            free(buf);
+            return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "open_entry",
+                            "Cannot allocate DK output buffer for %s "
+                            "(%u bytes)", entry->filename, (unsigned)ulen);
+        }
+        ds = pakka_dk_inflate(buf, extent, out, ulen, err);
+        free(buf);
+        if (ds != PAKKA_OK) {
+            free(out);
+            return ds;
+        }
+        reader->inflated_buf = out;
+        reader->inflated_len = ulen;
+        reader->inflated_cursor = 0;
+        return PAKKA_OK;
+    }
+
+    reader->inflated_buf = buf;
+    reader->inflated_len = extent;
+    reader->inflated_cursor = 0;
+    return PAKKA_OK;
+}
+
 pakka_status_t pakka_open_entry(pakka_archive_t *archive,
                                 const char *entry_name,
                                 pakka_reader_t **out,
@@ -1239,6 +1371,18 @@ pakka_status_t pakka_open_entry_handle(pakka_archive_t *archive,
         if (pk3_status != PAKKA_OK) {
             free(reader);
             return pk3_status;
+        }
+    } else if (entry->pending_source != NULL
+               || entry->pending_data != NULL) {
+        /* Staged PAK-class entry (PAKKA_OPEN_READ_WRITE_ATOMIC): its
+         * payload isn't on archive->fp yet. Serve from the staged
+         * source/buffer. Must precede the on-disk DK branch — a staged DK
+         * entry has offset 0 and would otherwise be read from the header. */
+        pakka_status_t st = pak_open_pending_reader(archive, reader, entry,
+                                                    err);
+        if (st != PAKKA_OK) {
+            free(reader);
+            return st;
         }
     } else if (archive->format == PAKKA_FORMAT_DAIKATANA
                && entry->dk_is_compressed) {
@@ -1602,6 +1746,23 @@ static pakka_status_t pak_add_source_preflight(const char *source_path,
     return PAKKA_OK;
 }
 
+/* Append a fully-populated staged entry (PAKKA_OPEN_READ_WRITE_ATOMIC):
+ * its payload lives in pending_source / pending_data, offset stays 0
+ * until the rebuild commit assigns it. Marks the archive dirty AND
+ * needs_rebuild so pakka_commit always takes the temp-rebuild + rename
+ * path. Mirrors pk3_link_pending_entry for the ZIP side. */
+static void pak_link_staged_entry(Pak_t *pak, Pakfileentry_t *entry) {
+    if (pak->tail == NULL) {
+        pak->head = entry;
+    } else {
+        pak->tail->next = entry;
+    }
+    pak->tail = entry;
+    pak->num_entries++;
+    pak->dirty = 1;
+    pak->needs_rebuild = 1;
+}
+
 pakka_status_t pakka_add_file(pakka_archive_t *archive,
                               const char *source_path,
                               const char *entry_name,
@@ -1727,6 +1888,72 @@ pakka_status_t pakka_add_file(pakka_archive_t *archive,
 
     physical_size = use_encoded ? (uint32_t)enc_len
                                 : (uint32_t)src_size;
+
+    if (archive->atomic_commit) {
+        /* Staged add: don't touch the live file. The payload is captured
+         * (DK-compressed / DK STORED-fallback already in memory) or its
+         * path stashed (plain STORED, re-read + revalidated at commit).
+         * The rebuild commit assigns the real offset. */
+        entry = calloc(1, sizeof(Pakfileentry_t));
+        if (entry == NULL) {
+            free(src_buf);
+            free(enc_buf);
+            fclose(src_fp);
+            return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "add_file",
+                            "Cannot allocate pak entry for %s", entry_name);
+        }
+        memcpy(entry->filename, entry_name, name_len);
+        entry->filename[name_len] = '\0';
+        entry->offset = 0;
+        entry->length = (uint32_t)src_size;
+
+        if (use_encoded) {
+            entry->dk_is_compressed = 1;
+            entry->dk_compressed_size = (uint32_t)enc_len;
+            entry->pending_data = enc_buf;       /* take ownership */
+            entry->pending_data_len = enc_len;
+            enc_buf = NULL;
+            free(src_buf);
+        } else if (src_buf != NULL) {
+            /* DK tried but didn't win (or enc alloc failed): the eager
+             * read is already in src_buf — stash it verbatim. */
+            entry->pending_data = src_buf;       /* take ownership */
+            entry->pending_data_len = (size_t)src_size;
+            src_buf = NULL;
+        } else {
+            /* Plain STORED: stash the path and scan once for the transient
+             * add-time CRC, re-checked at commit (PK3 STORED contract). */
+            uint32_t crc = 0;
+            unsigned char crcbuf[PAKFILE_COPY_CHUNK];
+            size_t got;
+            while ((got = fread(crcbuf, 1, sizeof(crcbuf), src_fp)) > 0) {
+                crc = pakka_crc32_update(crc, crcbuf, got);
+            }
+            if (ferror(src_fp)) {
+                saved_errno = errno;
+                fclose(src_fp);
+                pakka_entry_free(entry);
+                return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                                (uint32_t)saved_errno, "add_file",
+                                "Cannot read %s", source_path);
+            }
+            entry->crc32 = crc;
+            entry->pending_source = pakka_platform_strdup(source_path);
+            if (entry->pending_source == NULL) {
+                fclose(src_fp);
+                pakka_entry_free(entry);
+                return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                                0, "add_file",
+                                "Cannot stash source path for %s",
+                                entry_name);
+            }
+        }
+
+        fclose(src_fp);
+        pak_link_staged_entry(archive, entry);
+        return PAKKA_OK;
+    }
 
     /* Append at the cached payload_end across all existing entries (max
      * offset+length seen). Quake's pak0.pak has out-of-order payloads and
@@ -1933,6 +2160,49 @@ pakka_status_t pakka_add_memory(pakka_archive_t *archive,
     }
 
     physical_size = use_encoded ? (uint32_t)enc_len : (uint32_t)len;
+
+    if (archive->atomic_commit) {
+        /* Staged add: stash an owned copy of the payload; the rebuild
+         * commit writes it and assigns the offset. A 0-byte payload uses a
+         * 1-byte sentinel so pending_data != NULL still marks the entry as
+         * staged (mirrors the ZIP path). */
+        entry = calloc(1, sizeof(Pakfileentry_t));
+        if (entry == NULL) {
+            free(enc_buf);
+            return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE, 0,
+                            "add_memory",
+                            "Cannot allocate pak entry for %s", entry_name);
+        }
+        memcpy(entry->filename, entry_name, name_len);
+        entry->filename[name_len] = '\0';
+        entry->offset = 0;
+        entry->length = (uint32_t)len;
+
+        if (use_encoded) {
+            entry->dk_is_compressed = 1;
+            entry->dk_compressed_size = (uint32_t)enc_len;
+            entry->pending_data = enc_buf;       /* take ownership */
+            entry->pending_data_len = enc_len;
+            enc_buf = NULL;
+        } else {
+            size_t copy_len = len > 0 ? len : 1u;
+            entry->pending_data = malloc(copy_len);
+            if (entry->pending_data == NULL) {
+                free(enc_buf);
+                pakka_entry_free(entry);
+                return err_fill(err, PAKKA_ERR_NOMEM, PAKKA_ERR_DOMAIN_NONE,
+                                0, "add_memory",
+                                "Cannot buffer payload for %s", entry_name);
+            }
+            if (len > 0) {
+                memcpy(entry->pending_data, data, len);
+            }
+            entry->pending_data_len = len;
+        }
+
+        pak_link_staged_entry(archive, entry);
+        return PAKKA_OK;
+    }
 
     append_offset = archive->payload_end;
     if (append_offset > UINT32_MAX - (uint64_t)physical_size) {
@@ -2386,8 +2656,18 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
 
         {
             uint32_t win32_code = 0;
-            if (pakka_platform_rename_replace(rebuild_scratch, rename_target,
-                                      &win32_code) != 0) {
+            int rename_rc;
+            /* Fault hook: simulate a failed publish so tests can assert the
+             * original archive is byte-for-byte unchanged after an
+             * interrupted atomic commit (the whole point of this mode). */
+            if (PAKKA_FAULT_CHECK("commit_pak_rename")) {
+                rename_rc = -1;
+                errno = EIO;
+            } else {
+                rename_rc = pakka_platform_rename_replace(rebuild_scratch,
+                                                  rename_target, &win32_code);
+            }
+            if (rename_rc != 0) {
                 saved_errno = errno;
                 /* Best-effort restore: revert offsets, drop the
                  * scratch, and reopen the un-renamed original so
@@ -2435,6 +2715,17 @@ static pakka_status_t pakka_commit_rebuild(pakka_archive_t *archive,
                         rename_target);
     }
 
+    /* Staged payloads are now materialized in the renamed file at their
+     * new offsets — drop the pending bookkeeping so the entries read from
+     * disk like any other and the owned buffers/paths aren't leaked. */
+    for (i = 0; i < n_entries; i++) {
+        free(entry_ptrs[i]->pending_source);
+        entry_ptrs[i]->pending_source = NULL;
+        free(entry_ptrs[i]->pending_data);
+        entry_ptrs[i]->pending_data = NULL;
+        entry_ptrs[i]->pending_data_len = 0;
+    }
+
     free(new_offsets);
     free(entry_ptrs);
     archive->dirty = 0;
@@ -2466,10 +2757,14 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
         return pakka_pk3_commit_impl(archive, err);
     }
 
-    if (!archive->needs_rebuild) {
-        /* Add-only path: just rewrite the directory + header in place.
-         * write_pak_directory positions itself at byte-tail before
-         * writing the directory, then rewinds and writes the header. */
+    if (!archive->needs_rebuild && !archive->atomic_commit) {
+        /* Add-only, non-atomic path: just rewrite the directory + header
+         * in place. write_pak_directory positions itself at byte-tail
+         * before writing the directory, then rewinds and writes the
+         * header. Atomic-mode archives never take this path — their adds
+         * set needs_rebuild, but the atomic_commit guard makes that
+         * explicit so a future add path can't accidentally rewrite the
+         * live file in place. */
         status = write_pak_directory(archive, err);
         if (status != PAKKA_OK) {
             return status;
@@ -2486,6 +2781,26 @@ pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err) {
     }
 
     return pakka_commit_rebuild(archive, err);
+}
+
+/* See include/pakka.h for the contract. ZIP always rebuilds; a created
+ * archive publishes via temp + rename on close; a read-only archive's
+ * commit is a no-op; only a plain-read-write PAK-class archive streams
+ * adds in place and is therefore non-atomic. */
+int pakka_commit_is_atomic(const pakka_archive_t *archive) {
+    if (archive == NULL) {
+        return 0;
+    }
+    if (pakka_format_is_zip(archive->format)) {
+        return 1;
+    }
+    if (archive->is_new) {
+        return 1;
+    }
+    if (!archive->writable) {
+        return 1;
+    }
+    return archive->atomic_commit ? 1 : 0;
 }
 
 /* { normalized, original } record used by pakka_verify's collision
@@ -2577,12 +2892,13 @@ static void verify_entry(pakka_archive_t *archive,
         return;        /* skip payload read for unsafe names */
     }
 
-    /* Skip queued-add ZIP entries (H2): their payload isn't on
-     * pak->fp yet — it lives in pk3_pending_source/_data and gets
-     * published at commit time. */
-    if (pakka_format_is_zip(archive->format)
-        && (current->pk3_pending_source != NULL
-            || current->pk3_pending_data != NULL)) {
+    /* Skip staged entries (ZIP queued adds and PAK-class atomic-mode
+     * adds): their payload isn't on pak->fp yet — it lives in
+     * pending_source/_data and gets published at commit time, so there is
+     * no on-disk offset to verify against. Format-neutral now that PAK
+     * staging shares these fields. */
+    if (current->pending_source != NULL
+        || current->pending_data != NULL) {
         verify_report(report, userdata, PAKKA_REPORT_INFO,
                       PAKKA_OK, current->filename,
                       "pending add (not yet committed)");
@@ -2867,30 +3183,105 @@ pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags,
     return first_error;
 }
 
+/* Stream a staged file-source entry (PAKKA_OPEN_READ_WRITE_ATOMIC) into
+ * the rebuild temp, re-running the add-time source hardening: a source
+ * swapped for a symlink, made non-regular, resized, or modified in place
+ * between add and commit is refused rather than silently published. The
+ * symlink / size / CRC revalidation runs even for a zero-length source.
+ * Mirrors the pending-source branch of pakka_pk3_commit_impl. */
+static pakka_status_t pak_copy_pending_source(Pakfileentry_t *entry,
+                                              FILE *tfd,
+                                              pakka_error_t *err) {
+    struct stat sb;
+    FILE *src;
+    uint32_t crc = 0;
+    uint64_t remaining;
+    unsigned char buf[PAKFILE_COPY_CHUNK];
+    int saved_errno;
+
+    if (pakka_platform_is_reparse_or_symlink(entry->pending_source)) {
+        return err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
+                        0, "commit",
+                        "Pending source %s for %s is now a symlink/reparse "
+                        "point", entry->pending_source, entry->filename);
+    }
+    if (pakka_platform_lstat(entry->pending_source, &sb) != 0) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot stat pending source %s for %s",
+                        entry->pending_source, entry->filename);
+    }
+    if (!S_ISREG(sb.st_mode)) {
+        return err_fill(err, PAKKA_ERR_UNSAFE_NAME, PAKKA_ERR_DOMAIN_NONE,
+                        0, "commit",
+                        "Pending source %s for %s is no longer a regular "
+                        "file", entry->pending_source, entry->filename);
+    }
+    if ((uint64_t)sb.st_size != (uint64_t)entry->length) {
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "commit",
+                        "Pending source %s for %s changed size between add "
+                        "and commit (now %" PRIu64 ", was %u)",
+                        entry->pending_source, entry->filename,
+                        (uint64_t)sb.st_size, (unsigned)entry->length);
+    }
+
+    src = pakka_platform_fopen(entry->pending_source, "rb");
+    if (src == NULL) {
+        saved_errno = errno;
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)saved_errno, "commit",
+                        "Cannot reopen pending source %s for %s",
+                        entry->pending_source, entry->filename);
+    }
+    remaining = (uint64_t)entry->length;
+    while (remaining > 0) {
+        size_t want = remaining > sizeof(buf) ? sizeof(buf)
+                                              : (size_t)remaining;
+        size_t got = fread(buf, 1, want, src);
+        if (got != want || fwrite(buf, 1, got, tfd) != got) {
+            saved_errno = errno;
+            fclose(src);
+            return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                            (uint32_t)saved_errno, "commit",
+                            "Stream from pending source %s failed for %s",
+                            entry->pending_source, entry->filename);
+        }
+        crc = pakka_crc32_update(crc, buf, got);
+        remaining -= (uint64_t)got;
+    }
+    fclose(src);
+    if (crc != entry->crc32) {
+        return err_fill(err, PAKKA_ERR_FORMAT, PAKKA_ERR_DOMAIN_NONE, 0,
+                        "commit",
+                        "Pending source %s for %s changed between add and "
+                        "commit (CRC 0x%08x vs 0x%08x)",
+                        entry->pending_source, entry->filename,
+                        crc, entry->crc32);
+    }
+    return PAKKA_OK;
+}
+
 /* Copy one entry's payload from ffd to tfd, returning the new byte
  * offset in tfd via *new_offset_out. The caller is responsible for
  * deciding when to commit *new_offset_out into entry->offset — leaving
  * the entry untouched here lets a failing pakka_commit roll back its
- * in-memory layout. */
+ * in-memory layout. Three payload sources, mirroring the ZIP rebuild:
+ * a staged file source (pending_source, revalidated), a staged in-memory
+ * buffer (pending_data, written verbatim), or — for an entry already on
+ * disk — the live archive at entry->offset. */
 pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
                                  uint32_t *new_offset_out,
                                  pakka_error_t *err) {
     char *buffer;
     int64_t new_offset;
-    uint32_t src_offset = entry->offset;
-    uint32_t extent = pak_entry_on_disk_extent(entry);
+    uint32_t src_offset;
+    uint32_t extent;
     int saved_errno;
 
-    if (pakka_platform_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
-        saved_errno = errno;
-        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
-                 (uint32_t)saved_errno, "commit",
-                 "Cannot seek to source entry");
-        err_set_entry(err, entry->filename, (size_t)-1,
-                      (uint64_t)src_offset, (uint64_t)extent);
-        return PAKKA_ERR_IO;
-    }
-
+    /* Destination offset is the temp write cursor — applies to every
+     * source, so record it before branching. */
     new_offset = pakka_platform_ftell(tfd);
     if (new_offset < 0) {
         saved_errno = errno;
@@ -2905,6 +3296,39 @@ pakka_status_t copy_between_paks(Pakfileentry_t *entry, FILE *ffd, FILE *tfd,
     }
     if (new_offset_out != NULL) {
         *new_offset_out = (uint32_t)new_offset;
+    }
+
+    /* Staged adds (PAKKA_OPEN_READ_WRITE_ATOMIC): the payload isn't in
+     * ffd yet. ffd is untouched for these. */
+    if (entry->pending_source != NULL) {
+        return pak_copy_pending_source(entry, tfd, err);
+    }
+    if (entry->pending_data != NULL) {
+        if (entry->pending_data_len > 0
+            && fwrite(entry->pending_data, 1, entry->pending_data_len, tfd)
+               != entry->pending_data_len) {
+            saved_errno = errno;
+            err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                     (uint32_t)saved_errno, "commit",
+                     "Cannot write staged payload to dest pak");
+            err_set_entry(err, entry->filename, (size_t)-1, 0,
+                          (uint64_t)entry->pending_data_len);
+            return PAKKA_ERR_IO;
+        }
+        return PAKKA_OK;
+    }
+
+    /* On-disk entry: stream its extent from ffd at entry->offset. */
+    src_offset = entry->offset;
+    extent = pak_entry_on_disk_extent(entry);
+    if (pakka_platform_fseek(ffd, (int64_t)src_offset, SEEK_SET) != 0) {
+        saved_errno = errno;
+        err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                 (uint32_t)saved_errno, "commit",
+                 "Cannot seek to source entry");
+        err_set_entry(err, entry->filename, (size_t)-1,
+                      (uint64_t)src_offset, (uint64_t)extent);
+        return PAKKA_ERR_IO;
     }
 
     /* Skip-on-zero uses the physical extent, not entry->length: a DK
@@ -3298,6 +3722,19 @@ pakka_status_t write_pak_directory(Pak_t *pak, pakka_error_t *err) {
         return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
                         (uint32_t)saved_errno, "commit",
                         "Cannot seek to pak header");
+    }
+
+    /* Fault hook: simulate the final header rewrite being interrupted.
+     * On the in-place (default) commit path the directory region has
+     * already been overwritten while the on-disk header still points at
+     * the old layout — a torn archive, which tests contrast against the
+     * atomic path. When write_pak_directory runs against a rebuild temp,
+     * the caller removes the temp and rolls back, so the published
+     * archive stays intact. */
+    if (PAKKA_FAULT_CHECK("commit_pak_dir_header")) {
+        return err_fill(err, PAKKA_ERR_IO, PAKKA_ERR_DOMAIN_ERRNO,
+                        (uint32_t)EIO, "commit",
+                        "Injected fault before pak header write");
     }
 
     return write_pak_header(pak, "commit", err);

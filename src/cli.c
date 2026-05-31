@@ -231,9 +231,14 @@ static int cli_run(int argc, char **argv) {
         s = pakka_create(opts.pakfile, fmt,
                          PAKKA_CREATE_DEFAULT, &pak, &err);
     } else {
+        /* Mutating runs open atomic so an interrupted `pakka -a`/`-d`
+         * can't leave a torn archive behind — for ZIP this is identical
+         * to PAKKA_OPEN_READ_WRITE, and for a PAK-class target it routes
+         * the commit through the temp-rebuild + rename path instead of
+         * streaming adds into the live file. */
         pakka_open_mode_t mode =
             (opts.mode == PAK_ADD || opts.mode == PAK_REMOVE)
-              ? PAKKA_OPEN_READ_WRITE
+              ? PAKKA_OPEN_READ_WRITE_ATOMIC
               : PAKKA_OPEN_READ;
         s = pakka_open_ex(opts.pakfile, mode, opts.format, &pak, &err);
     }

@@ -1737,6 +1737,106 @@ static int setup_extracted_and_rebuilt(void)
     return 0;
 }
 
+#if defined(PAKKA_TEST_BUILD) && !defined(_WIN32)
+/* Spawn the pakka CLI with PAKKA_INJECT_FAULT_AT set so the N-th
+ * matching PAKKA_FAULT_CHECK fires in the child. PATH is passed through;
+ * extra_argv is appended after argv[0]. */
+static int spawn_pakka_with_fault(const char *fault,
+                                  const char *const *extra_argv,
+                                  proc_result_t *out)
+{
+    const char *path_env = getenv("PATH");
+    char        path_buf[4096];
+    char        fault_buf[128];
+    const char *envp[3];
+    const char **argv;
+    proc_opts_t opts = {0};
+    size_t      n = 0;
+    size_t      i;
+    int         rc;
+
+    snprintf(path_buf, sizeof path_buf, "PATH=%s", path_env ? path_env : "");
+    snprintf(fault_buf, sizeof fault_buf, "PAKKA_INJECT_FAULT_AT=%s", fault);
+    envp[0] = path_buf;
+    envp[1] = fault_buf;
+    envp[2] = NULL;
+
+    while (extra_argv[n]) n++;
+    argv = malloc((n + 2) * sizeof *argv);
+    if (argv == NULL) return -1;
+    argv[0] = g_pakka_path;
+    for (i = 0; i < n; i++) argv[i + 1] = extra_argv[i];
+    argv[n + 1] = NULL;
+
+    opts.envp = envp;
+    rc        = proc_run(argv, &opts, out);
+    free(argv);
+    return rc;
+}
+
+/* `pakka -a`/`-d` open PAKKA_OPEN_READ_WRITE_ATOMIC, so an interrupted
+ * commit must leave the original .pak byte-for-byte unchanged. Exercises
+ * both the rename fault (publish step) and the directory/header write
+ * fault (which, in atomic mode, runs against the rebuild temp and rolls
+ * back). Contrast: a plain-RW PAK would have streamed the add in place
+ * and torn the original — that gap is what this mode closes. */
+static void test_fault_atomic_add_leaves_original_pak_unchanged(void)
+{
+    const char *faults[2];
+    size_t      fi;
+
+    faults[0] = "commit_pak_rename:1";
+    faults[1] = "commit_pak_dir_header:1";
+
+    for (fi = 0; fi < 2; fi++) {
+        proc_opts_t    opts = {0};
+        proc_result_t  r;
+        char          *base;
+        char          *src;
+        unsigned char *pre;
+        unsigned char *post;
+        size_t         pre_n  = 0;
+        size_t         post_n = 0;
+        const char    *extra[6];
+
+        EXPECT_EQ(fs_mkdir_p(under_scratch("fault_pak")), 0);
+        base = under_scratch("fault_pak/work.pak");
+        src  = under_scratch("fault_pak/incoming.txt");
+        (void)remove(base);
+        EXPECT_EQ(fs_write_file(src, "incoming-body\n", 14), 0);
+
+        /* Base pak with one real entry, created in a fault-free child. */
+        opts.cwd = under_scratch("fault_pak");
+        RUN_PAKKA_OK_CWD(&r, &opts, "-c", base, "incoming.txt");
+        proc_result_free(&r);
+
+        pre = fs_read_file(base, &pre_n);
+        EXPECT_NOT_NULL(pre);
+
+        /* Stage a second add, then fault the commit. */
+        extra[0] = "-a";
+        extra[1] = base;
+        extra[2] = "--as";
+        extra[3] = "second.txt";
+        extra[4] = src;
+        extra[5] = NULL;
+        EXPECT_EQ(spawn_pakka_with_fault(faults[fi], extra, &r), 0);
+        EXPECT_NE(r.exit_code, 0);          /* CLI must report the failure */
+        proc_result_free(&r);
+
+        post = fs_read_file(base, &post_n);
+        EXPECT_NOT_NULL(post);
+        EXPECT_EQ((long long)post_n, (long long)pre_n);
+        EXPECT_MEM_EQ(post, pre, pre_n);
+
+        t_free(pre);
+        t_free(post);
+        (void)remove(base);
+        (void)remove(src);
+    }
+}
+#endif /* PAKKA_TEST_BUILD && !_WIN32 */
+
 int main(void)
 {
     const char *pakka = getenv("PAKKA");
@@ -1777,6 +1877,9 @@ int main(void)
     RUN_TEST(test_byte_delta_matches_orphan_size);
     RUN_TEST(test_extract_specific_files_only);
     RUN_TEST(test_add_new_entry_round_trips);
+#if defined(PAKKA_TEST_BUILD) && !defined(_WIN32)
+    RUN_TEST(test_fault_atomic_add_leaves_original_pak_unchanged);
+#endif
     RUN_TEST(test_extract_missing_path_errors);
     RUN_TEST(test_extract_duplicate_path_args_succeed);
 

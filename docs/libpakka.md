@@ -30,7 +30,9 @@ offset, message. Callers that don't need structured errors can pass
 ### Archive lifecycle
 
 * `pakka_open` — open an existing archive; format is probed from the
-  on-disk header.
+  on-disk header. `mode` is `PAKKA_OPEN_READ`, `PAKKA_OPEN_READ_WRITE`,
+  or `PAKKA_OPEN_READ_WRITE_ATOMIC` (see
+  [Transactional commit](#transactional-commit)).
 * `pakka_open_ex` — open with the format pinned explicitly. Matters
   for Daikatana (shares Quake's `"PACK"` magic) and for callers that
   want to refuse formats they don't expect.
@@ -74,6 +76,8 @@ These read fields from the opaque `pakka_entry_t`:
 * `pakka_delete` — remove an entry by name.
 * `pakka_commit` — explicit flush; `pakka_close` calls this for you
   on a dirty archive.
+* `pakka_commit_is_atomic` — query whether a commit on this handle is
+  all-or-nothing (see [Transactional commit](#transactional-commit)).
 
 ### Integrity
 
@@ -103,6 +107,40 @@ These read fields from the opaque `pakka_entry_t`:
 * `pakka_free` — release a buffer returned by the library. Must be
   used in place of `free()` because, on Windows, the library may be
   linked against a different CRT than the caller.
+
+## Transactional commit
+
+Whether a `pakka_commit` is **atomic** — fully applied or the on-disk
+file left untouched, never a torn intermediate — depends on the format
+and how the archive was opened:
+
+| Operation | PAK / SiN / Daikatana / IWAD / PWAD | PK3 / PK4 |
+| --- | --- | --- |
+| `pakka_create` (new file) | atomic (temp → rename on close) | atomic |
+| `pakka_delete` then commit | atomic (rebuild → rename) | atomic |
+| `pakka_add_*` then commit, `PAKKA_OPEN_READ_WRITE` | **in place — a mid-write failure can corrupt the original** | atomic |
+| `pakka_add_*` then commit, `PAKKA_OPEN_READ_WRITE_ATOMIC` | atomic (staged → rebuild → rename) | atomic |
+
+The PAK family defaults to streaming adds straight into the live file:
+fast and bounded-memory, but an interrupted add or commit can leave the
+archive torn. Open with `PAKKA_OPEN_READ_WRITE_ATOMIC` to stage adds and
+publish every commit through a temp-file rebuild and rename instead, at
+the cost of rewriting the archive on each commit. For ZIP the flag is a
+no-op — PK3 / PK4 commits already rebuild and rename.
+
+A consumer that wants uniform behavior shouldn't hardcode this table;
+call `pakka_commit_is_atomic(handle)` instead. It returns nonzero for any
+PK3 / PK4 handle, any `pakka_create` handle, any handle opened
+`PAKKA_OPEN_READ_WRITE_ATOMIC`, and any read-only handle; zero only for a
+PAK-class handle opened plain `PAKKA_OPEN_READ_WRITE`. The recommended
+pattern is: open atomic when you need durability, or query and fall back
+to your own backup-and-replace when it returns zero.
+
+Note the atomic STORED contract matches PK3 STORED: `pakka_add_file`
+records the source's size + CRC32 and re-reads the file at commit, so the
+source must stay readable and unchanged until `pakka_commit` /
+`pakka_close` returns (a changed source makes commit refuse with
+`PAKKA_ERR_FORMAT`). Use `pakka_add_memory` to pin bytes at call time.
 
 ## Call-pattern example
 

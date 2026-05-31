@@ -108,9 +108,21 @@ the linked library version in a host application's diagnostics.
 Open an existing archive.
 .B mode
 is
-.B PAKKA_OPEN_READ
+.BR PAKKA_OPEN_READ ,
+.BR PAKKA_OPEN_READ_WRITE ,
 or
-.BR PAKKA_OPEN_READ_WRITE .
+.BR PAKKA_OPEN_READ_WRITE_ATOMIC .
+The atomic mode behaves like
+.B PAKKA_OPEN_READ_WRITE
+except that, for PAK-class archives (PAK / SiN / Daikatana / IWAD / PWAD),
+adds are staged and every commit is published via a temp-file rebuild and
+rename, so an interrupted add or commit cannot corrupt the archive on disk.
+Plain
+.B PAKKA_OPEN_READ_WRITE
+streams PAK-class adds into the live file (fast, bounded memory, but a
+mid-write failure can tear the original); ZIP commits are always atomic, so
+the atomic mode is a no-op for PK3/PK4. See
+.BR pakka_commit_is_atomic .
 Format is auto-detected from the on-disk magic.
 .TP
 .B pakka_status_t pakka_open_ex(const char *path, pakka_open_mode_t mode, pakka_format_t format_hint, pakka_archive_t **out, pakka_error_t *err);
@@ -260,6 +272,8 @@ is a no-op.
 .SH MUTATION
 A handle opened with
 .B PAKKA_OPEN_READ_WRITE
+or
+.B PAKKA_OPEN_READ_WRITE_ATOMIC
 (or created via
 .BR pakka_create )
 accepts adds and deletes. Changes accumulate in memory until
@@ -275,9 +289,17 @@ Validation: entry-name length, unsafe-name rules, duplicate name
 and the u32 size cap. The timing of the source read is format-specific:
 .RS
 .IP \(bu 2
-.B PAK / SiN:
+.B PAK / SiN (plain PAKKA_OPEN_READ_WRITE):
 source bytes are read and written into the archive immediately. After
 return, source_path can be freely modified or deleted.
+.IP \(bu 2
+.B PAK-class under PAKKA_OPEN_READ_WRITE_ATOMIC:
+a STORED add records the CRC32 + size and stashes the source path, re-read
+and revalidated at commit \(em the same contract as PK3 / PK4 STORED below
+(keep
+.I source_path
+unchanged until commit). Daikatana entries that get compressed are captured
+at add time, like the Daikatana bullet.
 .IP \(bu 2
 .B PK3 / PK4 STORED (default):
 the CRC32 + size are recorded and the source path is stashed; the bytes
@@ -320,9 +342,30 @@ Mark an entry for deletion. The on-disk archive is not modified until
 .BR pakka_commit / pakka_close .
 .TP
 .B pakka_status_t pakka_commit(pakka_archive_t *archive, pakka_error_t *err);
-Flush all pending adds and deletes to disk. PAK / SiN / Daikatana
-rewrite the directory and tail in place; PK3 / PK4 write to a temp file
-and rename atomically on success.
+Flush all pending adds and deletes to disk. By default PAK / SiN /
+Daikatana rewrite the directory and tail in place (a delete still rebuilds
+via a temp file); PK3 / PK4 always write to a temp file and rename
+atomically on success. A PAK-class handle opened
+.B PAKKA_OPEN_READ_WRITE_ATOMIC
+takes the temp-file rebuild + rename path for every commit, so the
+published archive is never left in a torn state.
+.TP
+.B int pakka_commit_is_atomic(const pakka_archive_t *archive);
+Reports whether a
+.B pakka_commit
+on this handle is atomic \(em either fully applied or the on-disk file
+left unchanged, never a torn intermediate. Lets a consumer decide whether
+it needs its own backup-and-replace without hardcoding which formats
+stream in place. Returns nonzero for any PK3 / PK4 handle, any handle from
+.BR pakka_create ,
+any handle opened
+.BR PAKKA_OPEN_READ_WRITE_ATOMIC ,
+and any read-only handle (commit is a no-op); zero only for a PAK-class
+handle opened plain
+.BR PAKKA_OPEN_READ_WRITE .
+Zero on a
+.B NULL
+argument.
 .SH VERIFICATION
 .TP
 .B pakka_status_t pakka_verify(pakka_archive_t *archive, unsigned flags, pakka_report_fn report, void *userdata, pakka_error_t *err);

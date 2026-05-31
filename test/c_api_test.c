@@ -1338,6 +1338,390 @@ static int test_open_rejects_malformed_pk3(const char *scratch_dir) {
     return 0;
 }
 
+/* ---------- PAKKA_OPEN_READ_WRITE_ATOMIC + pakka_commit_is_atomic ---------- */
+
+#ifndef _WIN32
+/* Read an entire file into a malloc'd buffer (caller frees). Returns NULL
+ * on error; *out_len gets the byte count on success. POSIX-only: used to
+ * confirm an open atomic-mode archive is byte-identical until commit, which
+ * Windows can't observe — a writable handle holds an exclusive lock, so the
+ * file can't be opened a second time for reading. */
+static unsigned char *atomic_slurp(const char *path, long *out_len) {
+    FILE *fp = fopen(path, "rb");
+    unsigned char *buf;
+    long n;
+    if (fp == NULL) return NULL;
+    if (fseek(fp, 0, SEEK_END) != 0) { fclose(fp); return NULL; }
+    n = ftell(fp);
+    if (n < 0 || fseek(fp, 0, SEEK_SET) != 0) { fclose(fp); return NULL; }
+    buf = malloc((size_t)n + 1u);
+    if (buf == NULL) { fclose(fp); return NULL; }
+    if (n > 0 && fread(buf, 1, (size_t)n, fp) != (size_t)n) {
+        free(buf); fclose(fp); return NULL;
+    }
+    fclose(fp);
+    *out_len = n;
+    return buf;
+}
+#endif
+
+static int atomic_write_file(const char *path, const void *data, size_t len) {
+    FILE *fp = fopen(path, "wb");
+    if (fp == NULL) return -1;
+    if (len > 0 && fwrite(data, 1, len, fp) != len) { fclose(fp); return -1; }
+    fclose(fp);
+    return 0;
+}
+
+/* Build a fresh archive of `fmt` with `count` in-memory entries, then
+ * close it (publishing via the normal create path). Returns 0 / -1. */
+static int atomic_make_pak(const char *path, pakka_format_t fmt,
+                           const char *const *names,
+                           const char *const *bodies, int count) {
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    int i;
+    (void)remove(path);
+    s = pakka_create(path, fmt, PAKKA_CREATE_DEFAULT, &a, &err);
+    if (s != PAKKA_OK) return -1;
+    for (i = 0; i < count; i++) {
+        s = pakka_add_memory(a, names[i], bodies[i], strlen(bodies[i]), &err);
+        if (s != PAKKA_OK) { pakka_close(a, NULL); return -1; }
+    }
+    return pakka_close(a, &err) == PAKKA_OK ? 0 : -1;
+}
+
+static int test_atomic_query(const char *scratch_dir) {
+    char pak_path[1024], pk3_path[1024];
+    const char *names[]  = {"a.txt"};
+    const char *bodies[] = {"hi"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+
+    if (pakka_commit_is_atomic(NULL) != 0)
+        FAIL("commit_is_atomic(NULL) should be 0");
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_atomic_q.pak", scratch_dir);
+    snprintf(pk3_path, sizeof pk3_path, "%s/c_api_atomic_q.pk3", scratch_dir);
+
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 1) != 0)
+        FAIL("build query pak");
+    if (atomic_make_pak(pk3_path, PAKKA_FORMAT_PK3, names, bodies, 1) != 0)
+        FAIL("build query pk3");
+
+    /* created handle (is_new) publishes atomically via temp+rename */
+    {
+        char fresh[1024];
+        pakka_archive_t *c = NULL;
+        snprintf(fresh, sizeof fresh, "%s/c_api_atomic_q_new.pak", scratch_dir);
+        (void)remove(fresh);
+        s = pakka_create(fresh, PAKKA_FORMAT_PAK, PAKKA_CREATE_DEFAULT, &c, &err);
+        EXPECT_EQ(s, PAKKA_OK, "create-for-query");
+        if (pakka_commit_is_atomic(c) != 1)
+            FAIL("created handle should report atomic");
+        pakka_close(c, NULL);
+        (void)remove(fresh);
+    }
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open pak RO");
+    if (pakka_commit_is_atomic(a) != 1)
+        FAIL("read-only PAK should report atomic (commit is a no-op)");
+    pakka_close(a, NULL); a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open pak RW");
+    if (pakka_commit_is_atomic(a) != 0)
+        FAIL("plain-RW PAK should report non-atomic");
+    pakka_close(a, NULL); a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open pak atomic");
+    if (pakka_commit_is_atomic(a) != 1)
+        FAIL("atomic-mode PAK should report atomic");
+    pakka_close(a, NULL); a = NULL;
+
+    s = pakka_open(pk3_path, PAKKA_OPEN_READ_WRITE, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open pk3 RW");
+    if (pakka_commit_is_atomic(a) != 1)
+        FAIL("ZIP should report atomic even in plain-RW");
+    pakka_close(a, NULL); a = NULL;
+
+    (void)remove(pak_path);
+    (void)remove(pk3_path);
+    return 0;
+}
+
+static int test_atomic_add_roundtrip(const char *scratch_dir) {
+    char pak_path[1024], src_path[1024];
+    const char *names[]  = {"keep/one.txt", "keep/two.txt"};
+    const char *bodies[] = {"first-entry", "second-entry"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_atomic_add.pak", scratch_dir);
+    snprintf(src_path, sizeof src_path, "%s/c_api_atomic_add.src", scratch_dir);
+
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 2) != 0)
+        FAIL("build base pak");
+    if (atomic_write_file(src_path, "from-disk", 9) != 0)
+        FAIL("write source");
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open atomic");
+    s = pakka_add_file(a, src_path, "new/disk.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "atomic add_file");
+    s = pakka_add_memory(a, "new/mem.bin", "in-mem", 6, &err);
+    EXPECT_EQ(s, PAKKA_OK, "atomic add_memory");
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "atomic commit");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "atomic close");
+    a = NULL;
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen after atomic commit");
+    if (pakka_entry_count(a) != 4) FAIL("expected 4 entries after atomic add");
+
+    s = pakka_read_entry_alloc(a, "keep/one.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read keep/one.txt");
+    if (out_len != 11 || memcmp(out, "first-entry", 11) != 0)
+        FAIL("pre-existing entry content changed");
+    pakka_free(out); out = NULL;
+
+    s = pakka_read_entry_alloc(a, "new/disk.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read new/disk.txt");
+    if (out_len != 9 || memcmp(out, "from-disk", 9) != 0)
+        FAIL("staged file content mismatch");
+    pakka_free(out); out = NULL;
+
+    s = pakka_read_entry_alloc(a, "new/mem.bin", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read new/mem.bin");
+    if (out_len != 6 || memcmp(out, "in-mem", 6) != 0)
+        FAIL("staged memory content mismatch");
+    pakka_free(out); out = NULL;
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    (void)remove(src_path);
+
+#ifndef _WIN32
+    /* POSIX-only: confirm atomic adds stage in memory and never touch the
+     * published file until commit. A concurrent reader can observe this on
+     * POSIX; on Windows the writable handle holds an exclusive lock, so the
+     * archive can't be opened a second time mid-operation. Self-contained on
+     * a fresh pak so no slurp state leaks into the cross-platform path. */
+    {
+        char            unt_path[1024];
+        unsigned char  *pre, *mid;
+        long            pre_n = 0, mid_n = 0;
+        pakka_archive_t *b = NULL;
+
+        snprintf(unt_path, sizeof unt_path, "%s/c_api_atomic_untouched.pak",
+                 scratch_dir);
+        if (atomic_make_pak(unt_path, PAKKA_FORMAT_PAK, names, bodies, 2) != 0)
+            FAIL("build untouched-check pak");
+        pre = atomic_slurp(unt_path, &pre_n);
+        if (pre == NULL) FAIL("slurp pre");
+
+        s = pakka_open(unt_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &b, &err);
+        EXPECT_EQ(s, PAKKA_OK, "open untouched-check atomic");
+        s = pakka_add_memory(b, "added.bin", "x", 1, &err);
+        EXPECT_EQ(s, PAKKA_OK, "stage add for untouched-check");
+
+        mid = atomic_slurp(unt_path, &mid_n);
+        if (mid == NULL) { free(pre); FAIL("slurp mid"); }
+        if (mid_n != pre_n || memcmp(mid, pre, (size_t)pre_n) != 0)
+            FAIL("atomic add mutated the archive before commit");
+
+        free(pre);
+        free(mid);
+        pakka_close(b, NULL);
+        (void)remove(unt_path);
+    }
+#endif
+    return 0;
+}
+
+/* Stage an add from a source file, swap the source out from under it,
+ * require commit to refuse with `want`, and confirm the refused commit
+ * left the original archive intact (verified by reopening — Windows-safe,
+ * unlike reading the still-open archive). */
+static int atomic_toctou_case(const char *scratch_dir, const char *tag,
+                              const void *orig, size_t orig_len,
+                              const void *swapped, size_t swapped_len,
+                              pakka_status_t want) {
+    char pak_path[1024], src_path[1024];
+    const char *names[]  = {"base.txt"};
+    const char *bodies[] = {"base-body"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    const pakka_entry_t *e;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_toctou_%s.pak",
+             scratch_dir, tag);
+    snprintf(src_path, sizeof src_path, "%s/c_api_toctou_%s.src",
+             scratch_dir, tag);
+
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 1) != 0)
+        FAIL("toctou %s: base pak", tag);
+    if (atomic_write_file(src_path, orig, orig_len) != 0)
+        FAIL("toctou %s: write src", tag);
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "toctou open atomic");
+    s = pakka_add_file(a, src_path, "staged.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "toctou add_file");
+
+    if (atomic_write_file(src_path, swapped, swapped_len) != 0)
+        FAIL("toctou %s: swap src", tag);
+
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, want, "toctou commit must refuse swapped source");
+    pakka_close(a, NULL);       /* sticky re-commit fails; archive untouched */
+    a = NULL;
+
+    /* Reopen: the refused commit must have left the original intact, with
+     * only the pre-existing entry and no trace of the staged add. */
+    s = pakka_open(pak_path, PAKKA_OPEN_READ, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "toctou reopen original");
+    if (pakka_entry_count(a) != 1)
+        FAIL("toctou %s: archive changed after a refused commit", tag);
+    s = pakka_find_entry(a, "base.txt", &e);
+    EXPECT_EQ(s, PAKKA_OK, "toctou original entry intact");
+    s = pakka_find_entry(a, "staged.txt", &e);
+    EXPECT_EQ(s, PAKKA_ERR_NOT_FOUND, "toctou staged entry not published");
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    (void)remove(src_path);
+    return 0;
+}
+
+static int test_atomic_toctou(const char *scratch_dir) {
+    /* grow-with-same-prefix: size differs */
+    if (atomic_toctou_case(scratch_dir, "size", "AAAA", 4, "AAAAB", 5,
+                           PAKKA_ERR_FORMAT) != 0) return 1;
+    /* same size, different content: only the CRC catches it */
+    if (atomic_toctou_case(scratch_dir, "content", "AAAA", 4, "BBBB", 4,
+                           PAKKA_ERR_FORMAT) != 0) return 1;
+    return 0;
+}
+
+static int test_atomic_pending_reads(const char *scratch_dir) {
+    char pak_path[1024], src_path[1024];
+    const char *names[]  = {"base.txt"};
+    const char *bodies[] = {"BASEBODY"};
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    void *out = NULL;
+    size_t out_len = 0;
+
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_atomic_pend.pak", scratch_dir);
+    snprintf(src_path, sizeof src_path, "%s/c_api_atomic_pend.src", scratch_dir);
+
+    if (atomic_make_pak(pak_path, PAKKA_FORMAT_PAK, names, bodies, 1) != 0)
+        FAIL("build base pak");
+    if (atomic_write_file(src_path, "DISKBODY", 8) != 0)
+        FAIL("write source");
+
+    s = pakka_open(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open atomic");
+    s = pakka_add_file(a, src_path, "staged_file.txt", &err);
+    EXPECT_EQ(s, PAKKA_OK, "stage file");
+    s = pakka_add_memory(a, "staged_mem.bin", "MEMBODY", 7, &err);
+    EXPECT_EQ(s, PAKKA_OK, "stage memory");
+
+    /* read-before-commit: file source served by re-reading the path */
+    s = pakka_read_entry_alloc(a, "staged_file.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read staged file before commit");
+    if (out_len != 8 || memcmp(out, "DISKBODY", 8) != 0)
+        FAIL("staged file pending-read bytes");
+    pakka_free(out); out = NULL;
+
+    /* read-before-commit: memory source served from the owned buffer */
+    s = pakka_read_entry_alloc(a, "staged_mem.bin", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read staged mem before commit");
+    if (out_len != 7 || memcmp(out, "MEMBODY", 7) != 0)
+        FAIL("staged memory pending-read bytes");
+    pakka_free(out); out = NULL;
+
+    /* on-disk entry still reads normally while staged adds are pending */
+    s = pakka_read_entry_alloc(a, "base.txt", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read base before commit");
+    if (out_len != 8 || memcmp(out, "BASEBODY", 8) != 0)
+        FAIL("on-disk entry bytes");
+    pakka_free(out); out = NULL;
+
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    (void)remove(src_path);
+    return 0;
+}
+
+static int test_atomic_dk_pending(const char *scratch_dir) {
+    char pak_path[1024];
+    unsigned char payload[256];
+    pakka_archive_t *a = NULL;
+    pakka_error_t err;
+    pakka_status_t s;
+    void *out = NULL;
+    size_t out_len = 0;
+    size_t i;
+
+    memset(payload, 0, sizeof payload);     /* zero-run: DK compresses it */
+    snprintf(pak_path, sizeof pak_path, "%s/c_api_atomic_dk.pak", scratch_dir);
+
+    {
+        const char *names[]  = {"seed.txt"};
+        const char *bodies[] = {"seed"};
+        if (atomic_make_pak(pak_path, PAKKA_FORMAT_DAIKATANA, names, bodies, 1)
+            != 0)
+            FAIL("build DK base");
+    }
+
+    s = pakka_open_ex(pak_path, PAKKA_OPEN_READ_WRITE_ATOMIC,
+                      PAKKA_FORMAT_DAIKATANA, &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "open DK atomic");
+    /* .bmp is a DK-compressible extension → staged as compressed bytes. */
+    s = pakka_add_memory(a, "img.bmp", payload, sizeof payload, &err);
+    EXPECT_EQ(s, PAKKA_OK, "DK atomic add compressible");
+
+    /* read-before-commit must inflate the staged compressed payload. */
+    s = pakka_read_entry_alloc(a, "img.bmp", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read staged DK before commit");
+    if (out_len != sizeof payload) FAIL("staged DK length %zu", out_len);
+    for (i = 0; i < sizeof payload; i++) {
+        if (((unsigned char *)out)[i] != 0)
+            FAIL("staged DK inflated byte %zu nonzero", i);
+    }
+    pakka_free(out); out = NULL;
+
+    s = pakka_commit(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "DK atomic commit");
+    s = pakka_close(a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "DK atomic close");
+    a = NULL;
+
+    s = pakka_open_ex(pak_path, PAKKA_OPEN_READ, PAKKA_FORMAT_DAIKATANA,
+                      &a, &err);
+    EXPECT_EQ(s, PAKKA_OK, "reopen DK");
+    s = pakka_read_entry_alloc(a, "img.bmp", &out, &out_len, &err);
+    EXPECT_EQ(s, PAKKA_OK, "read committed DK");
+    if (out_len != sizeof payload) FAIL("committed DK length %zu", out_len);
+    pakka_free(out);
+    pakka_close(a, NULL);
+    (void)remove(pak_path);
+    return 0;
+}
+
 int main(int argc, char **argv) {
     if (argc != 3) {
         fprintf(stderr, "usage: %s <pak0.pak> <scratch_dir>\n", argv[0]);
@@ -1362,6 +1746,11 @@ int main(int argc, char **argv) {
     if (test_memory_apis(argv[2]) != 0) return 1;
     if (test_verify(argv[1], argv[2]) != 0) return 1;
     if (test_set_compression(argv[2]) != 0) return 1;
+    if (test_atomic_query(argv[2]) != 0) return 1;
+    if (test_atomic_add_roundtrip(argv[2]) != 0) return 1;
+    if (test_atomic_toctou(argv[2]) != 0) return 1;
+    if (test_atomic_pending_reads(argv[2]) != 0) return 1;
+    if (test_atomic_dk_pending(argv[2]) != 0) return 1;
 
     printf("c_api_test: OK\n");
     return 0;

@@ -65,7 +65,7 @@
 #define PK3_MAX_CDR_SIZE ((uint64_t)64u * 1024u * 1024u)
 
 /* IEEE 802.3 CRC32 lookup table — one entry per byte value. */
-#define PK3_CRC32_TABLE_SIZE 256u
+#define PAKKA_CRC32_TABLE_SIZE 256u
 
 /* These struct tags match the opaque forward declarations in
  * include/pakka.h. Public consumers see only the tag; the full
@@ -80,23 +80,31 @@ struct pakka_entry {
     uint32_t pk3_compressed_size;   /* bytes between LFH and CDR */
     uint32_t pk3_payload_offset;    /* cached lfh_offset + 30 + name + extra */
     uint32_t pk3_lfh_offset;        /* offset of LFH for verify cross-check */
-    uint32_t pk3_crc32;
     uint16_t pk3_method;            /* PK3_METHOD_STORED or PK3_METHOD_DEFLATE */
+
+    /* IEEE 802.3 CRC32. For committed ZIP entries this is the persisted
+     * LFH/CDR value (verify cross-checks against it). For a PAK-class
+     * entry staged under PAKKA_OPEN_READ_WRITE_ATOMIC it is transient: the
+     * source's add-time CRC, re-checked at commit to catch a same-size
+     * content swap (PAK has no on-disk CRC field, so it is never written). */
+    uint32_t crc32;
 
     /* Daikatana fields. Zero for PAK/SiN entries. */
     uint32_t dk_compressed_size;    /* on-disk bytes for DK compressed entries */
     uint8_t  dk_is_compressed;      /* 0 = STORED, 1 = custom byte-codec */
 
-    /* ZIP queued-add bookkeeping. When non-NULL, the entry's payload
-     * hasn't been written into the archive yet — pakka_pk3_add_file_impl
-     * staged metadata only, and pk3_commit's rebuild path will stream
-     * from the source path or in-memory buffer at commit time. Pairs
-     * exclusively (a queued entry has exactly one of source/data set,
-     * not both). Both NULL for entries loaded from the on-disk archive
-     * and for non-ZIP entries. */
-    char    *pk3_pending_source;    /* strdup'd source path */
-    void    *pk3_pending_data;      /* malloc'd payload buffer */
-    size_t   pk3_pending_data_len;  /* length of pk3_pending_data */
+    /* Pending-add bookkeeping. When non-NULL, the entry's payload hasn't
+     * been written into the archive yet — the add staged metadata only,
+     * and the rebuild commit path streams from the source path or the
+     * in-memory buffer at commit time. Used by ZIP queued adds
+     * (pakka_pk3_add_file_impl) and by PAK-class atomic-mode adds
+     * (PAKKA_OPEN_READ_WRITE_ATOMIC). Pairs exclusively (a staged entry
+     * has exactly one of source/data set, not both). Both NULL for
+     * entries loaded from the on-disk archive and for non-atomic PAK adds
+     * (which stream immediately). */
+    char    *pending_source;    /* strdup'd source path */
+    void    *pending_data;      /* malloc'd payload buffer */
+    size_t   pending_data_len;  /* length of pending_data */
 };
 
 typedef struct pakka_entry Pakfileentry_t;
@@ -148,7 +156,13 @@ typedef struct {
 
 const pakka_pak_geometry_t *pakka_pak_geometry(pakka_format_t fmt);
 
-/* Release an entry plus any owned pending-add bookkeeping (ZIP queued
+/* IEEE 802.3 CRC32 over buf, chained from a prior result (pass 0 to
+ * start). Internal helper shared by the ZIP path (LFH/CDR CRC fields)
+ * and the PAK atomic-staging path (transient add-vs-commit check). */
+uint32_t pakka_crc32_update(uint32_t crc, const unsigned char *buf,
+                            size_t len);
+
+/* Release an entry plus any owned pending-add bookkeeping (staged
  * source paths or in-memory payload buffers). Safe on NULL. Replaces
  * raw free(entry) at every entry-release site so adding a new owned
  * field to pakka_entry can't leak. */
@@ -191,6 +205,12 @@ struct pakka_archive {
     int writable;                   /* 1 if pak->fp is r+b (PAKKA_OPEN_READ_WRITE or create) */
     int dirty;                      /* 1 if pakka_add/delete have unflushed changes */
     int needs_rebuild;              /* 1 if any pakka_delete touched the entry list — commit must rebuild via temp */
+    /* PAK-class only: when 1 (set from PAKKA_OPEN_READ_WRITE_ATOMIC), adds
+     * stage instead of streaming into the live file and every dirty commit
+     * goes through the temp-rebuild + rename path, so an interrupted commit
+     * can't corrupt the published archive. No effect on ZIP (always atomic)
+     * or on a pakka_create archive (already published via temp + rename). */
+    int atomic_commit;
 
     /* Caller-supplied format hint from pakka_open_ex. AUTO means "probe
      * and decide from the on-disk magic + layout"; any other value
@@ -300,7 +320,7 @@ pakka_status_t pakka_pk3_add_memory_impl(struct pakka_archive *pak,
 pakka_status_t pakka_pk3_commit_impl(struct pakka_archive *pak,
                                      pakka_error_t *err);
 /* Deep verify: decompress an entry through pakka_inflate (or read as
- * STORED), confirm the uncompressed bytes hash to entry->pk3_crc32 and
+ * STORED), confirm the uncompressed bytes hash to entry->crc32 and
  * total entry->length bytes. Returns OK or a populated err on
  * mismatch. */
 pakka_status_t pakka_pk3_deep_verify_entry(struct pakka_archive *pak,
